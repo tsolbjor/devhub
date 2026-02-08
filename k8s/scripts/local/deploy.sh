@@ -160,7 +160,7 @@ add_helm_repos() {
     log_step "Adding Helm repositories..."
     
     helm repo add jetstack https://charts.jetstack.io 2>/dev/null || true
-    helm repo add bitnami https://charts.bitnami.com/bitnami 2>/dev/null || true
+    helm repo add codecentric https://codecentric.github.io/helm-charts 2>/dev/null || true
     helm repo add hashicorp https://helm.releases.hashicorp.com 2>/dev/null || true
     helm repo add external-secrets https://charts.external-secrets.io 2>/dev/null || true
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
@@ -235,22 +235,34 @@ install_keycloak() {
     
     kubectl create namespace keycloak 2>/dev/null || true
     
+    # Create admin credentials secret if not exists
     if ! kubectl get secret keycloak-admin-secret -n keycloak &>/dev/null; then
+        local ADMIN_PASSWORD=$(openssl rand -base64 24)
         kubectl create secret generic keycloak-admin-secret -n keycloak \
-            --from-literal=admin-password="$(openssl rand -base64 24)"
+            --from-literal=KEYCLOAK_ADMIN=admin \
+            --from-literal=KEYCLOAK_ADMIN_PASSWORD="$ADMIN_PASSWORD"
     fi
     
-    if ! kubectl get secret keycloak-postgresql-secret -n keycloak &>/dev/null; then
-        kubectl create secret generic keycloak-postgresql-secret -n keycloak \
-            --from-literal=postgres-password="$(openssl rand -base64 24)" \
-            --from-literal=password="$(openssl rand -base64 24)"
+    # Create PostgreSQL credentials secret if not exists
+    if ! kubectl get secret keycloak-db-secret -n keycloak &>/dev/null; then
+        local PG_PASSWORD=$(openssl rand -base64 24)
+        kubectl create secret generic keycloak-db-secret -n keycloak \
+            --from-literal=password="$PG_PASSWORD" \
+            --from-literal=postgres-password="$PG_PASSWORD"
     fi
+    
+    # Deploy PostgreSQL for Keycloak (uses official postgres image)
+    log_info "Deploying PostgreSQL for Keycloak..."
+    kubectl apply -f "${BASE_DIR}/devops/keycloak/postgresql.yaml"
+    
+    # Wait for PostgreSQL to be ready
+    log_info "Waiting for PostgreSQL to be ready..."
+    kubectl wait --for=condition=ready pod -l app=keycloak-postgresql -n keycloak --timeout=120s || true
     
     local values_args=$(get_values_args "keycloak")
     
-    helm upgrade --install keycloak bitnami/keycloak \
+    helm upgrade --install keycloak codecentric/keycloakx \
         --namespace keycloak \
-        --version 24.4.0 \
         $values_args \
         --wait --timeout 10m
     
@@ -411,6 +423,7 @@ delete_devops() {
     helm uninstall promtail -n monitoring 2>/dev/null || true
     helm uninstall vault -n vault 2>/dev/null || true
     helm uninstall keycloak -n keycloak 2>/dev/null || true
+    kubectl delete -f "${BASE_DIR}/devops/keycloak/postgresql.yaml" 2>/dev/null || true
     helm uninstall external-secrets -n external-secrets 2>/dev/null || true
     helm uninstall cert-manager -n cert-manager 2>/dev/null || true
     

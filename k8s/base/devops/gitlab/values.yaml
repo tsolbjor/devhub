@@ -6,6 +6,9 @@
 #   - overlays/local/devops/gitlab/values.yaml
 #   - overlays/upcloud/devops/gitlab/values.yaml
 
+# Disable cert-manager subchart (we use our own)
+installCertmanager: false
+
 # Global settings
 global:
   # Default domain - overridden by overlays
@@ -27,29 +30,28 @@ global:
     tls:
       enabled: true
 
-  # Use cert-manager for TLS
-  certmanager:
-    install: false
+  # cert-manager TLS is handled by our existing cert-manager
+  # Note: configureCertmanager is set above in ingress section
 
   # Use external PostgreSQL or bundled
-  psql:
-    # For production, use external PostgreSQL
-    # host: postgresql.database.svc.cluster.local
-    # port: 5432
-    # database: gitlab
-    # username: gitlab
-    # password:
-    #   secret: gitlab-postgresql-secret
-    #   key: password
+  # For production, uncomment and configure external postgres
+  # psql:
+  #   host: postgresql.database.svc.cluster.local
+  #   port: 5432
+  #   database: gitlab
+  #   username: gitlab
+  #   password:
+  #     secret: gitlab-postgresql-secret
+  #     key: password
     
   # Use external Redis or bundled
-  redis:
-    # For production, use external Redis
-    # host: redis.database.svc.cluster.local
-    # port: 6379
-    # password:
-    #   secret: gitlab-redis-secret
-    #   key: password
+  # For production, uncomment and configure external redis
+  # redis:
+  #   host: redis.database.svc.cluster.local
+  #   port: 6379
+  #   password:
+  #     secret: gitlab-redis-secret
+  #     key: password
   
   # GitLab Shell settings
   shell:
@@ -162,7 +164,7 @@ nginx-ingress:
   enabled: false
 
 certmanager:
-  install: false
+  installCRDs: false
 
 prometheus:
   install: false

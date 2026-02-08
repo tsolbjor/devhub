@@ -1,26 +1,70 @@
 # Keycloak Helm values
-# Chart: bitnami/keycloak
-# Docs: https://github.com/bitnami/charts/tree/main/bitnami/keycloak
+# Chart: codecentric/keycloakx
+# Docs: https://github.com/codecentric/helm-charts/tree/master/charts/keycloakx
 #
 # Domain configuration is provided by overlays:
 #   - overlays/local/devops/keycloak/values.yaml
 #   - overlays/upcloud/devops/keycloak/values.yaml
 
-auth:
-  # Initial admin credentials - CHANGE THESE
-  adminUser: admin
-  # Use existingSecret in production
-  adminPassword: ""
-  existingSecret: keycloak-admin-secret
-  passwordSecretKey: admin-password
+# Use official Keycloak image from quay.io
+image:
+  repository: quay.io/keycloak/keycloak
+  tag: "26.0"
+  pullPolicy: IfNotPresent
 
-# Production mode
-production: true
-proxyHeaders: xforwarded  # Required for production mode when TLS terminated at ingress
+# Number of replicas (override in local overlay for single replica)
+replicas: 2
 
-# Replicas for HA
-replicaCount: 2
+# Command to run Keycloak (production mode)
+command:
+  - "/opt/keycloak/bin/kc.sh"
+args:
+  - "start"
+  - "--hostname-strict=false"
+  - "--cache=local"
 
+# Database configuration - uses external PostgreSQL
+database:
+  vendor: postgres
+  hostname: keycloak-postgresql
+  port: 5432
+  database: keycloak
+  username: keycloak
+  existingSecret: keycloak-db-secret
+  existingSecretKey: password
+
+# Admin credentials from secret
+extraEnv: |
+  - name: KEYCLOAK_ADMIN
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-admin-secret
+        key: KEYCLOAK_ADMIN
+  - name: KEYCLOAK_ADMIN_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-admin-secret
+        key: KEYCLOAK_ADMIN_PASSWORD
+  - name: KC_FEATURES
+    value: "token-exchange,admin-fine-grained-authz"
+
+# Proxy configuration for TLS termination at ingress
+proxy:
+  enabled: true
+  mode: xforwarded
+
+# Health and metrics
+health:
+  enabled: true
+
+metrics:
+  enabled: true
+
+# HTTP configuration
+http:
+  relativePath: "/"
+
+# Resources
 resources:
   requests:
     cpu: 500m
@@ -29,37 +73,31 @@ resources:
     cpu: 1000m
     memory: 1Gi
 
-# Use PostgreSQL for production
-postgresql:
-  enabled: true
-  auth:
-    # Use existingSecret in production
-    existingSecret: keycloak-postgresql-secret
-    secretKeys:
-      adminPasswordKey: postgres-password
-      userPasswordKey: password
-  primary:
-    persistence:
-      enabled: true
-      size: 8Gi
+# Service
+service:
+  type: ClusterIP
+  httpPort: 80
+  annotations: {}
 
 # Ingress - domain/annotations overridden by overlays
 ingress:
   enabled: true
   ingressClassName: nginx
-  hostname: keycloak.example.com
-  path: /
   annotations:
     nginx.ingress.kubernetes.io/proxy-buffer-size: "128k"
-  tls: true
+  rules:
+    - host: keycloak.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
 
-# Prometheus metrics
-metrics:
+# ServiceMonitor for Prometheus
+serviceMonitor:
   enabled: true
-  serviceMonitor:
-    enabled: true
+  interval: 30s
 
-# Extra environment variables for OIDC configuration
-extraEnvVars:
-  - name: KC_FEATURES
-    value: "token-exchange,admin-fine-grained-authz"
+# Service account
+serviceAccount:
+  create: true
+  name: ""
