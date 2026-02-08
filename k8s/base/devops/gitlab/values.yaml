@@ -67,16 +67,16 @@ global:
     #   secret: gitlab-smtp-secret
     #   key: password
 
-  # OAuth/OIDC with Keycloak
-  appConfig:
-    omniauth:
-      enabled: true
-      allowSingleSignOn: ['openid_connect']
-      blockAutoCreatedUsers: false
-      autoLinkUser: true
-      providers:
-        - secret: gitlab-keycloak-oidc
-          key: provider
+  # OAuth/OIDC with Keycloak - enable after creating gitlab-keycloak-oidc secret
+  # appConfig:
+  #   omniauth:
+  #     enabled: true
+  #     allowSingleSignOn: ['openid_connect']
+  #     blockAutoCreatedUsers: false
+  #     autoLinkUser: true
+  #     providers:
+  #       - secret: gitlab-keycloak-oidc
+  #         key: provider
 
   # Timezone
   time_zone: UTC
@@ -134,9 +134,7 @@ registry:
     limits:
       cpu: 500m
       memory: 512Mi
-  storage:
-    secret: gitlab-registry-storage
-    key: config
+  # Storage uses bundled minio by default
 
 # Bundled PostgreSQL (use external for production)
 postgresql:

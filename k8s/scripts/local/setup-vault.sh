@@ -21,16 +21,19 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
 
+# Vault uses HTTP internally (TLS at ingress)
+VAULT_EXEC="kubectl exec -n vault vault-0 -- env VAULT_ADDR=http://127.0.0.1:8200"
+
 # Check if Vault is already initialized
 check_vault_status() {
-    kubectl exec -n vault vault-0 -- vault status 2>/dev/null || true
+    $VAULT_EXEC vault status 2>/dev/null || true
 }
 
 # Initialize Vault
 init_vault() {
     log_step "Initializing Vault..."
     
-    local status=$(kubectl exec -n vault vault-0 -- vault status -format=json 2>/dev/null || echo '{"initialized": false}')
+    local status=$($VAULT_EXEC vault status -format=json 2>/dev/null || echo '{"initialized": false}')
     
     if echo "$status" | grep -q '"initialized": true'; then
         log_warn "Vault is already initialized"
@@ -40,7 +43,7 @@ init_vault() {
     log_info "Initializing Vault with 5 key shares, 3 threshold..."
     
     # Initialize and save keys
-    local init_output=$(kubectl exec -n vault vault-0 -- vault operator init -format=json)
+    local init_output=$($VAULT_EXEC vault operator init -format=json)
     
     echo "$init_output" > "${SCRIPT_DIR}/vault-init-keys.json"
     chmod 600 "${SCRIPT_DIR}/vault-init-keys.json"
@@ -73,7 +76,7 @@ unseal_vault() {
     for pod in vault-0 vault-1 vault-2; do
         log_info "Unsealing $pod..."
         for key in $keys; do
-            kubectl exec -n vault $pod -- vault operator unseal "$key" 2>/dev/null || true
+            kubectl exec -n vault $pod -- env VAULT_ADDR=http://127.0.0.1:8200 vault operator unseal "$key" 2>/dev/null || true
         done
     done
     
@@ -94,6 +97,7 @@ configure_k8s_auth() {
     # Enable Kubernetes auth
     kubectl exec -n vault vault-0 -- sh -c "
         export VAULT_TOKEN='${root_token}'
+        export VAULT_ADDR=http://127.0.0.1:8200
         vault auth enable kubernetes 2>/dev/null || true
         
         vault write auth/kubernetes/config \
@@ -114,6 +118,7 @@ create_external_secrets_role() {
     
     kubectl exec -n vault vault-0 -- sh -c "
         export VAULT_TOKEN='${root_token}'
+        export VAULT_ADDR=http://127.0.0.1:8200
         
         # Enable KV secrets engine v2
         vault secrets enable -path=secret kv-v2 2>/dev/null || true
@@ -146,6 +151,7 @@ create_example_secret() {
     
     kubectl exec -n vault vault-0 -- sh -c "
         export VAULT_TOKEN='${root_token}'
+        export VAULT_ADDR=http://127.0.0.1:8200
         
         vault kv put secret/example \
             username=admin \

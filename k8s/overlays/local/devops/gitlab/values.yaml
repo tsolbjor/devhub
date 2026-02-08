@@ -18,3 +18,8 @@ global:
     tls:
       enabled: true
       secretName: ${TLS_SECRET_NAME}
+
+# Disable GitLab Runner for local - needs DNS resolution to gitlab.local.dev
+# Enable in production or after setting up external-dns / CoreDNS customization
+gitlab-runner:
+  install: false

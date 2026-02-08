@@ -8,9 +8,13 @@
 
 global:
   enabled: true
-  tlsDisable: false
+  tlsDisable: true  # Using TLS at ingress level, not in vault
 
 server:
+  # Set VAULT_ADDR to use HTTP inside cluster
+  extraEnvironmentVars:
+    VAULT_ADDR: "http://127.0.0.1:8200"
+  
   # Run in HA mode with Raft storage
   ha:
     enabled: true
