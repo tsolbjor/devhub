@@ -1,0 +1,178 @@
+# kube-prometheus-stack Helm values
+# Chart: prometheus-community/kube-prometheus-stack
+# Docs: https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack
+#
+# Domain configuration is provided by overlays:
+#   - overlays/local/devops/monitoring/values.yaml
+#   - overlays/upcloud/devops/monitoring/values.yaml
+
+# This includes: Prometheus, Alertmanager, Grafana, and various exporters
+
+# Prometheus
+prometheus:
+  prometheusSpec:
+    retention: 30d
+    retentionSize: 45GB
+    
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+    
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 50Gi
+    
+    # Service discovery for all namespaces
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    
+    # Additional scrape configs for external targets
+    additionalScrapeConfigs: []
+
+  # Ingress - domain/annotations overridden by overlays
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+      - prometheus.example.com
+    annotations: {}
+    tls:
+      - secretName: prometheus-tls
+        hosts:
+          - prometheus.example.com
+
+# Alertmanager
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+
+  # Ingress - domain/annotations overridden by overlays
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+      - alertmanager.example.com
+    annotations: {}
+    tls:
+      - secretName: alertmanager-tls
+        hosts:
+          - alertmanager.example.com
+
+# Grafana
+grafana:
+  adminPassword: ""  # Use existingSecret
+  admin:
+    existingSecret: grafana-admin-secret
+    userKey: admin-user
+    passwordKey: admin-password
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  persistence:
+    enabled: true
+    size: 5Gi
+
+  # Ingress - domain/annotations overridden by overlays
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+      - grafana.example.com
+    annotations: {}
+    tls:
+      - secretName: grafana-tls
+        hosts:
+          - grafana.example.com
+
+  # Keycloak SSO integration - domain overridden by overlays
+  grafana.ini:
+    server:
+      root_url: https://grafana.example.com
+    auth.generic_oauth:
+      enabled: true
+      name: Keycloak
+      allow_sign_up: true
+      client_id: grafana
+      # client_secret from existingSecret
+      scopes: openid email profile
+      auth_url: https://keycloak.example.com/realms/devops/protocol/openid-connect/auth
+      token_url: https://keycloak.example.com/realms/devops/protocol/openid-connect/token
+      api_url: https://keycloak.example.com/realms/devops/protocol/openid-connect/userinfo
+      role_attribute_path: contains(roles[*], 'admin') && 'Admin' || contains(roles[*], 'editor') && 'Editor' || 'Viewer'
+
+  # Additional data sources (Loki, Tempo)
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      url: http://loki-gateway.monitoring.svc.cluster.local:80
+      access: proxy
+      isDefault: false
+      jsonData:
+        derivedFields:
+          - datasourceUid: tempo
+            matcherRegex: "traceID=(\\w+)"
+            name: TraceID
+            url: "$${__value.raw}"
+    - name: Tempo
+      type: tempo
+      uid: tempo
+      url: http://tempo.monitoring.svc.cluster.local:3100
+      access: proxy
+      isDefault: false
+      jsonData:
+        tracesToLogs:
+          datasourceUid: loki
+          tags: ['job', 'namespace', 'pod']
+        serviceMap:
+          datasourceUid: prometheus
+        nodeGraph:
+          enabled: true
+        lokiSearch:
+          datasourceUid: loki
+
+# Node exporter for node metrics
+nodeExporter:
+  enabled: true
+
+# kube-state-metrics
+kubeStateMetrics:
+  enabled: true
+
+# Prometheus operator
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi

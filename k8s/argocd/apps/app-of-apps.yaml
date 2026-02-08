@@ -1,0 +1,38 @@
+# App-of-Apps: Root ArgoCD Application
+# This application manages all other applications in this directory
+# Deploy this once and it will sync all application manifests automatically
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tshub-apps
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    # Update this to your Git repository URL
+    repoURL: https://gitlab.local.dev/tshub/tshub2.git
+    targetRevision: HEAD
+    path: k8s/argocd/apps
+    directory:
+      recurse: false
+      exclude: 'app-of-apps.yaml'  # Don't include self
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

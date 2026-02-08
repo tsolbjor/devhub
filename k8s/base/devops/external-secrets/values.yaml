@@ -1,0 +1,40 @@
+# External Secrets Operator Helm values
+# Chart: external-secrets/external-secrets
+# Docs: https://external-secrets.io/
+
+# Install CRDs
+installCRDs: true
+
+replicaCount: 2
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+webhook:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+certController:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# Prometheus metrics
+serviceMonitor:
+  enabled: true

@@ -1,0 +1,23 @@
+# ArgoCD local overlay values
+# Merged with base/devops/argocd/values.yaml
+# Uses ${DOMAIN} and ${TLS_SECRET_NAME} from config.yaml
+
+global:
+  domain: argocd.${DOMAIN}
+
+server:
+  ingress:
+    annotations: {}
+    extraTls:
+      - secretName: ${TLS_SECRET_NAME}
+        hosts:
+          - argocd.${DOMAIN}
+  
+  config:
+    url: https://argocd.${DOMAIN}
+    oidc.config: |
+      name: Keycloak
+      issuer: https://keycloak.${DOMAIN}/realms/devops
+      clientID: argocd
+      clientSecret: $oidc.keycloak.clientSecret
+      requestedScopes: ["openid", "profile", "email", "groups"]

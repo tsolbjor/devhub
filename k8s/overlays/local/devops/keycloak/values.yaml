@@ -1,0 +1,12 @@
+# Keycloak local overlay values
+# Merged with base/devops/keycloak/values.yaml
+# Uses ${DOMAIN} and ${TLS_SECRET_NAME} from config.yaml
+
+ingress:
+  hostname: keycloak.${DOMAIN}
+  annotations: {}
+  tls: true
+  extraTls:
+    - secretName: ${TLS_SECRET_NAME}
+      hosts:
+        - keycloak.${DOMAIN}

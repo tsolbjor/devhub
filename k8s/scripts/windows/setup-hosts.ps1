@@ -29,10 +29,20 @@ Write-Host ""
 
 # Domains to add to hosts file
 $Domains = @(
+    # Application domains
     "local.dev",
     "app.local.dev",
     "api.local.dev",
-    "auth.local.dev"
+    "auth.local.dev",
+    "hello.local.dev",
+    # DevOps domains
+    "keycloak.local.dev",
+    "vault.local.dev",
+    "gitlab.local.dev",
+    "registry.local.dev",
+    "argocd.local.dev",
+    "grafana.local.dev",
+    "prometheus.local.dev"
 )
 
 $HostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"

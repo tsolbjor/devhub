@@ -1,0 +1,5 @@
+# cert-manager UpCloud overlay values
+# ClusterIssuer configuration
+
+# ACME email - replaced by deploy script with $ACME_EMAIL
+acmeEmail: ${ACME_EMAIL}

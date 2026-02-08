@@ -1,0 +1,20 @@
+# GitLab UpCloud overlay values
+# Merged with base/devops/gitlab/values.yaml
+# Domain is templated - replaced by deploy script with $DOMAIN
+
+global:
+  hosts:
+    domain: ${DOMAIN}
+    gitlab:
+      name: gitlab.${DOMAIN}
+    registry:
+      name: registry.${DOMAIN}
+    minio:
+      name: minio.${DOMAIN}
+  
+  ingress:
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    configureCertmanager: false
+    tls:
+      enabled: true

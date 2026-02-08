@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# DevOps platform local overlay
+# Ingress configurations for local development
+
+resources:
+  - ingress.yaml
+
+labels:
+  - pairs:
+      environment: local
+      component: devops

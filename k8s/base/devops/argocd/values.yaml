@@ -1,0 +1,140 @@
+# ArgoCD Helm values
+# Chart: argo/argo-cd
+# Docs: https://argo-cd.readthedocs.io/
+#
+# Domain configuration is provided by overlays:
+#   - overlays/local/devops/argocd/values.yaml
+#   - overlays/upcloud/devops/argocd/values.yaml
+
+# Global - domain overridden by overlays
+global:
+  domain: argocd.example.com
+
+# Server
+server:
+  replicas: 2
+  
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  
+  # Ingress - annotations overridden by overlays
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations: {}
+    tls: true
+  
+  # SSO config - domain overridden by overlays
+  config:
+    url: https://argocd.example.com
+    oidc.config: |
+      name: Keycloak
+      issuer: https://keycloak.example.com/realms/devops
+      clientID: argocd
+      clientSecret: $oidc.keycloak.clientSecret
+      requestedScopes: ["openid", "profile", "email", "groups"]
+    
+    # RBAC
+    policy.default: role:readonly
+    policy.csv: |
+      g, /devops-admins, role:admin
+      g, /developers, role:readonly
+
+  # Metrics
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+# Repo server
+repoServer:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+# Application controller
+controller:
+  replicas: 1  # Controller runs as singleton
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+# Redis
+redis:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# ApplicationSet controller
+applicationSet:
+  enabled: true
+  replicas: 2
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# Notifications
+notifications:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# Dex (disable if using Keycloak directly)
+dex:
+  enabled: false
+
+# Config Management Plugins (optional)
+configs:
+  # Known hosts for Git SSH
+  ssh:
+    knownHosts: |
+      # Add your GitLab server's SSH host key
+      # gitlab.devops.example.com ssh-rsa AAAA...
+  
+  # Repository credentials
+  repositories:
+    # Configure via UI or CLI after installation
+    # Or use credentialTemplates for URL patterns
+  
+  # Keycloak client secret (reference from external secret)
+  secret:
+    extra:
+      oidc.keycloak.clientSecret: ""

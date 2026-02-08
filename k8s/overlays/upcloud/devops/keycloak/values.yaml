@@ -1,0 +1,8 @@
+# Keycloak UpCloud overlay values
+# Merged with base/devops/keycloak/values.yaml
+
+ingress:
+  hostname: keycloak.${DOMAIN}
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls: true

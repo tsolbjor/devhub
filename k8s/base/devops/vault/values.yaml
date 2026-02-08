@@ -1,0 +1,93 @@
+# HashiCorp Vault Helm values
+# Chart: hashicorp/vault
+# Docs: https://developer.hashicorp.com/vault/docs/platform/k8s/helm
+#
+# Domain configuration is provided by overlays:
+#   - overlays/local/devops/vault/values.yaml
+#   - overlays/upcloud/devops/vault/values.yaml
+
+global:
+  enabled: true
+  tlsDisable: false
+
+server:
+  # Run in HA mode with Raft storage
+  ha:
+    enabled: true
+    replicas: 3
+    raft:
+      enabled: true
+      setNodeId: true
+      config: |
+        ui = true
+
+        listener "tcp" {
+          tls_disable = 1
+          address = "[::]:8200"
+          cluster_address = "[::]:8201"
+        }
+
+        storage "raft" {
+          path = "/vault/data"
+        }
+
+        service_registration "kubernetes" {}
+
+  # Resources
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Persistent storage
+  dataStorage:
+    enabled: true
+    size: 10Gi
+    storageClass: null  # Use default
+
+  # Ingress - domain overridden by overlays
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+      - host: vault.example.com
+        paths: []
+    annotations: {}
+    tls:
+      - secretName: vault-tls
+        hosts:
+          - vault.example.com
+
+  # Audit logging
+  auditStorage:
+    enabled: true
+    size: 10Gi
+
+# Vault UI
+ui:
+  enabled: true
+  serviceType: ClusterIP
+
+# Injector for sidecar injection
+injector:
+  enabled: true
+  replicas: 2
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+# CSI provider (alternative to injector)
+csi:
+  enabled: false
+
+# Prometheus metrics
+serverTelemetry:
+  serviceMonitor:
+    enabled: true

@@ -1,12 +1,15 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: tshub
+# This is the root kustomization for platform infrastructure
+# Applications are managed via ArgoCD (see argocd/apps/)
+#
+# Use overlays/local or overlays/upcloud for environment-specific deployments
 
 resources:
-  - namespace.yaml
+  - devops/namespaces/namespaces.yaml
 
 # Common labels applied to all resources
-commonLabels:
-  app.kubernetes.io/part-of: tshub
-  app.kubernetes.io/managed-by: kustomize
+labels:
+  - pairs:
+      app.kubernetes.io/managed-by: kustomize

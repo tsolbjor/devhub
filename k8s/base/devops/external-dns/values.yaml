@@ -1,0 +1,58 @@
+# external-dns Helm values
+# Chart: external-dns/external-dns
+# Docs: https://github.com/kubernetes-sigs/external-dns
+#
+# Domain configuration is provided by overlays:
+#   - overlays/upcloud/devops/external-dns/values.yaml
+
+# UPDATE: Configure for your DNS provider
+# Common providers: cloudflare, aws, azure, google, digitalocean
+
+# Example for Cloudflare:
+provider: cloudflare
+
+# Cloudflare configuration
+cloudflare:
+  # Set via secret or environment variable
+  apiToken: ""
+  proxied: false
+
+# Or use environment variables from a secret
+env:
+  - name: CF_API_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: external-dns-cloudflare
+        key: api-token
+        optional: true
+
+# Domain filter - overridden by overlays
+domainFilters: []
+
+# Don't create records, just log (for testing)
+# dryRun: true
+
+# Ownership tracking
+txtOwnerId: devops-cluster
+txtPrefix: externaldns-
+
+# How often to sync
+interval: 1m
+
+# Policy: sync (create/update/delete) or upsert-only (create/update only)
+policy: sync
+
+# Log level
+logLevel: info
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+# Prometheus metrics
+serviceMonitor:
+  enabled: true

@@ -1,0 +1,28 @@
+# UpCloud environment configuration
+# This file defines all environment-specific values for UpCloud deployment
+#
+# CUSTOMIZE: Update domain and acmeEmail before deploying
+
+# Domain configuration - UPDATE THIS
+domain: example.com
+
+# TLS configuration
+tls:
+  type: cert-manager
+  secretName: ""           # Let cert-manager create secrets
+  clusterIssuer: letsencrypt-prod
+
+# Email for ACME certificate notifications - UPDATE THIS
+acmeEmail: admin@example.com
+
+# Service subdomains (relative to domain)
+services:
+  keycloak: keycloak
+  vault: vault
+  gitlab: gitlab
+  registry: registry
+  argocd: argocd
+  grafana: grafana
+  prometheus: prometheus
+  alertmanager: alertmanager
+  minio: minio

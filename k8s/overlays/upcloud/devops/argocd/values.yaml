@@ -1,0 +1,19 @@
+# ArgoCD UpCloud overlay values
+# Merged with base/devops/argocd/values.yaml
+
+global:
+  domain: argocd.${DOMAIN}
+
+server:
+  ingress:
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+  
+  config:
+    url: https://argocd.${DOMAIN}
+    oidc.config: |
+      name: Keycloak
+      issuer: https://keycloak.${DOMAIN}/realms/devops
+      clientID: argocd
+      clientSecret: $oidc.keycloak.clientSecret
+      requestedScopes: ["openid", "profile", "email", "groups"]

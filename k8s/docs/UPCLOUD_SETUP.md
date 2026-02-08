@@ -73,7 +73,7 @@ kubectl get nodes
 
 ### Step 2: Configure Your Domains
 
-Edit [overlays/upcloud/ingress.yaml](../overlays/upcloud/ingress.yaml):
+Edit [overlays/upcloud/apps/ingress.yaml](../overlays/upcloud/apps/ingress.yaml):
 
 ```yaml
 spec:
@@ -138,7 +138,19 @@ dig app.yourdomain.com +short
 
 ```bash
 cd k8s/scripts/upcloud
-./deploy.sh
+
+# Set environment variables
+export DOMAIN=yourdomain.com
+export ACME_EMAIL=admin@yourdomain.com
+
+# Deploy everything (apps + devops)
+./deploy.sh upcloud all
+
+# Or deploy only apps
+./deploy.sh upcloud apps
+
+# Or deploy only devops platform
+./deploy.sh upcloud devops
 ```
 
 ### Step 7: Verify Certificate Issuance

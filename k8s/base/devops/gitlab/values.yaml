@@ -1,0 +1,190 @@
+# GitLab CE Helm values
+# Chart: gitlab/gitlab
+# Docs: https://docs.gitlab.com/charts/
+#
+# Domain configuration is provided by overlays:
+#   - overlays/local/devops/gitlab/values.yaml
+#   - overlays/upcloud/devops/gitlab/values.yaml
+
+# Global settings
+global:
+  # Default domain - overridden by overlays
+  hosts:
+    domain: example.com
+    gitlab:
+      name: gitlab.example.com
+    registry:
+      name: registry.example.com
+    minio:
+      name: minio.example.com
+    
+  # Use external ingress controller
+  ingress:
+    enabled: true
+    class: nginx
+    annotations: {}
+    configureCertmanager: false
+    tls:
+      enabled: true
+
+  # Use cert-manager for TLS
+  certmanager:
+    install: false
+
+  # Use external PostgreSQL or bundled
+  psql:
+    # For production, use external PostgreSQL
+    # host: postgresql.database.svc.cluster.local
+    # port: 5432
+    # database: gitlab
+    # username: gitlab
+    # password:
+    #   secret: gitlab-postgresql-secret
+    #   key: password
+    
+  # Use external Redis or bundled
+  redis:
+    # For production, use external Redis
+    # host: redis.database.svc.cluster.local
+    # port: 6379
+    # password:
+    #   secret: gitlab-redis-secret
+    #   key: password
+  
+  # GitLab Shell settings
+  shell:
+    port: 22
+
+  # SMTP settings for email
+  smtp:
+    enabled: false
+    # address: smtp.example.com
+    # port: 587
+    # user_name: gitlab@example.com
+    # password:
+    #   secret: gitlab-smtp-secret
+    #   key: password
+
+  # OAuth/OIDC with Keycloak
+  appConfig:
+    omniauth:
+      enabled: true
+      allowSingleSignOn: ['openid_connect']
+      blockAutoCreatedUsers: false
+      autoLinkUser: true
+      providers:
+        - secret: gitlab-keycloak-oidc
+          key: provider
+
+  # Timezone
+  time_zone: UTC
+
+# GitLab CE (not EE)
+gitlab:
+  webservice:
+    replicaCount: 2
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+    
+  sidekiq:
+    replicaCount: 1
+    resources:
+      requests:
+        cpu: 250m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+  
+  gitaly:
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+    persistence:
+      enabled: true
+      size: 50Gi
+  
+  gitlab-shell:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+# Container Registry
+registry:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  storage:
+    secret: gitlab-registry-storage
+    key: config
+
+# Bundled PostgreSQL (use external for production)
+postgresql:
+  install: true
+  persistence:
+    enabled: true
+    size: 20Gi
+
+# Bundled Redis (use external for production)
+redis:
+  install: true
+  persistence:
+    enabled: true
+    size: 5Gi
+
+# Bundled MinIO (use external S3 for production)
+minio:
+  install: true
+  persistence:
+    enabled: true
+    size: 50Gi
+
+# Don't install bundled nginx, cert-manager, prometheus
+nginx-ingress:
+  enabled: false
+
+certmanager:
+  install: false
+
+prometheus:
+  install: false
+
+# GitLab Runner
+gitlab-runner:
+  install: true
+  runners:
+    privileged: true  # Required for Docker-in-Docker
+    config: |
+      [[runners]]
+        [runners.kubernetes]
+          namespace = "gitlab"
+          image = "alpine:latest"
+          privileged = true
+          [[runners.kubernetes.volumes.pvc]]
+            name = "gitlab-runner-cache"
+            mount_path = "/cache"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

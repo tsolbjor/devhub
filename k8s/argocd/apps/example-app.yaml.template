@@ -1,0 +1,55 @@
+# Example Application Template
+# Copy this file and customize for your application
+# Remove the .template extension when ready to deploy
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-service
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: tshub
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: tshub
+
+  source:
+    # Git repository containing the application manifests
+    repoURL: https://gitlab.local.dev/tshub/my-service.git
+    targetRevision: HEAD  # or a specific branch/tag
+    path: k8s             # path to Kubernetes manifests
+
+    # For Helm charts:
+    # helm:
+    #   valueFiles:
+    #     - values.yaml
+    #     - values-local.yaml
+
+    # For Kustomize:
+    # kustomize:
+    #   namePrefix: prod-
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tshub
+
+  syncPolicy:
+    automated:
+      prune: true      # Delete resources removed from Git
+      selfHeal: true   # Correct drift from Git state
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # Health checks
+  # ignoreDifferences:
+  #   - group: apps
+  #     kind: Deployment
+  #     jsonPointers:
+  #       - /spec/replicas

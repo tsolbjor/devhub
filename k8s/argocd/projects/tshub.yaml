@@ -1,0 +1,56 @@
+# ArgoCD Project for tshub applications
+# Defines RBAC, allowed sources, and destinations
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: tshub
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: tshub application workloads
+
+  # Allowed source repositories
+  sourceRepos:
+    - '*'  # Allow all repos - restrict in production
+
+  # Allowed destination clusters and namespaces
+  destinations:
+    - namespace: tshub
+      server: https://kubernetes.default.svc
+    - namespace: tshub-*
+      server: https://kubernetes.default.svc
+
+  # Allowed cluster-scoped resources
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+
+  # Allowed namespace-scoped resource kinds
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+
+  # Deny certain resources (optional security)
+  # namespaceResourceBlacklist:
+  #   - group: ''
+  #     kind: ResourceQuota
+  #   - group: ''
+  #     kind: LimitRange
+
+  # Roles for this project
+  roles:
+    - name: developer
+      description: Developer access to tshub apps
+      policies:
+        - p, proj:tshub:developer, applications, get, tshub/*, allow
+        - p, proj:tshub:developer, applications, sync, tshub/*, allow
+      groups:
+        - developers
+
+    - name: admin
+      description: Admin access to tshub apps
+      policies:
+        - p, proj:tshub:admin, applications, *, tshub/*, allow
+      groups:
+        - admins

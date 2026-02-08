@@ -1,0 +1,27 @@
+# Local environment configuration
+# This file defines all environment-specific values for local deployment
+# Values are exported as environment variables by deploy.sh
+
+# Domain configuration
+domain: local.dev
+
+# TLS configuration
+tls:
+  type: local-ca           # local-ca or cert-manager
+  secretName: local-tls-secret
+  clusterIssuer: ""        # Not used for local
+
+# Email for ACME (not used locally)
+acmeEmail: ""
+
+# Service subdomains (relative to domain)
+services:
+  keycloak: keycloak
+  vault: vault
+  gitlab: gitlab
+  registry: registry
+  argocd: argocd
+  grafana: grafana
+  prometheus: prometheus
+  alertmanager: alertmanager
+  minio: minio

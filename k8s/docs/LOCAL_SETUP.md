@@ -47,7 +47,31 @@ This guide walks you through setting up trusted HTTPS for local Kubernetes devel
 
 ## Step-by-Step Setup
 
-### Step 1: Generate Certificates (WSL)
+### Quick Start (Fully Automated)
+
+For a completely automated setup with **zero manual intervention**, run:
+
+```bash
+cd k8s/scripts/local
+./setup-all.sh
+```
+
+This single command will:
+1. Generate CA and TLS certificates
+2. Install nginx-ingress controller
+3. Deploy all DevOps components (Keycloak, Vault, GitLab, ArgoCD, Monitoring)
+4. Initialize and unseal Vault
+5. Configure Keycloak realm and OIDC clients
+6. Wait for GitLab to be ready
+7. Bootstrap ArgoCD app-of-apps
+
+Estimated time: 20-40 minutes (GitLab takes the longest)
+
+### Manual Step-by-Step (Alternative)
+
+If you prefer to run each step manually:
+
+#### Step 1: Generate Certificates (WSL)
 
 ```bash
 cd k8s/scripts/local
@@ -59,7 +83,7 @@ This creates:
 - TLS certificates for `*.local.dev` domains
 - Kubernetes Secret and ConfigMap manifests
 
-### Step 2: Configure Windows (PowerShell as Administrator)
+#### Step 2: Configure Windows (PowerShell as Administrator)
 
 Navigate to the project directory and run:
 
@@ -82,7 +106,7 @@ Or run the scripts individually:
 - Installs the CA certificate so Windows browsers (Chrome, Edge) trust it
 - Adds entries to `C:\Windows\System32\drivers\etc\hosts`
 
-### Step 3: Set Up Kubernetes Cluster (WSL)
+#### Step 3: Set Up Kubernetes Cluster (WSL)
 
 ```bash
 cd k8s/scripts/local
@@ -94,18 +118,34 @@ This:
 - Creates the `tshub` namespace
 - Applies TLS secrets and CA certificates
 
-### Step 4: Deploy Your Services (WSL)
+#### Step 4: Deploy DevOps Platform (WSL)
 
 ```bash
 cd k8s/scripts/local
 ./deploy.sh
 ```
 
-### Step 5: Access Your Services
+#### Step 5: Configure Services (WSL)
+
+```bash
+# Initialize and configure Vault
+./setup-vault.sh
+
+# Configure Keycloak realm and OIDC clients
+./setup-keycloak.sh
+
+# Bootstrap ArgoCD app-of-apps
+./deploy.sh local bootstrap
+```
+
+#### Step 6: Access Your Services
 
 Open your browser and navigate to:
-- https://app.local.dev
-- https://api.local.dev
+- https://keycloak.local.dev
+- https://vault.local.dev
+- https://gitlab.local.dev
+- https://argocd.local.dev
+- https://grafana.local.dev
 
 You should see a valid (green padlock) HTTPS connection!
 
@@ -207,10 +247,11 @@ kubectl describe ingress -n tshub
 
 ## Adding New Domains
 
-1. Edit [setup-ca.sh](scripts/local/setup-ca.sh) and add domains to the `DOMAINS` array
+1. Edit [setup-ca.sh](../scripts/local/setup-ca.sh) and add domains to the `DOMAINS` array
 2. Re-run `./setup-ca.sh` (this regenerates certificates)
 3. Update `hosts` file on Windows: `.\setup-hosts.ps1`
-4. Update [ingress.yaml](overlays/local/ingress.yaml) with new routes
+4. Update [overlays/local/apps/ingress.yaml](../overlays/local/apps/ingress.yaml) for apps
+5. Or update [overlays/local/devops/ingress.yaml](../overlays/local/devops/ingress.yaml) for devops
 
 ## Firefox Support
 

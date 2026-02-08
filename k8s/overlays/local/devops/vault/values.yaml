@@ -1,0 +1,14 @@
+# Vault local overlay values
+# Merged with base/devops/vault/values.yaml
+# Uses ${DOMAIN} and ${TLS_SECRET_NAME} from config.yaml
+
+server:
+  ingress:
+    hosts:
+      - host: vault.${DOMAIN}
+        paths: []
+    annotations: {}
+    tls:
+      - secretName: ${TLS_SECRET_NAME}
+        hosts:
+          - vault.${DOMAIN}

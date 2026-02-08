@@ -1,0 +1,5 @@
+# external-dns UpCloud overlay values
+# Domain filter for DNS management
+
+domainFilters:
+  - ${DOMAIN}

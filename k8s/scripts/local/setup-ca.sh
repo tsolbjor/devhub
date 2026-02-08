@@ -19,12 +19,22 @@ CA_VALID_DAYS=3650  # 10 years
 CERT_VALID_DAYS=825 # ~2 years
 
 # Domains to generate certificates for
+# Application domains
 DOMAINS=(
     "local.dev"
     "*.local.dev"
     "app.local.dev"
     "api.local.dev"
     "auth.local.dev"
+    "hello.local.dev"
+    # DevOps domains
+    "keycloak.local.dev"
+    "vault.local.dev"
+    "gitlab.local.dev"
+    "registry.local.dev"
+    "argocd.local.dev"
+    "grafana.local.dev"
+    "prometheus.local.dev"
     "localhost"
 )
 

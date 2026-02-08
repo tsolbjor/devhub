@@ -1,0 +1,46 @@
+# Promtail Helm values (Log collection agent)
+# Chart: grafana/promtail
+# Docs: https://grafana.com/docs/loki/latest/clients/promtail/
+
+# Config
+config:
+  clients:
+    - url: http://loki-gateway.monitoring.svc.cluster.local:80/loki/api/v1/push
+      tenant_id: 1
+
+  snippets:
+    # Add pod labels
+    pipelineStages:
+      - cri: {}
+      - multiline:
+          firstline: '^\d{4}-\d{2}-\d{2}'
+          max_wait_time: 3s
+      - labeldrop:
+          - filename
+          - stream
+
+# Resources
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# Run as DaemonSet on all nodes
+daemonset:
+  enabled: true
+
+# Tolerations to run on all nodes including control plane
+tolerations:
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+
+# Service monitor for metrics
+serviceMonitor:
+  enabled: true

@@ -28,7 +28,7 @@ $issues = @()
 Write-Step "Checking hosts file..."
 $hostsContent = Get-Content "$env:SystemRoot\System32\drivers\etc\hosts" -Raw
 
-$domains = @("app.local.dev", "api.local.dev", "auth.local.dev")
+$domains = @("app.local.dev", "api.local.dev", "hello.local.dev", "keycloak.local.dev", "gitlab.local.dev", "argocd.local.dev", "grafana.local.dev")
 foreach ($domain in $domains) {
     if ($hostsContent -match $domain) {
         Write-Check "$domain is configured"

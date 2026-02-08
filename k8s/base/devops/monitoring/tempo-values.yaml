@@ -1,0 +1,62 @@
+# Tempo Helm values (Distributed tracing)
+# Chart: grafana/tempo
+# Docs: https://grafana.com/docs/tempo/latest/setup/helm-chart/
+
+# Single binary mode (simple, good for dev/small prod)
+tempo:
+  repository: grafana/tempo
+  tag: latest
+  
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+  # Receive traces via OTLP, Jaeger, Zipkin
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+    jaeger:
+      protocols:
+        thrift_http:
+          endpoint: "0.0.0.0:14268"
+        grpc:
+          endpoint: "0.0.0.0:14250"
+    zipkin:
+      endpoint: "0.0.0.0:9411"
+
+  # Storage configuration
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      wal:
+        path: /var/tempo/wal
+
+  # Retention
+  retention: 168h  # 7 days
+
+# Persistence
+persistence:
+  enabled: true
+  size: 50Gi
+
+# Service for receiving traces
+service:
+  type: ClusterIP
+
+# Metrics
+serviceMonitor:
+  enabled: true
+
+# Tempo query frontend (optional, for scaling reads)
+# queryFrontend:
+#   enabled: false

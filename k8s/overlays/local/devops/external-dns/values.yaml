@@ -1,0 +1,5 @@
+# external-dns local overlay
+# Not typically used for local development
+# DNS is managed via hosts file on Windows
+
+domainFilters: []

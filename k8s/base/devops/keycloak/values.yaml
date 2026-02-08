@@ -1,0 +1,65 @@
+# Keycloak Helm values
+# Chart: bitnami/keycloak
+# Docs: https://github.com/bitnami/charts/tree/main/bitnami/keycloak
+#
+# Domain configuration is provided by overlays:
+#   - overlays/local/devops/keycloak/values.yaml
+#   - overlays/upcloud/devops/keycloak/values.yaml
+
+auth:
+  # Initial admin credentials - CHANGE THESE
+  adminUser: admin
+  # Use existingSecret in production
+  adminPassword: ""
+  existingSecret: keycloak-admin-secret
+  passwordSecretKey: admin-password
+
+# Production mode
+production: true
+proxy: edge  # TLS terminated at ingress
+
+# Replicas for HA
+replicaCount: 2
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+# Use PostgreSQL for production
+postgresql:
+  enabled: true
+  auth:
+    # Use existingSecret in production
+    existingSecret: keycloak-postgresql-secret
+    secretKeys:
+      adminPasswordKey: postgres-password
+      userPasswordKey: password
+  primary:
+    persistence:
+      enabled: true
+      size: 8Gi
+
+# Ingress - domain/annotations overridden by overlays
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  hostname: keycloak.example.com
+  path: /
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "128k"
+  tls: true
+
+# Prometheus metrics
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+
+# Extra environment variables for OIDC configuration
+extraEnvVars:
+  - name: KC_FEATURES
+    value: "token-exchange,admin-fine-grained-authz"

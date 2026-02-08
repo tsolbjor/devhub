@@ -1,0 +1,38 @@
+# Monitoring local overlay values
+# Merged with base/devops/monitoring/prometheus-stack-values.yaml
+# Uses ${DOMAIN} and ${TLS_SECRET_NAME} from config.yaml
+
+prometheus:
+  ingress:
+    hosts:
+      - prometheus.${DOMAIN}
+    tls:
+      - secretName: ${TLS_SECRET_NAME}
+        hosts:
+          - prometheus.${DOMAIN}
+
+alertmanager:
+  ingress:
+    hosts:
+      - alertmanager.${DOMAIN}
+    tls:
+      - secretName: ${TLS_SECRET_NAME}
+        hosts:
+          - alertmanager.${DOMAIN}
+
+grafana:
+  ingress:
+    hosts:
+      - grafana.${DOMAIN}
+    tls:
+      - secretName: ${TLS_SECRET_NAME}
+        hosts:
+          - grafana.${DOMAIN}
+  
+  grafana.ini:
+    server:
+      root_url: https://grafana.${DOMAIN}
+    auth.generic_oauth:
+      auth_url: https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/auth
+      token_url: https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/token
+      api_url: https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/userinfo

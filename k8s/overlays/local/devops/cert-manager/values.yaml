@@ -1,0 +1,3 @@
+# cert-manager local overlay
+# Not used for local development (uses local CA instead)
+# This file exists for consistency but is skipped in local deploys
