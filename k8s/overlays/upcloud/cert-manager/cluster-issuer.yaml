@@ -1,0 +1,38 @@
+# cert-manager ClusterIssuer for Let's Encrypt
+# This issues real, trusted SSL certificates for production
+---
+# Staging issuer - use this for testing to avoid rate limits
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    # Staging server - certificates are NOT trusted but no rate limits
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    # Update with your email address
+    email: your-email@example.com
+    privateKeySecretRef:
+      name: letsencrypt-staging-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+---
+# Production issuer - use this for real certificates
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    # Production server - certificates ARE trusted
+    server: https://acme-v02.api.letsencrypt.org/directory
+    # Update with your email address
+    email: your-email@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx

@@ -1,0 +1,58 @@
+# Local Development Ingress Configuration
+# Uses locally generated TLS certificates
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tshub-ingress
+  namespace: tshub
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # WebSocket support
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/upstream-hash-by: "$the_real_ip"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - app.local.dev
+        - api.local.dev
+        - auth.local.dev
+      secretName: local-tls-secret
+  rules:
+    # Frontend application
+    - host: app.local.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
+    # API service
+    - host: api.local.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 80
+    # Auth service (if separate)
+    - host: auth.local.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: auth
+                port:
+                  number: 80

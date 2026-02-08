@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: tshub
+
+resources:
+  - ../../base
+  - ingress.yaml
+  - cert-manager/cluster-issuer.yaml
+
+commonLabels:
+  environment: production
+
+# Production-specific patches
+patches: []
+
+# ConfigMap generator for production settings
+configMapGenerator:
+  - name: production-config
+    literals:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=info
+      # Update these with your actual domains
+      - BASE_URL=https://app.yourdomain.com
+      - API_URL=https://api.yourdomain.com

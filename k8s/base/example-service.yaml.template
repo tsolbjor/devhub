@@ -1,0 +1,57 @@
+# Example service template - copy and modify for your services
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example-service
+  namespace: tshub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: example-service
+  template:
+    metadata:
+      labels:
+        app: example-service
+    spec:
+      containers:
+        - name: example-service
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          # Mount CA certificate for trusting local CA
+          volumeMounts:
+            - name: ca-certificates
+              mountPath: /etc/ssl/certs/local-ca.crt
+              subPath: ca.crt
+              readOnly: true
+          env:
+            # For Node.js applications
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/ssl/certs/local-ca.crt
+            # For .NET applications
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/certs/local-ca.crt
+      volumes:
+        - name: ca-certificates
+          configMap:
+            name: local-ca-certificates
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: example-service
+  namespace: tshub
+spec:
+  selector:
+    app: example-service
+  ports:
+    - port: 80
+      targetPort: 80

@@ -1,0 +1,2 @@
+# This directory contains generated certificates
+# Run scripts/local/setup-ca.sh to generate them
