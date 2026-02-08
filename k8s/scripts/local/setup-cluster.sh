@@ -102,6 +102,7 @@ install_nginx_ingress() {
         --set controller.config.compute-full-forwarded-for="true" \
         --set controller.config.use-proxy-protocol="false" \
         --set controller.extraArgs.default-ssl-certificate="tshub/local-tls-secret" \
+        --set controller.admissionWebhooks.enabled=false \
         --wait \
         --timeout 5m
     
@@ -227,9 +228,9 @@ main() {
     
     check_requirements
     check_certificates
-    install_nginx_ingress
     create_namespace
     apply_secrets
+    install_nginx_ingress
     wait_for_ingress
     configure_coredns
     print_summary

@@ -1,15 +1,15 @@
-# Loki Helm values (Distributed mode)
+# Loki Helm values (Single Binary mode for local/small deployments)
 # Chart: grafana/loki
 # Docs: https://grafana.com/docs/loki/latest/installation/helm/
 
-# Deploy in simple scalable mode (good for medium workloads)
-deploymentMode: SimpleScalable
+# Use SingleBinary mode for local development (no object storage required)
+deploymentMode: SingleBinary
 
 loki:
   auth_enabled: false
   
   commonConfig:
-    replication_factor: 2
+    replication_factor: 1
   
   storage:
     type: filesystem
@@ -24,53 +24,34 @@ loki:
           prefix: loki_index_
           period: 24h
 
-# Single binary mode for simpler setup (alternative to SimpleScalable)
-# singleBinary:
-#   replicas: 1
+# Single binary mode for simpler setup
+singleBinary:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    size: 10Gi
 
-# Read path
+# Disable read/write/backend separation (not needed for SingleBinary)
 read:
-  replicas: 2
-  resources:
-    requests:
-      cpu: 200m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
+  replicas: 0
 
-# Write path
 write:
-  replicas: 2
-  resources:
-    requests:
-      cpu: 200m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
-  persistence:
-    enabled: true
-    size: 20Gi
+  replicas: 0
 
-# Backend (compactor, index-gateway, ruler)
 backend:
-  replicas: 2
-  resources:
-    requests:
-      cpu: 200m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
-  persistence:
-    enabled: true
-    size: 20Gi
+  replicas: 0
 
 # Gateway (nginx)
 gateway:
   enabled: true
-  replicas: 2
+  replicas: 1
   resources:
     requests:
       cpu: 50m
@@ -88,9 +69,6 @@ monitoring:
     grafanaAgent:
       installOperator: false
 
-# No need for minio in simple mode with filesystem storage
+# No need for minio in single binary mode
 minio:
   enabled: false
-
-# Promtail for log collection
-# Install separately or use Grafana Alloy

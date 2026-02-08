@@ -1,8 +1,6 @@
-# Certificate files - sensitive, do not commit
+# Ignore all certificate files
 *.key
 *.crt
 *.pem
 *.csr
 *.srl
-*.p12
-*.pfx

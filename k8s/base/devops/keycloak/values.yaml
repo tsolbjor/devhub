@@ -16,7 +16,7 @@ auth:
 
 # Production mode
 production: true
-proxy: edge  # TLS terminated at ingress
+proxyHeaders: xforwarded  # Required for production mode when TLS terminated at ingress
 
 # Replicas for HA
 replicaCount: 2

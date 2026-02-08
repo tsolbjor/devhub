@@ -250,6 +250,7 @@ install_keycloak() {
     
     helm upgrade --install keycloak bitnami/keycloak \
         --namespace keycloak \
+        --version 24.4.0 \
         $values_args \
         --wait --timeout 10m
     
@@ -390,10 +391,10 @@ deploy_devops() {
     create_devops_namespaces
     [[ "$ENV" == "local" ]] && copy_tls_secrets
     install_cert_manager
+    install_monitoring    # Install first - provides ServiceMonitor CRDs
     install_keycloak
     install_vault
     install_external_secrets
-    install_monitoring
     install_gitlab
     install_argocd
     apply_devops_ingress

@@ -3,6 +3,11 @@
 # Uses ${DOMAIN} and ${TLS_SECRET_NAME} from config.yaml
 
 server:
+  # Single replica for local development
+  ha:
+    enabled: true
+    replicas: 1
+    
   ingress:
     hosts:
       - host: vault.${DOMAIN}
@@ -12,3 +17,7 @@ server:
       - secretName: ${TLS_SECRET_NAME}
         hosts:
           - vault.${DOMAIN}
+
+# Single injector replica for local
+injector:
+  replicas: 1
