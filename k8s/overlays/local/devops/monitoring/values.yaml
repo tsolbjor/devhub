@@ -4,6 +4,8 @@
 
 prometheus:
   ingress:
+    enabled: true
+    ingressClassName: traefik
     hosts:
       - prometheus.${DOMAIN}
     tls:
@@ -13,6 +15,8 @@ prometheus:
 
 alertmanager:
   ingress:
+    enabled: true
+    ingressClassName: traefik
     hosts:
       - alertmanager.${DOMAIN}
     tls:
@@ -22,6 +26,8 @@ alertmanager:
 
 grafana:
   ingress:
+    enabled: true
+    ingressClassName: traefik
     hosts:
       - grafana.${DOMAIN}
     tls:
@@ -33,6 +39,23 @@ grafana:
     server:
       root_url: https://grafana.${DOMAIN}
     auth.generic_oauth:
+      enabled: true
+      name: Keycloak
+      allow_sign_up: true
+      client_id: grafana
+      scopes: openid email profile groups
+      # auth_url is browser-facing (external HTTPS)
       auth_url: https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/auth
-      token_url: https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/token
-      api_url: https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/userinfo
+      # token_url and api_url are server-side (internal HTTP, bypasses .localhost DNS issue)
+      token_url: http://keycloak-keycloakx-http.keycloak.svc.cluster.local/realms/devops/protocol/openid-connect/token
+      api_url: http://keycloak-keycloakx-http.keycloak.svc.cluster.local/realms/devops/protocol/openid-connect/userinfo
+      role_attribute_path: contains(groups[*], 'devops-admins') && 'Admin' || contains(groups[*], 'developers') && 'Editor' || 'Viewer'
+
+  initChownData:
+    enabled: false
+
+  envValueFrom:
+    GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET:
+      secretKeyRef:
+        name: grafana-oidc-secret
+        key: client-secret

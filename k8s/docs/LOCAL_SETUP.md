@@ -23,7 +23,7 @@ This guide walks you through setting up trusted HTTPS for local Kubernetes devel
 │  └──────┬──────┘                                            │
 │         │                                                    │
 │         ▼                                                    │
-│   hosts file: app.local.dev → 127.0.0.1                     │
+│   hosts file: app.localhost → 127.0.0.1                     │
 │                                                              │
 │  ┌─────────────────────────────────────────────────────────┐│
 │  │                      WSL 2                               ││
@@ -80,7 +80,7 @@ cd k8s/scripts/local
 
 This creates:
 - A local Certificate Authority (CA)
-- TLS certificates for `*.local.dev` domains
+- TLS certificates for `*.localhost` domains
 - Kubernetes Secret and ConfigMap manifests
 
 #### Step 2: Configure Windows (PowerShell as Administrator)
@@ -141,11 +141,11 @@ cd k8s/scripts/local
 #### Step 6: Access Your Services
 
 Open your browser and navigate to:
-- https://keycloak.local.dev
-- https://vault.local.dev
-- https://gitlab.local.dev
-- https://argocd.local.dev
-- https://grafana.local.dev
+- https://keycloak.localhost
+- https://vault.localhost
+- https://gitlab.localhost
+- https://argocd.localhost
+- https://grafana.localhost
 
 You should see a valid (green padlock) HTTPS connection!
 
@@ -225,7 +225,7 @@ cd k8s\scripts\windows
 #### Cannot access local domains
 1. Check hosts file: `type C:\Windows\System32\drivers\etc\hosts`
 2. Flush DNS: `ipconfig /flushdns`
-3. Verify with: `ping app.local.dev`
+3. Verify with: `ping app.localhost`
 
 #### Ingress not working
 ```bash

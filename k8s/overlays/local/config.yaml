@@ -3,7 +3,7 @@
 # Values are exported as environment variables by deploy.sh
 
 # Domain configuration
-domain: local.dev
+domain: localhost
 
 # TLS configuration
 tls:

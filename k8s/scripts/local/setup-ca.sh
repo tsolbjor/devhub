@@ -21,21 +21,20 @@ CERT_VALID_DAYS=825 # ~2 years
 # Domains to generate certificates for
 # Application domains
 DOMAINS=(
-    "local.dev"
-    "*.local.dev"
-    "app.local.dev"
-    "api.local.dev"
-    "auth.local.dev"
-    "hello.local.dev"
-    # DevOps domains
-    "keycloak.local.dev"
-    "vault.local.dev"
-    "gitlab.local.dev"
-    "registry.local.dev"
-    "argocd.local.dev"
-    "grafana.local.dev"
-    "prometheus.local.dev"
     "localhost"
+    "*.localhost"
+    "app.localhost"
+    "api.localhost"
+    "auth.localhost"
+    "hello.localhost"
+    # DevOps domains
+    "keycloak.localhost"
+    "vault.localhost"
+    "gitlab.localhost"
+    "registry.localhost"
+    "argocd.localhost"
+    "grafana.localhost"
+    "prometheus.localhost"
 )
 
 # Colors for output
@@ -150,7 +149,7 @@ EOF
     openssl req -new \
         -key "${KEY_FILE}" \
         -out "${CSR_FILE}" \
-        -subj "/CN=local.dev/O=Local Development/C=NO"
+        -subj "/CN=localhost/O=Local Development/C=NO"
     
     # Sign with CA
     log_info "Signing certificate with CA..."
@@ -178,9 +177,10 @@ EOF
 # Create Kubernetes TLS secret manifest
 create_k8s_secret() {
     log_info "Creating Kubernetes TLS secret manifest..."
-    
+
     local SECRET_FILE="${SCRIPT_DIR}/../../overlays/local/tls-secret.yaml"
-    local CERT_B64=$(base64 -w 0 "${DOMAIN_CERTS_DIR}/local-dev.crt")
+    # Use fullchain certificate (cert + CA) for proper chain validation
+    local CERT_B64=$(base64 -w 0 "${DOMAIN_CERTS_DIR}/local-dev-fullchain.crt")
     local KEY_B64=$(base64 -w 0 "${DOMAIN_CERTS_DIR}/local-dev.key")
     
     mkdir -p "$(dirname "${SECRET_FILE}")"

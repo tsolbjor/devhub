@@ -91,6 +91,7 @@ install_nginx_ingress() {
     fi
     
     # Install/upgrade with custom values for local development
+    # Note: --wait removed as LoadBalancer external IP never assigns in Rancher Desktop
     helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
         --namespace ingress-nginx \
         --create-namespace \
@@ -103,7 +104,6 @@ install_nginx_ingress() {
         --set controller.config.use-proxy-protocol="false" \
         --set controller.extraArgs.default-ssl-certificate="tshub/local-tls-secret" \
         --set controller.admissionWebhooks.enabled=false \
-        --wait \
         --timeout 5m
     
     log_info "nginx-ingress controller installed successfully."
@@ -146,9 +146,10 @@ wait_for_ingress() {
 # Create namespace
 create_namespace() {
     log_step "Creating namespace..."
-    
-    kubectl apply -f "${K8S_DIR}/base/namespace.yaml"
-    
+
+    # Create tshub namespace for application services
+    kubectl create namespace tshub 2>/dev/null || true
+
     log_info "Namespace created."
 }
 
@@ -188,9 +189,9 @@ configure_coredns() {
         return 0
     fi
     
-    # Check if local.dev is already configured
-    if echo "${COREDNS_CM}" | grep -q "local.dev"; then
-        log_info "CoreDNS already configured for local.dev"
+    # Check if localhost is already configured
+    if echo "${COREDNS_CM}" | grep -q "localhost"; then
+        log_info "CoreDNS already configured for localhost"
         return 0
     fi
     
@@ -215,8 +216,8 @@ print_summary() {
     echo "   ./deploy.sh"
     echo ""
     echo "3. Access services at:"
-    echo "   - https://app.local.dev"
-    echo "   - https://api.local.dev"
+    echo "   - https://app.localhost"
+    echo "   - https://api.localhost"
     echo ""
 }
 

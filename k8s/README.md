@@ -139,7 +139,7 @@ Applications are **not** deployed directly by this script. They are managed via 
    spec:
      project: tshub
      source:
-       repoURL: https://gitlab.local.dev/tshub/my-service.git
+       repoURL: https://gitlab.localhost/tshub/my-service.git
        path: k8s
      destination:
        server: https://kubernetes.default.svc
@@ -189,7 +189,7 @@ All overlay files use `${DOMAIN}` and `${TLS_SECRET_NAME}` placeholders that are
 
 ```yaml
 # overlays/local/config.yaml (or overlays/upcloud/config.yaml)
-domain: local.dev          # Your base domain
+domain: localhost          # Your base domain
 tls:
   secretName: local-tls-secret  # TLS secret name
 acmeEmail: admin@example.com    # For cert-manager (upcloud only)
@@ -214,7 +214,7 @@ export ACME_EMAIL=admin@yourdomain.com
 
 ### DevOps Platform
 
-URLs are derived from `domain` in [config.yaml](overlays/local/config.yaml). Default local domain is `local.dev`:
+URLs are derived from `domain` in [config.yaml](overlays/local/config.yaml). Default local domain is `localhost`:
 
 | Service | URL Pattern | Description |
 |---------|-------------|-------------|
@@ -279,7 +279,7 @@ Applications are managed via ArgoCD GitOps. To add a new application:
    spec:
      project: tshub
      source:
-       repoURL: https://gitlab.local.dev/tshub/my-service.git
+       repoURL: https://gitlab.localhost/tshub/my-service.git
        targetRevision: HEAD
        path: k8s
      destination:

@@ -28,7 +28,7 @@ $issues = @()
 Write-Step "Checking hosts file..."
 $hostsContent = Get-Content "$env:SystemRoot\System32\drivers\etc\hosts" -Raw
 
-$domains = @("app.local.dev", "api.local.dev", "hello.local.dev", "keycloak.local.dev", "gitlab.local.dev", "argocd.local.dev", "grafana.local.dev")
+$domains = @("app.localhost", "api.localhost", "hello.localhost", "keycloak.localhost", "gitlab.localhost", "argocd.localhost", "grafana.localhost")
 foreach ($domain in $domains) {
     if ($hostsContent -match $domain) {
         Write-Check "$domain is configured"
@@ -126,6 +126,46 @@ foreach ($domain in $domains) {
 }
 Write-Host ""
 
+# Check 6: Invoke-WebRequest test (PowerShell HTTP client)
+Write-Step "Testing with Invoke-WebRequest..."
+$testDomains = @("keycloak.localhost", "gitlab.localhost", "argocd.localhost")
+
+foreach ($domain in $testDomains) {
+    try {
+        $response = Invoke-WebRequest -Uri "https://$domain" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+        Write-Check "$domain - HTTP $($response.StatusCode)"
+
+        if ($Verbose) {
+            Write-Host "      Certificate: $($response.BaseResponse.ServicePoint.Certificate.Subject)"
+        }
+    } catch [System.Net.WebException] {
+        $errorDetails = $_.Exception.Message
+
+        if ($errorDetails -match "RemoteCertificateNameMismatch") {
+            Write-Cross "$domain - Certificate name mismatch"
+            $issues += "Certificate name mismatch for $domain"
+        } elseif ($errorDetails -match "RemoteCertificateChainErrors") {
+            Write-Cross "$domain - Certificate chain error (CA not trusted)"
+            $issues += "Certificate not trusted for $domain (run install-ca.ps1)"
+        } elseif ($errorDetails -match "ConnectFailure") {
+            Write-Cross "$domain - Connection failed"
+            $issues += "Cannot connect to $domain"
+        } else {
+            Write-Warn "$domain - $errorDetails"
+        }
+    } catch {
+        $errorMsg = $_.Exception.Message
+        Write-Cross "$domain - Error: $errorMsg"
+
+        if ($Verbose -and $_.Exception.InnerException) {
+            Write-Host "      Inner: $($_.Exception.InnerException.Message)" -ForegroundColor Yellow
+        }
+
+        $issues += "Web request failed for $domain"
+    }
+}
+Write-Host ""
+
 # Summary
 Write-Host "=============================================="
 if ($issues.Count -eq 0) {
@@ -163,6 +203,17 @@ if ($issues.Count -eq 0) {
         Write-Host "  Certificate trust:"
         Write-Host "    Reinstall CA certificate: .\install-ca.ps1"
         Write-Host "    (May need to restart browser)"
+        Write-Host ""
+    }
+
+    if ($issues -match "Web request failed" -and $issues -notmatch "Cannot connect") {
+        Write-Host "  SSL/TLS issues with Invoke-WebRequest:"
+        Write-Host "    1. Try accessing in browser (should work if CA installed)"
+        Write-Host "    2. Restart PowerShell session"
+        Write-Host "    3. Check certificate details:"
+        Write-Host "       .\troubleshoot.ps1 -Verbose"
+        Write-Host "    4. Test specific service:"
+        Write-Host "       curl -k https://keycloak.localhost"
         Write-Host ""
     }
 }

@@ -45,6 +45,10 @@ extraEnv: |
       secretKeyRef:
         name: keycloak-admin-secret
         key: KEYCLOAK_ADMIN_PASSWORD
+  - name: KC_HOSTNAME
+    value: "keycloak.example.com"
+  - name: KC_HOSTNAME_STRICT_HTTPS
+    value: "false"
   - name: KC_FEATURES
     value: "token-exchange,admin-fine-grained-authz"
 

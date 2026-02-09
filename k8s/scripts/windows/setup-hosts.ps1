@@ -30,19 +30,18 @@ Write-Host ""
 # Domains to add to hosts file
 $Domains = @(
     # Application domains
-    "local.dev",
-    "app.local.dev",
-    "api.local.dev",
-    "auth.local.dev",
-    "hello.local.dev",
+    "app.localhost",
+    "api.localhost",
+    "auth.localhost",
+    "hello.localhost",
     # DevOps domains
-    "keycloak.local.dev",
-    "vault.local.dev",
-    "gitlab.local.dev",
-    "registry.local.dev",
-    "argocd.local.dev",
-    "grafana.local.dev",
-    "prometheus.local.dev"
+    "keycloak.localhost",
+    "vault.localhost",
+    "gitlab.localhost",
+    "registry.localhost",
+    "argocd.localhost",
+    "grafana.localhost",
+    "prometheus.localhost"
 )
 
 $HostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
@@ -117,7 +116,7 @@ Write-Host "=============================================="
 Write-Host "Setup Complete!"
 Write-Host "=============================================="
 Write-Host ""
-Write-Host "The following domains now point to $IP:"
+Write-Host "The following domains now point to ${IP}:"
 foreach ($domain in $Domains) {
     Write-Host "  - https://$domain"
 }

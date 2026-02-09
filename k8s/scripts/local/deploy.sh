@@ -105,10 +105,11 @@ esac
 
 # Template overlay values with environment variables
 # Usage: template_values <overlay-file> <output-file>
+# Only substitutes known config variables, preserving other $variables
 template_values() {
     local input="$1"
     local output="$2"
-    envsubst < "$input" > "$output"
+    envsubst '${DOMAIN} ${TLS_SECRET_NAME} ${CLUSTER_ISSUER} ${ACME_EMAIL}' < "$input" > "$output"
 }
 
 # Get Helm values args for a component (base + templated overlay)

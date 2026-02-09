@@ -35,7 +35,7 @@ metadata:
 spec:
   project: tshub
   source:
-    repoURL: https://gitlab.local.dev/tshub/my-service.git
+    repoURL: https://gitlab.localhost/tshub/my-service.git
     targetRevision: HEAD
     path: k8s
   destination:
@@ -97,7 +97,7 @@ spec:
     spec:
       project: tshub
       source:
-        repoURL: https://gitlab.local.dev/tshub/my-service.git
+        repoURL: https://gitlab.localhost/tshub/my-service.git
         path: 'k8s/overlays/{{env}}'
       destination:
         server: https://kubernetes.default.svc

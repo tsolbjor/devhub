@@ -6,10 +6,31 @@
 # Single replica for local dev
 replicas: 1
 
+# Override hostname for local environment
+extraEnv: |
+  - name: KEYCLOAK_ADMIN
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-admin-secret
+        key: KEYCLOAK_ADMIN
+  - name: KEYCLOAK_ADMIN_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-admin-secret
+        key: KEYCLOAK_ADMIN_PASSWORD
+  - name: KC_HOSTNAME
+    value: "https://keycloak.${DOMAIN}"
+  - name: KC_PROXY_HEADERS
+    value: "xforwarded"
+  - name: KC_HTTP_ENABLED
+    value: "true"
+  - name: KC_FEATURES
+    value: "token-exchange,admin-fine-grained-authz"
+
 # Ingress configuration for local
 ingress:
   enabled: true
-  ingressClassName: nginx
+  ingressClassName: traefik
   annotations:
     nginx.ingress.kubernetes.io/proxy-buffer-size: "128k"
   rules:

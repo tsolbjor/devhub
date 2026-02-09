@@ -5,21 +5,34 @@
 global:
   hosts:
     domain: ${DOMAIN}
+    https: true
     gitlab:
       name: gitlab.${DOMAIN}
+      https: true
     registry:
       name: registry.${DOMAIN}
     minio:
       name: minio.${DOMAIN}
-  
+
   ingress:
+    class: traefik
     annotations: {}
     configureCertmanager: false
     tls:
       enabled: true
       secretName: ${TLS_SECRET_NAME}
 
-# Disable GitLab Runner for local - needs DNS resolution to gitlab.local.dev
+  appConfig:
+    omniauth:
+      enabled: true
+      allowSingleSignOn: ['openid_connect']
+      blockAutoCreatedUsers: false
+      autoLinkUser: ['openid_connect']
+      providers:
+        - secret: gitlab-oidc-secret
+          key: provider
+
+# Disable GitLab Runner for local - needs DNS resolution to gitlab.localhost
 # Enable in production or after setting up external-dns / CoreDNS customization
 gitlab-runner:
   install: false

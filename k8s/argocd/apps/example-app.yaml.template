@@ -15,7 +15,7 @@ spec:
 
   source:
     # Git repository containing the application manifests
-    repoURL: https://gitlab.local.dev/tshub/my-service.git
+    repoURL: https://gitlab.localhost/tshub/my-service.git
     targetRevision: HEAD  # or a specific branch/tag
     path: k8s             # path to Kubernetes manifests
 
