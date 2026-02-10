@@ -2,38 +2,18 @@
 # Merged with base/devops/monitoring/prometheus-stack-values.yaml
 # Uses ${DOMAIN} and ${TLS_SECRET_NAME} from config.yaml
 
+# Ingresses are managed via k8s/overlays/local/devops/ingress.yaml
 prometheus:
   ingress:
-    enabled: true
-    ingressClassName: traefik
-    hosts:
-      - prometheus.${DOMAIN}
-    tls:
-      - secretName: ${TLS_SECRET_NAME}
-        hosts:
-          - prometheus.${DOMAIN}
+    enabled: false
 
 alertmanager:
   ingress:
-    enabled: true
-    ingressClassName: traefik
-    hosts:
-      - alertmanager.${DOMAIN}
-    tls:
-      - secretName: ${TLS_SECRET_NAME}
-        hosts:
-          - alertmanager.${DOMAIN}
+    enabled: false
 
 grafana:
   ingress:
-    enabled: true
-    ingressClassName: traefik
-    hosts:
-      - grafana.${DOMAIN}
-    tls:
-      - secretName: ${TLS_SECRET_NAME}
-        hosts:
-          - grafana.${DOMAIN}
+    enabled: false
   
   grafana.ini:
     server:

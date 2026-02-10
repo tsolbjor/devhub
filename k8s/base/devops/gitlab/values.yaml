@@ -33,26 +33,49 @@ global:
   # cert-manager TLS is handled by our existing cert-manager
   # Note: configureCertmanager is set above in ingress section
 
-  # Use external PostgreSQL or bundled
-  # For production, uncomment and configure external postgres
-  # psql:
-  #   host: postgresql.database.svc.cluster.local
-  #   port: 5432
-  #   database: gitlab
-  #   username: gitlab
-  #   password:
-  #     secret: gitlab-postgresql-secret
-  #     key: password
-    
-  # Use external Redis or bundled
-  # For production, uncomment and configure external redis
-  # redis:
-  #   host: redis.database.svc.cluster.local
-  #   port: 6379
-  #   password:
-  #     secret: gitlab-redis-secret
-  #     key: password
-  
+  # External PostgreSQL (shared instance in data-services namespace)
+  # Hostname can be overridden by overlays (e.g. managed DB in UpCloud)
+  psql:
+    host: postgresql.data-services.svc.cluster.local
+    port: 5432
+    database: gitlab
+    username: gitlab
+    password:
+      secret: gitlab-postgresql-secret
+      key: password
+
+  # External Valkey/Redis (shared instance in data-services namespace)
+  # Hostname can be overridden by overlays (e.g. managed Valkey in UpCloud)
+  redis:
+    host: valkey.data-services.svc.cluster.local
+    port: 6379
+    auth:
+      enabled: true
+      secret: gitlab-redis-secret
+      key: password
+
+  # Disable bundled MinIO, use external S3-compatible storage
+  minio:
+    enabled: false
+
+  # Object storage configuration (S3-compatible)
+  appConfig:
+    object_store:
+      enabled: true
+      connection:
+        secret: gitlab-object-storage-secret
+        key: connection
+    lfs:
+      bucket: gitlab-lfs
+    artifacts:
+      bucket: gitlab-artifacts
+    uploads:
+      bucket: gitlab-uploads
+    packages:
+      bucket: gitlab-packages
+    backups:
+      bucket: gitlab-backups
+
   # GitLab Shell settings
   shell:
     port: 22
@@ -66,17 +89,6 @@ global:
     # password:
     #   secret: gitlab-smtp-secret
     #   key: password
-
-  # OAuth/OIDC with Keycloak - enable after creating gitlab-keycloak-oidc secret
-  # appConfig:
-  #   omniauth:
-  #     enabled: true
-  #     allowSingleSignOn: ['openid_connect']
-  #     blockAutoCreatedUsers: false
-  #     autoLinkUser: true
-  #     providers:
-  #       - secret: gitlab-keycloak-oidc
-  #         key: provider
 
   # Timezone
   time_zone: UTC
@@ -134,28 +146,19 @@ registry:
     limits:
       cpu: 500m
       memory: 512Mi
-  # Storage uses bundled minio by default
+  storage:
+    secret: gitlab-registry-storage-secret
+    key: config
 
-# Bundled PostgreSQL (use external for production)
+# Disable bundled data services (using external shared instances)
 postgresql:
-  install: true
-  persistence:
-    enabled: true
-    size: 20Gi
+  install: false
 
-# Bundled Redis (use external for production)
 redis:
-  install: true
-  persistence:
-    enabled: true
-    size: 5Gi
+  install: false
 
-# Bundled MinIO (use external S3 for production)
 minio:
-  install: true
-  persistence:
-    enabled: true
-    size: 50Gi
+  install: false
 
 # Don't install bundled nginx, cert-manager, prometheus
 nginx-ingress:

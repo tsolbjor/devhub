@@ -202,33 +202,31 @@ wait_for_keycloak() {
     log_step "Waiting for Keycloak to be ready..."
     
     kubectl wait --for=condition=ready pod \
-        -l app.kubernetes.io/name=keycloak \
+        -l app.kubernetes.io/name=keycloakx \
         -n keycloak \
         --timeout=600s || {
             log_error "Keycloak did not become ready"
             return 1
         }
-    
+
     # Additional wait for Keycloak to fully start (REST API needs more time)
+    # Note: keycloakx image doesn't have curl, so we use kcadm.sh as a health check
     log_info "Waiting for Keycloak REST API..."
     local max_attempts=30
     local attempt=0
-    
+
     while [[ $attempt -lt $max_attempts ]]; do
-        local http_code=$(kubectl exec -n keycloak deploy/keycloak -- \
-            curl -s -o /dev/null -w "%{http_code}" \
-            "http://localhost:8080/realms/master/.well-known/openid-configuration" 2>/dev/null || echo "000")
-        
-        if [[ "$http_code" == "200" ]]; then
+        if kubectl exec -n keycloak keycloak-keycloakx-0 -- \
+            /opt/keycloak/bin/kcadm.sh get realms/master --server http://localhost:8080 --realm master &>/dev/null; then
             log_info "Keycloak API is ready"
             return 0
         fi
-        
+
         ((attempt++))
         echo -n "."
         sleep 10
     done
-    
+
     log_warn "Keycloak API check timed out, proceeding anyway..."
     return 0
 }

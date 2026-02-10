@@ -15,7 +15,7 @@ global:
       name: minio.${DOMAIN}
 
   ingress:
-    class: traefik
+    class: nginx
     annotations: {}
     configureCertmanager: false
     tls:
@@ -31,6 +31,12 @@ global:
       providers:
         - secret: gitlab-oidc-secret
           key: provider
+
+# Registry storage config for local MinIO
+registry:
+  storage:
+    secret: gitlab-registry-storage-secret
+    key: config
 
 # Disable GitLab Runner for local - needs DNS resolution to gitlab.localhost
 # Enable in production or after setting up external-dns / CoreDNS customization

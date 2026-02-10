@@ -1,35 +1,24 @@
-# PostgreSQL for Keycloak
-# Deploy this before installing keycloak helm chart
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: keycloak-postgresql-pvc
-  namespace: keycloak
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 8Gi
+# Shared PostgreSQL for local development
+# Creates databases for Keycloak and GitLab
+# NOTE: The postgresql-init ConfigMap is created by deploy.sh with actual passwords
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: keycloak-postgresql
-  namespace: keycloak
+  name: postgresql
+  namespace: data-services
   labels:
-    app: keycloak-postgresql
+    app: postgresql
 spec:
-  serviceName: keycloak-postgresql
+  serviceName: postgresql
   replicas: 1
   selector:
     matchLabels:
-      app: keycloak-postgresql
+      app: postgresql
   template:
     metadata:
       labels:
-        app: keycloak-postgresql
+        app: postgresql
     spec:
       containers:
         - name: postgresql
@@ -39,20 +28,18 @@ spec:
             - containerPort: 5432
               name: postgresql
           env:
-            - name: POSTGRES_DB
-              value: keycloak
-            - name: POSTGRES_USER
-              value: keycloak
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: keycloak-db-secret
-                  key: password
+                  name: postgresql-credentials
+                  key: postgres-password
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
           resources:
             requests:
               cpu: 100m
@@ -65,7 +52,7 @@ spec:
               command:
                 - pg_isready
                 - -U
-                - keycloak
+                - postgres
             initialDelaySeconds: 30
             periodSeconds: 10
           readinessProbe:
@@ -73,21 +60,30 @@ spec:
               command:
                 - pg_isready
                 - -U
-                - keycloak
+                - postgres
             initialDelaySeconds: 5
             periodSeconds: 5
       volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: keycloak-postgresql-pvc
+        - name: init-scripts
+          configMap:
+            name: postgresql-init
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: keycloak-postgresql
-  namespace: keycloak
+  name: postgresql
+  namespace: data-services
   labels:
-    app: keycloak-postgresql
+    app: postgresql
 spec:
   type: ClusterIP
   ports:
@@ -95,4 +91,4 @@ spec:
       targetPort: 5432
       name: postgresql
   selector:
-    app: keycloak-postgresql
+    app: postgresql

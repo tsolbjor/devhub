@@ -26,7 +26,7 @@ args:
 # Database configuration - uses external PostgreSQL
 database:
   vendor: postgres
-  hostname: keycloak-postgresql
+  hostname: postgresql.data-services.svc.cluster.local
   port: 5432
   database: keycloak
   username: keycloak

@@ -2,6 +2,10 @@
 # Chart: codecentric/keycloakx
 # Merged with base/devops/keycloak/values.yaml
 
+# Override database hostname to point to managed PostgreSQL
+database:
+  hostname: ${PG_HOST}
+
 ingress:
   enabled: true
   ingressClassName: nginx

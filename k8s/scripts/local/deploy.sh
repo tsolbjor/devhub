@@ -86,7 +86,7 @@ case "$ENV" in
         echo "Components:"
         echo "  all        - Deploy entire platform (alias for devops)"
         echo "  devops     - DevOps platform"
-        echo "  keycloak, vault, monitoring, gitlab, argocd - Individual components"
+        echo "  data-services, keycloak, vault, monitoring, gitlab, argocd - Individual components"
         echo "  bootstrap  - Deploy ArgoCD app-of-apps for GitOps"
         echo ""
         echo "Actions:"
@@ -191,7 +191,7 @@ copy_tls_secrets() {
     local CERT_B64=$(base64 -w 0 "${CERTS_DIR}/domains/local-dev.crt")
     local KEY_B64=$(base64 -w 0 "${CERTS_DIR}/domains/local-dev.key")
     
-    for ns in keycloak vault gitlab argocd monitoring; do
+    for ns in data-services keycloak vault gitlab argocd monitoring; do
         kubectl create namespace "$ns" 2>/dev/null || true
         cat <<EOF | kubectl apply -f -
 apiVersion: v1
@@ -231,11 +231,159 @@ install_cert_manager() {
     log_info "cert-manager installed"
 }
 
+install_data_services() {
+    log_step "Installing shared data services..."
+
+    kubectl create namespace data-services 2>/dev/null || true
+
+    local DATA_SERVICES_DIR="${OVERLAY_DIR}/data-services"
+
+    # Generate PostgreSQL credentials if not exists
+    if ! kubectl get secret postgresql-credentials -n data-services &>/dev/null; then
+        local PG_ADMIN_PASSWORD=$(openssl rand -base64 24)
+        local PG_KEYCLOAK_PASSWORD=$(openssl rand -base64 24)
+        local PG_GITLAB_PASSWORD=$(openssl rand -base64 24)
+
+        kubectl create secret generic postgresql-credentials -n data-services \
+            --from-literal=postgres-password="$PG_ADMIN_PASSWORD" \
+            --from-literal=keycloak-password="$PG_KEYCLOAK_PASSWORD" \
+            --from-literal=gitlab-password="$PG_GITLAB_PASSWORD"
+
+        # Create corresponding secrets in consuming namespaces
+        kubectl create namespace keycloak 2>/dev/null || true
+        kubectl create secret generic keycloak-db-secret -n keycloak \
+            --from-literal=password="$PG_KEYCLOAK_PASSWORD" \
+            --from-literal=postgres-password="$PG_ADMIN_PASSWORD" \
+            2>/dev/null || true
+
+        kubectl create namespace gitlab 2>/dev/null || true
+        kubectl create secret generic gitlab-postgresql-secret -n gitlab \
+            --from-literal=password="$PG_GITLAB_PASSWORD" \
+            --from-literal=postgres-password="$PG_ADMIN_PASSWORD" \
+            2>/dev/null || true
+
+        # Update init SQL with actual passwords
+        local INIT_SQL=$(kubectl get configmap postgresql-init -n data-services -o jsonpath='{.data.init\.sql}' 2>/dev/null || echo "")
+        if [[ -z "$INIT_SQL" ]]; then
+            cat <<EOSQL | kubectl create configmap postgresql-init -n data-services --from-file=init.sql=/dev/stdin
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'keycloak') THEN
+    CREATE ROLE keycloak WITH LOGIN PASSWORD '${PG_KEYCLOAK_PASSWORD}';
+  END IF;
+END \$\$;
+CREATE DATABASE keycloak OWNER keycloak;
+
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'gitlab') THEN
+    CREATE ROLE gitlab WITH LOGIN PASSWORD '${PG_GITLAB_PASSWORD}';
+  END IF;
+END \$\$;
+CREATE DATABASE gitlab OWNER gitlab;
+
+\c gitlab
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+EOSQL
+        fi
+    else
+        log_info "PostgreSQL credentials already exist"
+    fi
+
+    # Generate Valkey credentials if not exists
+    if ! kubectl get secret valkey-credentials -n data-services &>/dev/null; then
+        local VALKEY_PASSWORD=$(openssl rand -base64 24)
+
+        kubectl create secret generic valkey-credentials -n data-services \
+            --from-literal=password="$VALKEY_PASSWORD"
+
+        # Create corresponding secret in gitlab namespace
+        kubectl create namespace gitlab 2>/dev/null || true
+        kubectl create secret generic gitlab-redis-secret -n gitlab \
+            --from-literal=password="$VALKEY_PASSWORD" \
+            2>/dev/null || true
+    else
+        log_info "Valkey credentials already exist"
+    fi
+
+    # Generate MinIO credentials if not exists
+    if ! kubectl get secret minio-credentials -n data-services &>/dev/null; then
+        local MINIO_ACCESS_KEY=$(openssl rand -hex 16)
+        local MINIO_SECRET_KEY=$(openssl rand -base64 32)
+
+        kubectl create secret generic minio-credentials -n data-services \
+            --from-literal=access-key="$MINIO_ACCESS_KEY" \
+            --from-literal=secret-key="$MINIO_SECRET_KEY"
+
+        # Create GitLab object storage secret (S3 connection YAML)
+        kubectl create namespace gitlab 2>/dev/null || true
+
+        cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gitlab-object-storage-secret
+  namespace: gitlab
+type: Opaque
+stringData:
+  connection: |
+    provider: AWS
+    aws_access_key_id: "${MINIO_ACCESS_KEY}"
+    aws_secret_access_key: "${MINIO_SECRET_KEY}"
+    region: us-east-1
+    endpoint: "http://minio.data-services.svc.cluster.local:9000"
+    path_style: true
+EOF
+
+        # Create GitLab registry storage secret
+        cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gitlab-registry-storage-secret
+  namespace: gitlab
+type: Opaque
+stringData:
+  config: |
+    s3:
+      accesskey: "${MINIO_ACCESS_KEY}"
+      secretkey: "${MINIO_SECRET_KEY}"
+      region: us-east-1
+      regionendpoint: "http://minio.data-services.svc.cluster.local:9000"
+      bucket: gitlab-registry
+      v4auth: true
+EOF
+    else
+        log_info "MinIO credentials already exist"
+    fi
+
+    # Deploy PostgreSQL (apply manifest, skip configmap since we created it with passwords)
+    log_info "Deploying PostgreSQL..."
+    kubectl apply -f "${DATA_SERVICES_DIR}/postgresql.yaml"
+
+    # Deploy Valkey
+    log_info "Deploying Valkey..."
+    kubectl apply -f "${DATA_SERVICES_DIR}/valkey.yaml"
+
+    # Deploy MinIO
+    log_info "Deploying MinIO..."
+    kubectl apply -f "${DATA_SERVICES_DIR}/minio.yaml"
+
+    # Wait for data services to be ready
+    log_info "Waiting for data services to be ready..."
+    kubectl wait --for=condition=ready pod -l app=postgresql -n data-services --timeout=120s || true
+    kubectl wait --for=condition=ready pod -l app=valkey -n data-services --timeout=120s || true
+    kubectl wait --for=condition=ready pod -l app=minio -n data-services --timeout=120s || true
+
+    log_info "Shared data services installed"
+}
+
 install_keycloak() {
     log_step "Installing Keycloak..."
-    
+
     kubectl create namespace keycloak 2>/dev/null || true
-    
+
     # Create admin credentials secret if not exists
     if ! kubectl get secret keycloak-admin-secret -n keycloak &>/dev/null; then
         local ADMIN_PASSWORD=$(openssl rand -base64 24)
@@ -243,30 +391,16 @@ install_keycloak() {
             --from-literal=KEYCLOAK_ADMIN=admin \
             --from-literal=KEYCLOAK_ADMIN_PASSWORD="$ADMIN_PASSWORD"
     fi
-    
-    # Create PostgreSQL credentials secret if not exists
-    if ! kubectl get secret keycloak-db-secret -n keycloak &>/dev/null; then
-        local PG_PASSWORD=$(openssl rand -base64 24)
-        kubectl create secret generic keycloak-db-secret -n keycloak \
-            --from-literal=password="$PG_PASSWORD" \
-            --from-literal=postgres-password="$PG_PASSWORD"
-    fi
-    
-    # Deploy PostgreSQL for Keycloak (uses official postgres image)
-    log_info "Deploying PostgreSQL for Keycloak..."
-    kubectl apply -f "${BASE_DIR}/devops/keycloak/postgresql.yaml"
-    
-    # Wait for PostgreSQL to be ready
-    log_info "Waiting for PostgreSQL to be ready..."
-    kubectl wait --for=condition=ready pod -l app=keycloak-postgresql -n keycloak --timeout=120s || true
-    
+
+    # keycloak-db-secret is created by install_data_services()
+
     local values_args=$(get_values_args "keycloak")
-    
+
     helm upgrade --install keycloak codecentric/keycloakx \
         --namespace keycloak \
         $values_args \
         --wait --timeout 10m
-    
+
     log_info "Keycloak installed"
 }
 
@@ -307,6 +441,13 @@ install_monitoring() {
             --from-literal=admin-user=admin \
             --from-literal=admin-password="$(openssl rand -base64 24)"
     fi
+
+    # Create placeholder OIDC secret so Grafana can start before Keycloak SSO is configured
+    # setup-keycloak.sh will update this with the real client secret later
+    if ! kubectl get secret grafana-oidc-secret -n monitoring &>/dev/null; then
+        kubectl create secret generic grafana-oidc-secret -n monitoring \
+            --from-literal=client-secret="placeholder"
+    fi
     
     # Prometheus stack uses monitoring overlay
     local base_values="${BASE_DIR}/devops/monitoring/prometheus-stack-values.yaml"
@@ -344,9 +485,16 @@ install_monitoring() {
 
 install_gitlab() {
     log_step "Installing GitLab CE..."
-    
+
     kubectl create namespace gitlab 2>/dev/null || true
-    
+
+    # Create placeholder OIDC secret so GitLab pods can mount volumes before Keycloak SSO is configured
+    # setup-keycloak.sh will update this with the real client secret later
+    if ! kubectl get secret gitlab-oidc-secret -n gitlab &>/dev/null; then
+        kubectl create secret generic gitlab-oidc-secret -n gitlab \
+            --from-literal=provider='{"name":"openid_connect","label":"Keycloak","args":{"name":"openid_connect","scope":["openid","profile","email"],"response_type":"code","issuer":"https://keycloak.localhost/realms/devops","discovery":true,"client_auth_method":"query","uid_field":"preferred_username","client_options":{"identifier":"gitlab","secret":"placeholder","redirect_uri":"https://gitlab.localhost/users/auth/openid_connect/callback"}}}'
+    fi
+
     local values_args=$(get_values_args "gitlab")
     
     helm upgrade --install gitlab gitlab/gitlab \
@@ -404,7 +552,8 @@ deploy_devops() {
     create_devops_namespaces
     [[ "$ENV" == "local" ]] && copy_tls_secrets
     install_cert_manager
-    install_monitoring    # Install first - provides ServiceMonitor CRDs
+    install_data_services  # Shared PostgreSQL, Valkey, MinIO
+    install_monitoring     # Install early - provides ServiceMonitor CRDs
     install_keycloak
     install_vault
     install_external_secrets
@@ -415,7 +564,7 @@ deploy_devops() {
 
 delete_devops() {
     log_step "Deleting DevOps platform..."
-    
+
     helm uninstall argocd -n argocd 2>/dev/null || true
     helm uninstall gitlab -n gitlab 2>/dev/null || true
     helm uninstall prometheus -n monitoring 2>/dev/null || true
@@ -424,19 +573,27 @@ delete_devops() {
     helm uninstall promtail -n monitoring 2>/dev/null || true
     helm uninstall vault -n vault 2>/dev/null || true
     helm uninstall keycloak -n keycloak 2>/dev/null || true
-    kubectl delete -f "${BASE_DIR}/devops/keycloak/postgresql.yaml" 2>/dev/null || true
+    # Clean up legacy per-service PostgreSQL (if migrating from old layout)
+    kubectl delete statefulset keycloak-postgresql -n keycloak 2>/dev/null || true
+    kubectl delete service keycloak-postgresql -n keycloak 2>/dev/null || true
+    kubectl delete pvc keycloak-postgresql-pvc -n keycloak 2>/dev/null || true
     helm uninstall external-secrets -n external-secrets 2>/dev/null || true
     helm uninstall cert-manager -n cert-manager 2>/dev/null || true
-    
+
+    # Delete shared data services
+    kubectl delete -f "${OVERLAY_DIR}/data-services/minio.yaml" 2>/dev/null || true
+    kubectl delete -f "${OVERLAY_DIR}/data-services/valkey.yaml" 2>/dev/null || true
+    kubectl delete -f "${OVERLAY_DIR}/data-services/postgresql.yaml" 2>/dev/null || true
+
     kubectl delete -k "${OVERLAY_DIR}/devops" 2>/dev/null || true
-    
+
     log_info "DevOps platform deleted"
 }
 
 status_devops() {
     log_step "DevOps Platform Status:"
     echo ""
-    for ns in keycloak vault gitlab argocd monitoring external-secrets cert-manager; do
+    for ns in data-services keycloak vault gitlab argocd monitoring external-secrets cert-manager; do
         echo "=== ${ns} ==="
         kubectl get pods -n "$ns" 2>/dev/null || echo "  Namespace not found"
         echo ""
@@ -501,6 +658,9 @@ main() {
                     ;;
                 bootstrap)
                     bootstrap_argocd_apps
+                    ;;
+                data-services)
+                    install_data_services
                     ;;
                 keycloak)
                     add_helm_repos && install_keycloak

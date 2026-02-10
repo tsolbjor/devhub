@@ -52,6 +52,13 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
+  name: data-services
+  labels:
+    name: data-services
+---
+apiVersion: v1
+kind: Namespace
+metadata:
   name: argocd
   labels:
     name: argocd

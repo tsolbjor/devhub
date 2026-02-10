@@ -77,6 +77,18 @@ check_certificates() {
     log_info "Certificates found."
 }
 
+# Remove Traefik if present (Rancher Desktop default) to free ports 80/443
+remove_traefik() {
+    if helm list -n kube-system 2>/dev/null | grep -q traefik; then
+        log_step "Removing Traefik (Rancher Desktop default) to free ports 80/443 for nginx-ingress..."
+        helm uninstall traefik -n kube-system 2>/dev/null || true
+        helm uninstall traefik-crd -n kube-system 2>/dev/null || true
+        # Wait for ServiceLB to release
+        sleep 5
+        log_info "Traefik removed"
+    fi
+}
+
 # Install nginx-ingress controller
 install_nginx_ingress() {
     log_step "Installing nginx-ingress controller..."
@@ -231,6 +243,7 @@ main() {
     check_certificates
     create_namespace
     apply_secrets
+    remove_traefik
     install_nginx_ingress
     wait_for_ingress
     configure_coredns

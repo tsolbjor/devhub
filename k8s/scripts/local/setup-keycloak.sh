@@ -307,6 +307,13 @@ EOF
 
     log_info "Client secrets saved to: ${secrets_file}"
     log_info "Kubernetes secrets created in respective namespaces"
+
+    # Restart services that mount OIDC secrets as volumes/env vars
+    # ArgoCD watches argocd-secret natively (no restart needed)
+    # Vault uses API-based OIDC config (no restart needed)
+    log_info "Restarting services to pick up real OIDC secrets..."
+    kubectl rollout restart deployment/prometheus-grafana -n monitoring 2>/dev/null || true
+    kubectl rollout restart deployment/gitlab-webservice-default -n gitlab 2>/dev/null || true
 }
 
 # Print summary

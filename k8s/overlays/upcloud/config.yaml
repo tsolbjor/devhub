@@ -26,3 +26,13 @@ services:
   prometheus: prometheus
   alertmanager: alertmanager
   minio: minio
+
+# Managed data services - CUSTOMIZE for your UpCloud environment
+dataServices:
+  postgresql:
+    host: managed-pg.example.com
+  valkey:
+    host: managed-valkey.example.com
+  s3:
+    endpoint: https://s3.example.com
+    region: eu-west-1

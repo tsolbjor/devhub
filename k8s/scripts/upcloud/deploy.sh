@@ -30,10 +30,21 @@ case "$ENV" in
         USE_CERT_MANAGER=false
         ;;
     upcloud)
-        DOMAIN="${DOMAIN:-devops.example.com}"
         OVERLAY_DIR="${K8S_DIR}/overlays/upcloud"
         USE_CERT_MANAGER=true
+        # Parse config if not overridden by env vars
+        if [[ -z "${DOMAIN:-}" ]]; then
+            DOMAIN=$(grep -E '^domain:' "${OVERLAY_DIR}/config.yaml" | sed 's/domain:[[:space:]]*//')
+        fi
         ACME_EMAIL="${ACME_EMAIL:-admin@example.com}"
+        # Parse data service config (allow env var overrides)
+        if [[ -f "${OVERLAY_DIR}/config.yaml" ]]; then
+            export PG_HOST="${PG_HOST:-$(grep -A1 'postgresql:' "${OVERLAY_DIR}/config.yaml" | grep 'host:' | sed 's/.*host:[[:space:]]*//')}"
+            export VALKEY_HOST="${VALKEY_HOST:-$(grep -A1 'valkey:' "${OVERLAY_DIR}/config.yaml" | grep 'host:' | sed 's/.*host:[[:space:]]*//')}"
+            export S3_ENDPOINT="${S3_ENDPOINT:-$(grep -A2 's3:' "${OVERLAY_DIR}/config.yaml" | grep 'endpoint:' | sed 's/.*endpoint:[[:space:]]*//')}"
+            export S3_REGION="${S3_REGION:-$(grep -A2 's3:' "${OVERLAY_DIR}/config.yaml" | grep 'region:' | sed 's/.*region:[[:space:]]*//')}"
+        fi
+        export DOMAIN
         ;;
     *)
         echo "Usage: $0 [local|upcloud] [component] [action]"
@@ -232,27 +243,27 @@ install_cert_manager() {
 
 install_keycloak() {
     log_step "Installing Keycloak..."
-    
+
     kubectl create namespace keycloak 2>/dev/null || true
-    
+
     if ! kubectl get secret keycloak-admin-secret -n keycloak &>/dev/null; then
         kubectl create secret generic keycloak-admin-secret -n keycloak \
             --from-literal=admin-password="$(openssl rand -base64 24)"
     fi
-    
-    if ! kubectl get secret keycloak-postgresql-secret -n keycloak &>/dev/null; then
-        kubectl create secret generic keycloak-postgresql-secret -n keycloak \
-            --from-literal=postgres-password="$(openssl rand -base64 24)" \
-            --from-literal=password="$(openssl rand -base64 24)"
+
+    # keycloak-db-secret must be created with the managed PostgreSQL password
+    if ! kubectl get secret keycloak-db-secret -n keycloak &>/dev/null; then
+        log_warn "keycloak-db-secret not found in keycloak namespace."
+        log_warn "Create it with: kubectl create secret generic keycloak-db-secret -n keycloak --from-literal=password=<PG_PASSWORD>"
     fi
-    
+
     local values_args=$(get_values_args "keycloak")
-    
+
     helm upgrade --install keycloak bitnami/keycloak \
         --namespace keycloak \
         $values_args \
         --wait --timeout 10m
-    
+
     log_info "Keycloak installed"
 }
 
@@ -401,7 +412,7 @@ delete_devops() {
 status_devops() {
     log_step "DevOps Platform Status:"
     echo ""
-    for ns in keycloak vault gitlab argocd monitoring external-secrets cert-manager; do
+    for ns in data-services keycloak vault gitlab argocd monitoring external-secrets cert-manager; do
         echo "=== ${ns} ==="
         kubectl get pods -n "$ns" 2>/dev/null || echo "  Namespace not found"
         echo ""

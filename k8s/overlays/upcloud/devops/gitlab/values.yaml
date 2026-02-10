@@ -11,7 +11,20 @@ global:
       name: registry.${DOMAIN}
     minio:
       name: minio.${DOMAIN}
-  
+
+  # Override data service hosts to managed services
+  psql:
+    host: ${PG_HOST}
+  redis:
+    host: ${VALKEY_HOST}
+
+  # Object storage connection pointing to managed S3
+  appConfig:
+    object_store:
+      connection:
+        secret: gitlab-object-storage-secret
+        key: connection
+
   ingress:
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt-prod

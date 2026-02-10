@@ -29,12 +29,7 @@ configs:
     extra:
       oidc.keycloak.clientSecret: ""
 
+# Ingress is managed via k8s/overlays/local/devops/ingress.yaml
 server:
   ingress:
-    enabled: true
-    ingressClassName: traefik
-    annotations: {}
-    extraTls:
-      - secretName: ${TLS_SECRET_NAME}
-        hosts:
-          - argocd.${DOMAIN}
+    enabled: false
