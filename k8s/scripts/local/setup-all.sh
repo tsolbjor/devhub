@@ -216,8 +216,12 @@ wait_for_keycloak() {
     local attempt=0
 
     while [[ $attempt -lt $max_attempts ]]; do
-        if kubectl exec -n keycloak keycloak-keycloakx-0 -- \
-            /opt/keycloak/bin/kcadm.sh get realms/master --server http://localhost:8080 --realm master &>/dev/null; then
+        # kcadm without credentials returns HTTP 401 when Keycloak is ready
+        # Any HTTP response (including 401) means Keycloak API is accepting requests
+        local output
+        output=$(kubectl exec -n keycloak keycloak-keycloakx-0 -- \
+            /opt/keycloak/bin/kcadm.sh get realms/master --server http://localhost:8080 --realm master 2>&1) || true
+        if echo "$output" | grep -q "HTTP"; then
             log_info "Keycloak API is ready"
             return 0
         fi

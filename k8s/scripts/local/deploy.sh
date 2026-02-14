@@ -168,7 +168,8 @@ add_helm_repos() {
     helm repo add grafana https://grafana.github.io/helm-charts 2>/dev/null || true
     helm repo add gitlab https://charts.gitlab.io 2>/dev/null || true
     helm repo add argo https://argoproj.github.io/argo-helm 2>/dev/null || true
-    
+    helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>/dev/null || true
+
     helm repo update
     log_info "Helm repositories updated"
 }
@@ -426,7 +427,7 @@ install_external_secrets() {
         --namespace external-secrets \
         --create-namespace \
         -f "${BASE_DIR}/devops/external-secrets/values.yaml" \
-        --wait --timeout 5m
+        --wait --timeout 10m
     
     log_info "External Secrets installed"
 }
@@ -547,8 +548,67 @@ apply_devops_ingress() {
     log_info "DevOps ingress applied"
 }
 
+ensure_nginx_ingress() {
+    if [[ "$ENV" != "local" ]]; then return 0; fi
+
+    # Check if already installed and running
+    if helm list -n ingress-nginx 2>/dev/null | grep -q ingress-nginx; then
+        log_info "nginx-ingress already installed"
+        return 0
+    fi
+
+    log_step "Installing nginx-ingress controller..."
+
+    # Remove Traefik if present (Rancher Desktop default) to free ports 80/443
+    if helm list -n kube-system 2>/dev/null | grep -q traefik; then
+        log_info "Removing Traefik to free ports 80/443..."
+        helm uninstall traefik -n kube-system 2>/dev/null || true
+        helm uninstall traefik-crd -n kube-system 2>/dev/null || true
+        sleep 5
+    fi
+
+    # Ensure tshub namespace and TLS secret exist (needed for default-ssl-certificate)
+    kubectl create namespace tshub 2>/dev/null || true
+    local CERT_B64=$(base64 -w 0 "${CERTS_DIR}/domains/local-dev.crt")
+    local KEY_B64=$(base64 -w 0 "${CERTS_DIR}/domains/local-dev.key")
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: local-tls-secret
+  namespace: tshub
+type: kubernetes.io/tls
+data:
+  tls.crt: ${CERT_B64}
+  tls.key: ${KEY_B64}
+EOF
+
+    helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+        --namespace ingress-nginx \
+        --create-namespace \
+        --set controller.service.type=LoadBalancer \
+        --set controller.service.externalTrafficPolicy=Local \
+        --set controller.config.proxy-body-size="100m" \
+        --set controller.config.ssl-redirect="true" \
+        --set controller.config.use-forwarded-headers="true" \
+        --set controller.config.compute-full-forwarded-for="true" \
+        --set controller.config.use-proxy-protocol="false" \
+        --set controller.extraArgs.default-ssl-certificate="tshub/local-tls-secret" \
+        --set controller.admissionWebhooks.enabled=false \
+        --timeout 5m
+
+    # Wait for controller to be ready
+    kubectl wait --namespace ingress-nginx \
+        --for=condition=ready pod \
+        --selector=app.kubernetes.io/component=controller \
+        --timeout=120s
+
+    log_info "nginx-ingress controller installed"
+}
+
 deploy_devops() {
     add_helm_repos
+    ensure_nginx_ingress
     create_devops_namespaces
     [[ "$ENV" == "local" ]] && copy_tls_secrets
     install_cert_manager
@@ -678,7 +738,7 @@ main() {
                     add_helm_repos && install_argocd
                     ;;
                 ingress)
-                    kubectl apply -k "${OVERLAY_DIR}/devops"
+                    apply_devops_ingress
                     ;;
                 *)
                     log_error "Unknown component: $COMPONENT"
