@@ -1,0 +1,16 @@
+# Example terraform.tfvars file
+# Copy this file to terraform.tfvars and adjust values as needed
+
+# prefix          = "tshub"
+# cluster_name    = "main"
+# zone            = "de-fra1"
+# node_plan       = "2xCPU-4GB"
+# node_count      = 2
+# control_plane_plan = "2xCPU-4GB"
+# network_cidr    = "10.100.0.0/24"
+# kubernetes_version = "1.29"
+
+# For production, consider:
+# node_plan       = "4xCPU-8GB"
+# node_count      = 3
+# control_plane_plan = "4xCPU-8GB"
