@@ -61,3 +61,29 @@ variable "tags" {
     Purpose     = "cluster-management"
   }
 }
+
+# ─── Managed Data Services ───────────────────────────────────────────
+
+variable "pg_plan" {
+  description = "UpCloud Managed PostgreSQL plan"
+  type        = string
+  default     = "1x1xCPU-2GB-25GB"
+}
+
+variable "pg_version" {
+  description = "PostgreSQL major version"
+  type        = string
+  default     = "16"
+}
+
+variable "valkey_plan" {
+  description = "UpCloud Managed Valkey plan"
+  type        = string
+  default     = "1x1xCPU-2GB"
+}
+
+variable "objstore_region" {
+  description = "UpCloud Managed Object Storage region"
+  type        = string
+  default     = "europe-1"
+}

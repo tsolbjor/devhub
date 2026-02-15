@@ -27,3 +27,71 @@ output "zone" {
   description = "The zone where the cluster is deployed"
   value       = var.zone
 }
+
+# ─── PostgreSQL Outputs ──────────────────────────────────────────────
+
+output "pg_host" {
+  description = "PostgreSQL private hostname"
+  value       = upcloud_managed_database_postgresql.main.service_host
+}
+
+output "pg_port" {
+  description = "PostgreSQL port"
+  value       = upcloud_managed_database_postgresql.main.service_port
+}
+
+output "pg_keycloak_password" {
+  description = "PostgreSQL password for keycloak user"
+  value       = upcloud_managed_database_user.keycloak.password
+  sensitive   = true
+}
+
+output "pg_gitlab_password" {
+  description = "PostgreSQL password for gitlab user"
+  value       = upcloud_managed_database_user.gitlab.password
+  sensitive   = true
+}
+
+# ─── Valkey Outputs ──────────────────────────────────────────────────
+
+output "valkey_host" {
+  description = "Valkey private hostname"
+  value       = upcloud_managed_database_valkey.main.service_host
+}
+
+output "valkey_port" {
+  description = "Valkey port"
+  value       = upcloud_managed_database_valkey.main.service_port
+}
+
+output "valkey_password" {
+  description = "Valkey default user password"
+  value       = upcloud_managed_database_valkey.main.service_password
+  sensitive   = true
+}
+
+# ─── Object Storage Outputs ─────────────────────────────────────────
+
+output "s3_endpoint" {
+  description = "S3-compatible public endpoint"
+  value = [
+    for ep in upcloud_managed_object_storage.main.endpoint :
+    "https://${ep.domain_name}" if ep.type == "public"
+  ][0]
+}
+
+output "s3_region" {
+  description = "Object storage region"
+  value       = var.objstore_region
+}
+
+output "s3_access_key" {
+  description = "S3 access key ID"
+  value       = upcloud_managed_object_storage_user_access_key.gitlab.access_key_id
+}
+
+output "s3_secret_key" {
+  description = "S3 secret access key"
+  value       = upcloud_managed_object_storage_user_access_key.gitlab.secret_access_key
+  sensitive   = true
+}
