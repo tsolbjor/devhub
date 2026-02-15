@@ -33,7 +33,7 @@ grafana:
       - secretName: grafana-tls
         hosts:
           - grafana.${DOMAIN}
-  
+
   grafana.ini:
     server:
       root_url: https://grafana.${DOMAIN}
@@ -41,3 +41,9 @@ grafana:
       auth_url: https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/auth
       token_url: https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/token
       api_url: https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/userinfo
+
+  envValueFrom:
+    GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET:
+      secretKeyRef:
+        name: grafana-oidc-secret
+        key: client-secret

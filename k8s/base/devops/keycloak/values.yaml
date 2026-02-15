@@ -46,7 +46,7 @@ extraEnv: |
         name: keycloak-admin-secret
         key: KEYCLOAK_ADMIN_PASSWORD
   - name: KC_HOSTNAME
-    value: "keycloak.example.com"
+    value: "keycloak.${DOMAIN}"
   - name: KC_HOSTNAME_STRICT_HTTPS
     value: "false"
   - name: KC_FEATURES

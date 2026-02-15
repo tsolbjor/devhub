@@ -130,17 +130,19 @@ get_values_args() {
     local component="$1"
     local base_values="${BASE_DIR}/devops/${component}/values.yaml"
     local overlay_values="${OVERLAY_DIR}/devops/${component}/values.yaml"
-    local templated_values="/tmp/${component}-overlay-values.yaml"
+    local templated_base="/tmp/${component}-base-values.yaml"
+    local templated_overlay="/tmp/${component}-overlay-values.yaml"
 
     local args=""
 
     if [[ -f "$base_values" ]]; then
-        args="-f $base_values"
+        template_values "$base_values" "$templated_base"
+        args="-f $templated_base"
     fi
 
     if [[ -f "$overlay_values" ]]; then
-        template_values "$overlay_values" "$templated_values"
-        args="$args -f $templated_values"
+        template_values "$overlay_values" "$templated_overlay"
+        args="$args -f $templated_overlay"
     fi
 
     echo "$args"

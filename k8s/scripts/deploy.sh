@@ -244,14 +244,40 @@ configure_managed_data_services() {
     if [[ -z "${VALKEY_HOST:-}" ]]; then
         log_warn "VALKEY_HOST not set — update dataServices.valkey.host in config.yaml"
     fi
-
-    # Create keycloak-db-secret if not exists (password must be provided externally)
-    if ! kubectl get secret keycloak-db-secret -n keycloak &>/dev/null; then
-        log_warn "keycloak-db-secret not found in keycloak namespace."
-        log_warn "Create it: kubectl create secret generic keycloak-db-secret -n keycloak --from-literal=password=<PG_PASSWORD>"
+    if [[ -z "${S3_ENDPOINT:-}" ]]; then
+        log_warn "S3_ENDPOINT not set — update dataServices.s3.endpoint in config.yaml"
     fi
 
-    log_info "Managed data services configured (ensure secrets are created externally)"
+    local missing_secrets=()
+
+    kubectl create namespace keycloak 2>/dev/null || true
+    kubectl create namespace gitlab 2>/dev/null || true
+
+    if ! kubectl get secret keycloak-db-secret -n keycloak &>/dev/null; then
+        missing_secrets+=("keycloak-db-secret -n keycloak (keys: password)")
+    fi
+    if ! kubectl get secret gitlab-postgresql-secret -n gitlab &>/dev/null; then
+        missing_secrets+=("gitlab-postgresql-secret -n gitlab (keys: password, postgres-password)")
+    fi
+    if ! kubectl get secret gitlab-redis-secret -n gitlab &>/dev/null; then
+        missing_secrets+=("gitlab-redis-secret -n gitlab (keys: password)")
+    fi
+    if ! kubectl get secret gitlab-object-storage-secret -n gitlab &>/dev/null; then
+        missing_secrets+=("gitlab-object-storage-secret -n gitlab (keys: connection)")
+    fi
+    if ! kubectl get secret gitlab-registry-storage-secret -n gitlab &>/dev/null; then
+        missing_secrets+=("gitlab-registry-storage-secret -n gitlab (keys: config)")
+    fi
+
+    if [[ ${#missing_secrets[@]} -gt 0 ]]; then
+        log_warn "The following secrets must be created before deploying:"
+        for s in "${missing_secrets[@]}"; do
+            log_warn "  kubectl create secret generic $s"
+        done
+        log_warn "Services will fail to start without these secrets."
+    fi
+
+    log_info "Managed data services configured"
 }
 
 install_keycloak() {
@@ -408,7 +434,7 @@ apply_devops_ingress() {
     local ingress_file="${OVERLAY_DIR}/devops/ingress.yaml"
     local templated_ingress="/tmp/devops-ingress.yaml"
 
-    envsubst < "$ingress_file" > "$templated_ingress"
+    template_values "$ingress_file" "$templated_ingress"
     kubectl apply -f "$templated_ingress"
 
     log_info "DevOps ingress applied"

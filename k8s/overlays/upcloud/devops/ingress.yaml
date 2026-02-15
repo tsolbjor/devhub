@@ -25,7 +25,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: keycloak
+                name: keycloak-keycloakx-http
                 port:
                   number: 80
 ---
@@ -143,7 +143,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: kube-prometheus-stack-grafana
+                name: prometheus-grafana
                 port:
                   number: 80
 ---
@@ -169,6 +169,6 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: kube-prometheus-stack-prometheus
+                name: prometheus-kube-prometheus-prometheus
                 port:
                   number: 9090
