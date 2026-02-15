@@ -8,51 +8,51 @@ Kubernetes DevOps platform deployed on Rancher Desktop (WSL2) for local developm
 
 ## Common Commands
 
-All scripts are in `k8s/scripts/local/`. Run from that directory.
+All scripts are in `k8s/scripts/`. Run from that directory. All scripts require `--env local|upcloud`.
 
 ```bash
 # Full automated setup (20-40 min, zero manual steps)
-./setup-all.sh
+./setup-all.sh --env local
 
 # Deploy entire platform (or redeploy after changes)
-./deploy.sh local
+./deploy.sh --env local
 
 # Deploy a single service
-./deploy.sh local keycloak
-./deploy.sh local argocd
-./deploy.sh local monitoring
-./deploy.sh local vault
-./deploy.sh local gitlab
+./deploy.sh --env local keycloak
+./deploy.sh --env local argocd
+./deploy.sh --env local monitoring
+./deploy.sh --env local vault
+./deploy.sh --env local gitlab
 
 # Check status
-./deploy.sh local all status
+./deploy.sh --env local all status
 
 # Delete everything
-./deploy.sh local all delete
+./deploy.sh --env local all delete
 
 # Bootstrap ArgoCD app-of-apps
-./deploy.sh local bootstrap
+./deploy.sh --env local bootstrap
 
 # Generate local CA and TLS certs
-./setup-ca.sh
+./setup-ca.sh --env local
 
 # Set up nginx-ingress and cluster resources
-./setup-cluster.sh
+./setup-cluster.sh --env local
 
 # Configure Keycloak realm, groups, and OIDC clients
-./setup-keycloak.sh
+./setup-keycloak.sh --env local
 
 # Initialize and unseal Vault
-./setup-vault.sh
+./setup-vault.sh --env local
 ```
 
 ## Architecture
 
 ### Configuration Flow
 
-1. `k8s/overlays/{local,upcloud}/config.yaml` — single source of truth for domain and TLS settings
-2. `deploy.sh` reads config.yaml, exports env vars
-3. `envsubst` templates Helm values files with **only** `${DOMAIN} ${TLS_SECRET_NAME} ${CLUSTER_ISSUER} ${ACME_EMAIL}` — this restriction is intentional to avoid breaking ArgoCD's `$oidc.keycloak.clientSecret` variable
+1. `k8s/overlays/{local,upcloud}/config.yaml` — single source of truth for domain, TLS, and data services settings
+2. `deploy.sh` reads config.yaml via `lib/common.sh`, exports env vars
+3. `envsubst` templates Helm values files with **only** `${DOMAIN} ${TLS_SECRET_NAME} ${CLUSTER_ISSUER} ${ACME_EMAIL} ${PG_HOST} ${VALKEY_HOST} ${S3_ENDPOINT} ${S3_REGION}` — this restriction is intentional to avoid breaking ArgoCD's `$oidc.keycloak.clientSecret` variable
 4. `helm upgrade --install` applies templated values
 
 ### Directory Layout
@@ -61,7 +61,10 @@ All scripts are in `k8s/scripts/local/`. Run from that directory.
 - `k8s/overlays/{local,upcloud}/devops/` — environment-specific Helm value overrides and ingress definitions
 - `k8s/argocd/apps/` — ArgoCD Application manifests (app-of-apps pattern auto-syncs everything here)
 - `k8s/argocd/projects/` — ArgoCD project RBAC definitions
-- `k8s/scripts/local/` — deployment and setup automation scripts
+- `k8s/scripts/` — consolidated deployment and setup scripts (use `--env local|upcloud`)
+- `k8s/scripts/lib/` — shared shell library (logging, config parsing, templating)
+- `k8s/scripts/local/` — generated files for local env (oidc-secrets.env, vault-init-keys.json)
+- `k8s/scripts/upcloud/` — generated files for upcloud env
 - `k8s/scripts/windows/` — PowerShell scripts for Windows host CA install and hosts file setup
 - `k8s/certs/` — generated CA and domain certs (gitignored)
 - `k8s/docs/` — detailed guides (LOCAL_SETUP.md, UPCLOUD_SETUP.md, KEYCLOAK_SSO.md, SSO_TESTING_GUIDE.md)
