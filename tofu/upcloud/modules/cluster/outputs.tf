@@ -1,3 +1,5 @@
+# ─── Cluster ─────────────────────────────────────────────────────────
+
 output "cluster_id" {
   description = "The ID of the Kubernetes cluster"
   value       = upcloud_kubernetes_cluster.main.id
@@ -28,7 +30,7 @@ output "zone" {
   value       = var.zone
 }
 
-# ─── PostgreSQL Outputs ──────────────────────────────────────────────
+# ─── PostgreSQL ──────────────────────────────────────────────────────
 
 output "pg_host" {
   description = "PostgreSQL private hostname"
@@ -52,7 +54,7 @@ output "pg_gitlab_password" {
   sensitive   = true
 }
 
-# ─── Valkey Outputs ──────────────────────────────────────────────────
+# ─── Valkey ──────────────────────────────────────────────────────────
 
 output "valkey_host" {
   description = "Valkey private hostname"
@@ -70,7 +72,7 @@ output "valkey_password" {
   sensitive   = true
 }
 
-# ─── Object Storage Outputs ─────────────────────────────────────────
+# ─── Object Storage ─────────────────────────────────────────────────
 
 output "s3_endpoint" {
   description = "S3-compatible public endpoint"
