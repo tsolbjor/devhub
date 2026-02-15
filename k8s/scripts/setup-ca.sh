@@ -4,12 +4,19 @@ set -euo pipefail
 # =============================================================================
 # Local CA and Certificate Setup Script
 # =============================================================================
-# This script creates a local Certificate Authority and generates certificates
+# Creates a local Certificate Authority and generates certificates
 # for local development with Kubernetes.
+#
+# Usage: ./setup-ca.sh --env local
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CERTS_DIR="${SCRIPT_DIR}/../../certs"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+parse_env_arg "$@"
+setup_paths
+
+# Certificate directories
 CA_DIR="${CERTS_DIR}/ca"
 DOMAIN_CERTS_DIR="${CERTS_DIR}/domains"
 
@@ -19,7 +26,6 @@ CA_VALID_DAYS=3650  # 10 years
 CERT_VALID_DAYS=825 # ~2 years
 
 # Domains to generate certificates for
-# Application domains
 DOMAINS=(
     "localhost"
     "*.localhost"
@@ -37,33 +43,15 @@ DOMAINS=(
     "prometheus.localhost"
 )
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
-
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
 # Check for required tools
-check_requirements() {
+check_ca_requirements() {
     log_info "Checking requirements..."
-    
-    if ! command -v openssl &> /dev/null; then
+
+    if ! command -v openssl &>/dev/null; then
         log_error "openssl is required but not installed."
         exit 1
     fi
-    
+
     log_info "All requirements satisfied."
 }
 
@@ -81,10 +69,10 @@ generate_ca() {
         log_warn "Delete ${CA_DIR} to regenerate."
         return 0
     fi
-    
+
     log_info "Generating CA private key..."
     openssl genrsa -out "${CA_DIR}/ca.key" 4096
-    
+
     log_info "Generating CA certificate..."
     openssl req -x509 -new -nodes \
         -key "${CA_DIR}/ca.key" \
@@ -92,10 +80,9 @@ generate_ca() {
         -days ${CA_VALID_DAYS} \
         -out "${CA_DIR}/ca.crt" \
         -subj "/CN=${CA_NAME}/O=Local Development/C=NO"
-    
-    # Also create a .pem copy for Windows compatibility
+
     cp "${CA_DIR}/ca.crt" "${CA_DIR}/ca.pem"
-    
+
     log_info "CA certificate generated successfully."
     log_info "CA certificate location: ${CA_DIR}/ca.crt"
 }
@@ -103,22 +90,21 @@ generate_ca() {
 # Generate domain certificate
 generate_domain_cert() {
     log_info "Generating domain certificate..."
-    
+
     local CERT_NAME="local-dev"
     local KEY_FILE="${DOMAIN_CERTS_DIR}/${CERT_NAME}.key"
     local CSR_FILE="${DOMAIN_CERTS_DIR}/${CERT_NAME}.csr"
     local CERT_FILE="${DOMAIN_CERTS_DIR}/${CERT_NAME}.crt"
     local EXT_FILE="${DOMAIN_CERTS_DIR}/${CERT_NAME}.ext"
-    
-    # Generate private key
+
     log_info "Generating private key for domains..."
     openssl genrsa -out "${KEY_FILE}" 2048
-    
+
     # Build SAN extension
     local SAN_ENTRIES=""
     local DNS_COUNT=1
     local IP_COUNT=1
-    
+
     for domain in "${DOMAINS[@]}"; do
         if [[ "${domain}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             SAN_ENTRIES="${SAN_ENTRIES}IP.${IP_COUNT} = ${domain}\n"
@@ -128,11 +114,9 @@ generate_domain_cert() {
             ((DNS_COUNT++))
         fi
     done
-    
-    # Add localhost IP
+
     SAN_ENTRIES="${SAN_ENTRIES}IP.${IP_COUNT} = 127.0.0.1\n"
-    
-    # Create extension file
+
     cat > "${EXT_FILE}" << EOF
 authorityKeyIdentifier=keyid,issuer
 basicConstraints=CA:FALSE
@@ -143,15 +127,13 @@ subjectAltName = @alt_names
 [alt_names]
 $(echo -e "${SAN_ENTRIES}")
 EOF
-    
-    # Generate CSR
+
     log_info "Generating certificate signing request..."
     openssl req -new \
         -key "${KEY_FILE}" \
         -out "${CSR_FILE}" \
         -subj "/CN=localhost/O=Local Development/C=NO"
-    
-    # Sign with CA
+
     log_info "Signing certificate with CA..."
     openssl x509 -req \
         -in "${CSR_FILE}" \
@@ -162,13 +144,11 @@ EOF
         -days ${CERT_VALID_DAYS} \
         -sha256 \
         -extfile "${EXT_FILE}"
-    
-    # Create combined PEM file
+
     cat "${CERT_FILE}" "${CA_DIR}/ca.crt" > "${DOMAIN_CERTS_DIR}/${CERT_NAME}-fullchain.crt"
-    
-    # Cleanup CSR and extension file
+
     rm -f "${CSR_FILE}" "${EXT_FILE}"
-    
+
     log_info "Domain certificate generated successfully."
     log_info "Certificate: ${CERT_FILE}"
     log_info "Private Key: ${KEY_FILE}"
@@ -178,13 +158,12 @@ EOF
 create_k8s_secret() {
     log_info "Creating Kubernetes TLS secret manifest..."
 
-    local SECRET_FILE="${SCRIPT_DIR}/../../overlays/local/tls-secret.yaml"
-    # Use fullchain certificate (cert + CA) for proper chain validation
+    local SECRET_FILE="${OVERLAY_DIR}/tls-secret.yaml"
     local CERT_B64=$(base64 -w 0 "${DOMAIN_CERTS_DIR}/local-dev-fullchain.crt")
     local KEY_B64=$(base64 -w 0 "${DOMAIN_CERTS_DIR}/local-dev.key")
-    
+
     mkdir -p "$(dirname "${SECRET_FILE}")"
-    
+
     cat > "${SECRET_FILE}" << EOF
 # Auto-generated - DO NOT EDIT
 # Generated by setup-ca.sh
@@ -198,17 +177,17 @@ data:
   tls.crt: ${CERT_B64}
   tls.key: ${KEY_B64}
 EOF
-    
+
     log_info "Kubernetes TLS secret manifest created: ${SECRET_FILE}"
 }
 
 # Create CA ConfigMap for trust distribution
 create_ca_configmap() {
     log_info "Creating CA ConfigMap manifest..."
-    
-    local CONFIGMAP_FILE="${SCRIPT_DIR}/../../overlays/local/ca-configmap.yaml"
+
+    local CONFIGMAP_FILE="${OVERLAY_DIR}/ca-configmap.yaml"
     local CA_B64=$(base64 -w 0 "${CA_DIR}/ca.crt")
-    
+
     cat > "${CONFIGMAP_FILE}" << EOF
 # Auto-generated - DO NOT EDIT
 # Generated by setup-ca.sh
@@ -231,7 +210,7 @@ type: Opaque
 data:
   ca.crt: ${CA_B64}
 EOF
-    
+
     log_info "CA ConfigMap manifest created: ${CONFIGMAP_FILE}"
 }
 
@@ -261,7 +240,7 @@ print_summary() {
     echo "   powershell -ExecutionPolicy Bypass -File scripts/windows/setup-hosts.ps1"
     echo ""
     echo "3. Set up the local Kubernetes cluster:"
-    echo "   ./setup-cluster.sh"
+    echo "   ./setup-cluster.sh --env local"
     echo ""
 }
 
@@ -283,8 +262,13 @@ main() {
     echo "=============================================="
     echo "Local CA and Certificate Setup"
     echo "=============================================="
-    
-    check_requirements
+
+    if [[ "$ENV" != "local" ]]; then
+        log_info "CA setup is only needed for local environment. Skipping."
+        exit 0
+    fi
+
+    check_ca_requirements
     create_directories
     create_gitignore
     generate_ca
@@ -294,4 +278,4 @@ main() {
     print_summary
 }
 
-main "$@"
+main

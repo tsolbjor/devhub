@@ -29,6 +29,7 @@ services:
 
 # Managed data services - CUSTOMIZE for your UpCloud environment
 dataServices:
+  type: managed
   postgresql:
     host: managed-pg.example.com
   valkey:

@@ -14,6 +14,10 @@ tls:
 # Email for ACME (not used locally)
 acmeEmail: ""
 
+# Data services configuration
+dataServices:
+  type: local
+
 # Service subdomains (relative to domain)
 services:
   keycloak: keycloak

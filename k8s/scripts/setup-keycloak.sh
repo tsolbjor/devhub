@@ -5,26 +5,33 @@ set -euo pipefail
 # Keycloak Realm and Client Configuration Script
 # =============================================================================
 # Creates the devops realm and configures OIDC clients for all services.
+#
+# Usage: ./setup-keycloak.sh --env local|upcloud [all|realm|clients|user]
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+parse_env_arg "$@"
+set -- "${ARGS[@]}"
+
+setup_paths
+parse_config
 
 # Configuration
-DOMAIN="${DOMAIN:-localhost}"
 REALM="devops"
 KCADM="/opt/keycloak/bin/kcadm.sh"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-log_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
+# Determine Keycloak internal URL for server-side OIDC endpoints.
+# *.localhost resolves to 127.0.0.1 inside glibc-based containers (RFC 6761),
+# so we must use internal K8s service URLs for server-side calls.
+if [[ "$DOMAIN" == "localhost" || "$DOMAIN" == *.localhost ]]; then
+    KEYCLOAK_INTERNAL_URL="http://keycloak-keycloakx-http.keycloak.svc.cluster.local"
+    USE_DISCOVERY=false
+else
+    KEYCLOAK_INTERNAL_URL="https://keycloak.${DOMAIN}"
+    USE_DISCOVERY=true
+fi
 
 # Execute kcadm command in Keycloak pod
 kcadm() {
@@ -42,13 +49,11 @@ kcadm_login() {
 create_realm() {
     log_step "Creating realm: ${REALM}..."
 
-    # Check if realm exists
     if kcadm get realms/${REALM} >/dev/null 2>&1; then
         log_warn "Realm ${REALM} already exists"
         return 0
     fi
 
-    # Create realm
     kcadm create realms -s realm=${REALM} -s enabled=true \
         -s displayName="DevOps Platform" \
         -s registrationAllowed=false \
@@ -68,7 +73,6 @@ create_client() {
     local redirect_uri="$2"
     local public="${3:-false}"
 
-    # Check if client exists
     local existing=$(kcadm get clients -r ${REALM} --fields id,clientId 2>/dev/null | grep "\"clientId\" : \"${client_id}\"" -B 1 | grep "\"id\"" | cut -d'"' -f4 || echo "")
 
     if [[ -n "$existing" ]]; then
@@ -79,10 +83,8 @@ create_client() {
         fi
     fi
 
-    # Generate client secret
     local client_secret=$(openssl rand -hex 32)
 
-    # Create client (redirect output to stderr for logging)
     kcadm create clients -r ${REALM} \
         -s clientId=${client_id} \
         -s enabled=true \
@@ -114,11 +116,10 @@ create_groups() {
     done
 }
 
-# Configure groups client scope so group membership is included in tokens
+# Configure groups client scope
 configure_groups_scope() {
     log_step "Configuring groups client scope..."
 
-    # Check if groups scope already exists
     local scope_id=$(kcadm get client-scopes -r ${REALM} --fields id,name 2>/dev/null | grep -B 1 "\"name\" : \"groups\"" | grep "\"id\"" | cut -d'"' -f4 || echo "")
 
     if [[ -z "$scope_id" ]]; then
@@ -128,7 +129,6 @@ configure_groups_scope() {
             -s 'attributes={"include.in.token.scope":"true","display.on.consent.screen":"true"}' -i 2>&1)
         log_info "Created groups client scope: ${scope_id}"
 
-        # Add group membership protocol mapper
         kcadm create client-scopes/${scope_id}/protocol-mappers/models -r ${REALM} \
             -s name=groups \
             -s protocol=openid-connect \
@@ -139,10 +139,8 @@ configure_groups_scope() {
         log_warn "Groups client scope already exists"
     fi
 
-    # Add as default realm scope
     kcadm update realms/${REALM}/default-default-client-scopes/${scope_id} -r ${REALM} 2>/dev/null || true
 
-    # Add to each of our OIDC clients
     for client_name in "grafana" "argocd" "gitlab" "vault"; do
         local client_id=$(kcadm get clients -r ${REALM} --fields id,clientId 2>/dev/null | grep "\"clientId\" : \"${client_name}\"" -B 1 | grep "\"id\"" | cut -d'"' -f4 || echo "")
         if [[ -n "$client_id" ]]; then
@@ -156,7 +154,7 @@ configure_groups_scope() {
 create_admin_user() {
     log_step "Creating admin users..."
 
-    local secrets_file="${SCRIPT_DIR}/oidc-secrets.env"
+    local secrets_file="${SCRIPT_ENV_DIR}/oidc-secrets.env"
 
     # Create devops-admin (temporary password)
     if kcadm get users -r ${REALM} -q username=devops-admin 2>/dev/null | grep -q "username"; then
@@ -192,7 +190,6 @@ create_admin_user() {
     if kcadm get users -r ${REALM} -q username=platform-admin 2>/dev/null | grep -q "username"; then
         log_warn "User platform-admin already exists"
     else
-        # Generate shell-safe password (alphanumeric only to avoid kcadm escaping issues)
         local admin_password="Admin$(openssl rand -hex 4)"
 
         kcadm create users -r ${REALM} \
@@ -228,7 +225,7 @@ create_admin_user() {
 configure_clients() {
     log_step "Configuring OIDC clients..."
 
-    local secrets_file="${SCRIPT_DIR}/oidc-secrets.env"
+    local secrets_file="${SCRIPT_ENV_DIR}/oidc-secrets.env"
     : > "${secrets_file}"
     chmod 600 "${secrets_file}"
 
@@ -248,7 +245,6 @@ configure_clients() {
         "https://argocd.${DOMAIN}/auth/callback")
     echo "ARGOCD_OIDC_SECRET=${argocd_secret}" >> "${secrets_file}"
 
-    # Patch or create argocd-secret with OIDC client secret
     if kubectl get secret argocd-secret -n argocd >/dev/null 2>&1; then
         kubectl patch secret argocd-secret -n argocd \
             --type='json' \
@@ -265,12 +261,31 @@ configure_clients() {
         "https://gitlab.${DOMAIN}/users/auth/openid_connect/callback")
     echo "GITLAB_OIDC_SECRET=${gitlab_secret}" >> "${secrets_file}"
 
-    # GitLab requires a specific format for OmniAuth provider configuration
-    # Uses internal Keycloak URL for server-side endpoints (token, userinfo, jwks)
-    # because *.localhost resolves to loopback inside pods (RFC 6761 / glibc)
-    local KC_INTERNAL="http://keycloak-keycloakx-http.keycloak.svc.cluster.local"
-    kubectl create secret generic gitlab-oidc-secret -n gitlab \
-        --from-literal=provider="$(cat <<EOF
+    # GitLab OIDC config: use discovery for non-localhost, explicit endpoints for localhost
+    if [[ "$USE_DISCOVERY" == "true" ]]; then
+        kubectl create secret generic gitlab-oidc-secret -n gitlab \
+            --from-literal=provider="$(cat <<EOF
+name: 'openid_connect'
+label: 'Keycloak'
+args:
+  name: 'openid_connect'
+  scope: ['openid', 'profile', 'email', 'groups']
+  response_type: 'code'
+  issuer: 'https://keycloak.${DOMAIN}/realms/devops'
+  discovery: true
+  client_auth_method: 'query'
+  uid_field: 'preferred_username'
+  client_options:
+    identifier: 'gitlab'
+    secret: '${gitlab_secret}'
+    redirect_uri: 'https://gitlab.${DOMAIN}/users/auth/openid_connect/callback'
+EOF
+)" \
+            --dry-run=client -o yaml | kubectl apply -f -
+    else
+        # .localhost domain: use internal URLs for server-side endpoints
+        kubectl create secret generic gitlab-oidc-secret -n gitlab \
+            --from-literal=provider="$(cat <<EOF
 name: 'openid_connect'
 label: 'Keycloak'
 args:
@@ -286,13 +301,14 @@ args:
     secret: '${gitlab_secret}'
     redirect_uri: 'https://gitlab.${DOMAIN}/users/auth/openid_connect/callback'
     authorization_endpoint: 'https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/auth'
-    token_endpoint: '${KC_INTERNAL}/realms/devops/protocol/openid-connect/token'
-    userinfo_endpoint: '${KC_INTERNAL}/realms/devops/protocol/openid-connect/userinfo'
-    jwks_uri: '${KC_INTERNAL}/realms/devops/protocol/openid-connect/certs'
+    token_endpoint: '${KEYCLOAK_INTERNAL_URL}/realms/devops/protocol/openid-connect/token'
+    userinfo_endpoint: '${KEYCLOAK_INTERNAL_URL}/realms/devops/protocol/openid-connect/userinfo'
+    jwks_uri: '${KEYCLOAK_INTERNAL_URL}/realms/devops/protocol/openid-connect/certs'
     end_session_endpoint: 'https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/logout'
 EOF
 )" \
-        --dry-run=client -o yaml | kubectl apply -f -
+            --dry-run=client -o yaml | kubectl apply -f -
+    fi
 
     # Vault
     log_info "Configuring Vault OIDC client..."
@@ -309,8 +325,6 @@ EOF
     log_info "Kubernetes secrets created in respective namespaces"
 
     # Restart services that mount OIDC secrets as volumes/env vars
-    # ArgoCD watches argocd-secret natively (no restart needed)
-    # Vault uses API-based OIDC config (no restart needed)
     log_info "Restarting services to pick up real OIDC secrets..."
     kubectl rollout restart deployment/prometheus-grafana -n monitoring 2>/dev/null || true
     kubectl rollout restart deployment/gitlab-webservice-default -n gitlab 2>/dev/null || true
@@ -330,7 +344,7 @@ print_summary() {
     echo "Realm Login: https://keycloak.${DOMAIN}/realms/${REALM}/account/"
     echo ""
     echo "Credentials saved to:"
-    echo "  ${SCRIPT_DIR}/oidc-secrets.env"
+    echo "  ${SCRIPT_ENV_DIR}/oidc-secrets.env"
     echo ""
     echo "Realm Users:"
     echo "  - platform-admin (permanent password, full admin access)"
@@ -342,17 +356,6 @@ print_summary() {
     echo "  - GitLab: https://gitlab.${DOMAIN}"
     echo "  - Vault: https://vault.${DOMAIN}"
     echo ""
-    echo "Testing SSO:"
-    echo "  1. Open any service URL in a browser"
-    echo "  2. Click 'Sign in with Keycloak' (or similar)"
-    echo "  3. Log in with platform-admin credentials"
-    echo "  4. You should be granted admin access to the service"
-    echo ""
-    echo "Next steps:"
-    echo "  - Test SSO login to each service"
-    echo "  - Create additional users in Keycloak admin console"
-    echo "  - Assign users to appropriate groups (devops-admins/developers/viewers)"
-    echo ""
 }
 
 # Main
@@ -360,15 +363,13 @@ main() {
     local action="${1:-all}"
 
     echo "=============================================="
-    echo "Keycloak Setup"
+    echo "Keycloak Setup (${ENV})"
     echo "Domain: ${DOMAIN}"
     echo "=============================================="
 
-    # Wait for Keycloak to be ready
     log_info "Waiting for Keycloak to be ready..."
     kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=keycloakx -n keycloak --timeout=300s
 
-    # Login to admin CLI
     kcadm_login
 
     case "$action" in
@@ -390,7 +391,7 @@ main() {
             create_admin_user
             ;;
         *)
-            echo "Usage: $0 [all|realm|clients|user]"
+            echo "Usage: $0 --env local|upcloud [all|realm|clients|user]"
             exit 1
             ;;
     esac
