@@ -4,18 +4,38 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Kubernetes DevOps platform deployed on Rancher Desktop (WSL2) for local development and UpCloud for production. The platform provides identity management (Keycloak), secrets management (Vault), source control (GitLab), GitOps (ArgoCD), and monitoring (Prometheus/Grafana/Loki/Tempo).
+Kubernetes DevOps platform with two layers:
+1. **Infrastructure (OpenTofu)** — provisions UpCloud K8s clusters and managed data services (PostgreSQL, Valkey, S3)
+2. **Platform (Helm/K8s)** — deploys DevOps services (Keycloak, Vault, GitLab, ArgoCD, Prometheus/Grafana/Loki/Tempo)
+
+Environments: `local` (Rancher Desktop/WSL2), `upcloud-dev`, `upcloud-prod`.
 
 ## Common Commands
 
-All scripts are in `k8s/scripts/`. Run from that directory. All scripts require `--env local|upcloud`.
+### OpenTofu (infrastructure)
 
 ```bash
-# Full automated setup (20-40 min, zero manual steps)
+# Provision dev infrastructure
+cd tofu/upcloud/dev && tofu init && tofu plan && tofu apply
+
+# Provision prod infrastructure
+cd tofu/upcloud/prod && tofu init && tofu plan && tofu apply
+```
+
+### K8s Scripts (platform services)
+
+All scripts are in `k8s/scripts/`. Run from that directory. All scripts require `--env local|upcloud-dev|upcloud-prod`.
+
+```bash
+# Full local automated setup (20-40 min, zero manual steps)
 ./setup-all.sh --env local
+
+# Sync tofu outputs into k8s overlay config + fetch kubeconfig
+./sync-tofu-outputs.sh --env upcloud-dev
 
 # Deploy entire platform (or redeploy after changes)
 ./deploy.sh --env local
+./deploy.sh --env upcloud-dev
 
 # Deploy a single service
 ./deploy.sh --env local keycloak
@@ -48,36 +68,67 @@ All scripts are in `k8s/scripts/`. Run from that directory. All scripts require 
 
 ## Architecture
 
+### UpCloud Deployment Workflow
+
+```
+tofu apply (dev/ or prod/)
+    → provisions: K8s cluster, private network, PostgreSQL, Valkey, Object Storage
+    ↓
+sync-tofu-outputs.sh --env upcloud-dev
+    → writes PG_HOST, VALKEY_HOST, S3_ENDPOINT into k8s overlay config.yaml
+    → fetches kubeconfig via upctl
+    ↓
+deploy.sh --env upcloud-dev
+    → reads config.yaml, templates Helm values, deploys services
+```
+
 ### Configuration Flow
 
-1. `k8s/overlays/{local,upcloud}/config.yaml` — single source of truth for domain, TLS, and data services settings
+1. `k8s/overlays/{env}/config.yaml` — single source of truth for domain, TLS, and data services settings
 2. `deploy.sh` reads config.yaml via `lib/common.sh`, exports env vars
 3. `envsubst` templates Helm values files with **only** `${DOMAIN} ${TLS_SECRET_NAME} ${CLUSTER_ISSUER} ${ACME_EMAIL} ${PG_HOST} ${VALKEY_HOST} ${S3_ENDPOINT} ${S3_REGION}` — this restriction is intentional to avoid breaking ArgoCD's `$oidc.keycloak.clientSecret` variable
 4. `helm upgrade --install` applies templated values
 
 ### Directory Layout
 
-- `k8s/base/devops/` — base Helm values for each service
-- `k8s/overlays/{local,upcloud}/devops/` — environment-specific Helm value overrides and ingress definitions
-- `k8s/argocd/apps/` — ArgoCD Application manifests (app-of-apps pattern auto-syncs everything here)
-- `k8s/argocd/projects/` — ArgoCD project RBAC definitions
-- `k8s/scripts/` — consolidated deployment and setup scripts (use `--env local|upcloud`)
-- `k8s/scripts/lib/` — shared shell library (logging, config parsing, templating)
-- `k8s/scripts/local/` — generated files for local env (oidc-secrets.env, vault-init-keys.json)
-- `k8s/scripts/upcloud/` — generated files for upcloud env
-- `k8s/scripts/windows/` — PowerShell scripts for Windows host CA install and hosts file setup
-- `k8s/certs/` — generated CA and domain certs (gitignored)
-- `k8s/docs/` — detailed guides (LOCAL_SETUP.md, UPCLOUD_SETUP.md, KEYCLOAK_SSO.md, SSO_TESTING_GUIDE.md)
+```
+tshub2/
+├── tofu/upcloud/                    # Infrastructure as Code (OpenTofu)
+│   ├── modules/cluster/             #   Shared module: K8s + data services
+│   ├── dev/                         #   Dev environment root module
+│   └── prod/                        #   Prod environment root module
+├── k8s/
+│   ├── base/devops/                 #   Base Helm values for each service
+│   ├── overlays/
+│   │   ├── local/                   #   Local dev (Rancher Desktop)
+│   │   ├── upcloud/devops/          #   Shared UpCloud Helm overrides
+│   │   ├── upcloud-dev/             #   UpCloud dev (config.yaml + devops symlink)
+│   │   └── upcloud-prod/            #   UpCloud prod (config.yaml + devops symlink)
+│   ├── argocd/                      #   App-of-apps GitOps manifests
+│   ├── scripts/                     #   Deployment and setup scripts
+│   │   ├── lib/common.sh            #     Shared library
+│   │   ├── sync-tofu-outputs.sh     #     Bridge: tofu outputs → k8s config
+│   │   ├── deploy.sh                #     Main deployment script
+│   │   ├── setup-*.sh               #     Setup scripts (CA, cluster, Keycloak, Vault)
+│   │   └── windows/                 #     PowerShell scripts for Windows host
+│   ├── certs/                       #   Generated certs (gitignored)
+│   └── docs/                        #   Detailed guides
+```
 
 ### Ingress
 
-Uses **nginx-ingress** controller (not Traefik). All ingresses use `ingressClassName: nginx`. Ingress rules for all services are defined in a single file: `k8s/overlays/local/devops/ingress.yaml`.
+Uses **nginx-ingress** controller (not Traefik). All ingresses use `ingressClassName: nginx`. Ingress rules are in `k8s/overlays/{upcloud,local}/devops/ingress.yaml`.
 
 ### Services and Namespaces
 
 Each service gets its own namespace: `keycloak`, `vault`, `gitlab`, `argocd`, `monitoring`, `external-secrets`. Application workloads go in `tshub` namespace.
 
 The local TLS secret (`local-tls-secret`) is copied into every service namespace by deploy.sh.
+
+### Data Services
+
+- **Local**: StatefulSets for PostgreSQL, Valkey, and MinIO deployed in `data-services` namespace
+- **UpCloud**: Managed services provisioned by OpenTofu (PostgreSQL, Valkey, Object Storage) on private SDN network
 
 ### Keycloak SSO
 
@@ -99,6 +150,8 @@ deploy.sh installs services in dependency order: namespaces → TLS secrets → 
 - Bash scripts use `set -euo pipefail` with colored logging (`[INFO]`, `[WARN]`, `[ERROR]`, `[STEP]`)
 - Config parsing uses `grep`/`sed` (no yq dependency required)
 - Helm values are split: base values in `k8s/base/devops/{service}/values.yaml`, overlay overrides in `k8s/overlays/{env}/devops/{service}/values.yaml`
+- UpCloud overlay envs (`upcloud-dev`, `upcloud-prod`) symlink `devops/` from `upcloud/devops/` — shared Helm values, separate config.yaml
 - ArgoCD apps follow the app-of-apps pattern: add a YAML file to `k8s/argocd/apps/` and ArgoCD auto-discovers it
+- OpenTofu uses module pattern: shared module in `tofu/upcloud/modules/cluster/`, env-specific root modules in `dev/` and `prod/`
 - YAML files must not have duplicate keys (silent override behavior)
 - Grafana requires `initChownData: enabled: false` for local k3s/Rancher Desktop

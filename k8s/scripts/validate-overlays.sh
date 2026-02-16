@@ -43,7 +43,7 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
-        local|upcloud|all)
+        local|upcloud|upcloud-dev|upcloud-prod|all)
             ENV="$1"
             shift
             ;;

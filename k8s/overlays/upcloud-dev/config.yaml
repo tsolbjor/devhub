@@ -1,0 +1,36 @@
+# UpCloud DEV environment configuration
+# Data service values are populated by: sync-tofu-outputs.sh --env upcloud-dev
+
+# Domain configuration - UPDATE THIS
+domain: dev.example.com
+
+# TLS configuration
+tls:
+  type: cert-manager
+  secretName: ""
+  clusterIssuer: letsencrypt-prod
+
+# Email for ACME certificate notifications - UPDATE THIS
+acmeEmail: admin@example.com
+
+# Service subdomains (relative to domain)
+services:
+  keycloak: keycloak
+  vault: vault
+  gitlab: gitlab
+  registry: registry
+  argocd: argocd
+  grafana: grafana
+  prometheus: prometheus
+  alertmanager: alertmanager
+
+# Managed data services — populated by sync-tofu-outputs.sh
+dataServices:
+  type: managed
+  postgresql:
+    host: PENDING_TOFU_OUTPUT
+  valkey:
+    host: PENDING_TOFU_OUTPUT
+  s3:
+    endpoint: PENDING_TOFU_OUTPUT
+    region: PENDING_TOFU_OUTPUT

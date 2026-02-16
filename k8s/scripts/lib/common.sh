@@ -25,7 +25,7 @@ log_phase() { echo -e "\n${CYAN}━━━━━━━━━━━━━━━━
 # Argument Parsing
 # =============================================================================
 
-# Parse --env local|upcloud from arguments.
+# Parse --env local|upcloud|upcloud-dev|upcloud-prod from arguments.
 # Sets ENV global and removes --env <val> from args.
 # Remaining args are placed in ARGS array.
 parse_env_arg() {
@@ -37,7 +37,7 @@ parse_env_arg() {
             --env)
                 if [[ -z "${2:-}" ]]; then
                     log_error "Missing value for --env"
-                    echo "Usage: $0 --env local|upcloud [...]"
+                    echo "Usage: $0 --env local|upcloud-dev|upcloud-prod [...]"
                     exit 1
                 fi
                 ENV="$2"
@@ -52,14 +52,14 @@ parse_env_arg() {
 
     if [[ -z "$ENV" ]]; then
         log_error "Missing required --env argument"
-        echo "Usage: $0 --env local|upcloud [...]"
+        echo "Usage: $0 --env local|upcloud-dev|upcloud-prod [...]"
         exit 1
     fi
 
     case "$ENV" in
-        local|upcloud) ;;
+        local|upcloud|upcloud-dev|upcloud-prod) ;;
         *)
-            log_error "Invalid environment: $ENV (must be local or upcloud)"
+            log_error "Invalid environment: $ENV (must be local, upcloud, upcloud-dev, or upcloud-prod)"
             exit 1
             ;;
     esac

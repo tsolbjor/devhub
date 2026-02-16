@@ -1,285 +1,209 @@
-# UpCloud Kubernetes Production Setup Guide
+# UpCloud Deployment Guide
 
-This guide walks you through deploying to UpCloud Managed Kubernetes with automatic Let's Encrypt TLS certificates.
+Deploy the DevOps platform to UpCloud Managed Kubernetes with managed data services and automatic Let's Encrypt TLS.
 
 ## Prerequisites
 
-- **UpCloud account** with Managed Kubernetes cluster created
-- **kubectl** configured with UpCloud cluster credentials
-- **helm** installed
+- **UpCloud account** with API credentials (`UPCLOUD_USERNAME`, `UPCLOUD_PASSWORD`)
+- **OpenTofu** installed (`tofu` CLI)
+- **upctl** installed (UpCloud CLI, for kubeconfig fetch)
+- **kubectl**, **helm**, **jq** installed
 - **Domain name** you control (for DNS configuration)
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Internet                              │
-│                           │                                  │
-│                           ▼                                  │
-│               ┌───────────────────┐                         │
-│               │  app.yourdomain.com                         │
-│               │  api.yourdomain.com                         │
-│               │      (DNS A records)                        │
-│               └───────────┬───────┘                         │
-│                           │                                  │
-│                           ▼                                  │
-│  ┌─────────────────────────────────────────────────────────┐│
-│  │               UpCloud Managed Kubernetes                 ││
-│  │                                                          ││
-│  │  ┌──────────────────────────────────────────────────┐   ││
-│  │  │              LoadBalancer (UpCloud)               │   ││
-│  │  │                   External IP                     │   ││
-│  │  └────────────────────┬─────────────────────────────┘   ││
-│  │                       │                                  ││
-│  │  ┌────────────────────▼─────────────────────────────┐   ││
-│  │  │              nginx-ingress controller             │   ││
-│  │  │          (TLS termination with cert-manager)      │   ││
-│  │  └────────────────────┬─────────────────────────────┘   ││
-│  │                       │                                  ││
-│  │         ┌─────────────┴─────────────┐                   ││
-│  │         │                           │                    ││
-│  │  ┌──────▼──────┐           ┌───────▼───────┐           ││
-│  │  │  frontend   │           │     api       │           ││
-│  │  │  service    │           │   service     │           ││
-│  │  └─────────────┘           └───────────────┘           ││
-│  │                                                          ││
-│  │  ┌───────────────────────────────────────────────────┐  ││
-│  │  │                   cert-manager                     │  ││
-│  │  │  (auto-issues Let's Encrypt certificates)         │  ││
-│  │  └───────────────────────────────────────────────────┘  ││
-│  └─────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────┘
+Internet
+    |
+    v
+DNS (*.yourdomain.com) --> UpCloud LoadBalancer
+    |
+    v
+nginx-ingress (TLS via cert-manager / Let's Encrypt)
+    |
+    +---> Keycloak (SSO)
+    +---> GitLab (source control, CI/CD)
+    +---> ArgoCD (GitOps)
+    +---> Grafana / Prometheus (monitoring)
+    +---> Vault (secrets)
+    |
+    v (private SDN network)
+    +---> Managed PostgreSQL (Keycloak DB, GitLab DB)
+    +---> Managed Valkey (GitLab cache/sessions)
+    +---> Managed Object Storage (GitLab artifacts, registry, backups)
 ```
 
 ## Step-by-Step Setup
 
-### Step 1: Get UpCloud Kubernetes Credentials
-
-1. Log in to UpCloud Control Panel
-2. Go to your Managed Kubernetes cluster
-3. Download the kubeconfig file
-4. Configure kubectl:
+### Step 1: Provision Infrastructure with OpenTofu
 
 ```bash
-export KUBECONFIG=/path/to/downloaded-kubeconfig.yaml
-# Or merge with existing config
+# Set UpCloud credentials
+export UPCLOUD_USERNAME=your-username
+export UPCLOUD_PASSWORD=your-password
+
+# For dev environment:
+cd tofu/upcloud/dev
+tofu init
+tofu plan     # Review what will be created
+tofu apply    # Provision (takes 10-15 min)
+
+# For prod environment:
+cd tofu/upcloud/prod
+tofu init && tofu apply
 ```
 
-5. Verify connection:
+This provisions:
+- Private SDN network with router and NAT gateway
+- Managed Kubernetes cluster with private worker nodes
+- Managed PostgreSQL (databases: `keycloak`, `gitlabhq_production`)
+- Managed Valkey (Redis-compatible)
+- Managed Object Storage with GitLab S3 buckets
+
+Review environment-specific settings in `tofu/upcloud/dev/main.tf` or `tofu/upcloud/prod/main.tf`.
+
+### Step 2: Sync Tofu Outputs to K8s Config
+
 ```bash
-kubectl cluster-info
-kubectl get nodes
+cd k8s/scripts
+./sync-tofu-outputs.sh --env upcloud-dev
 ```
 
-### Step 2: Configure Your Domains
+This script:
+- Reads tofu outputs (PG host, Valkey host, S3 endpoint, etc.)
+- Writes them into `k8s/overlays/upcloud-dev/config.yaml`
+- Fetches the cluster kubeconfig via `upctl`
 
-Edit [overlays/upcloud/apps/ingress.yaml](../overlays/upcloud/apps/ingress.yaml):
+### Step 3: Configure Domain and Email
+
+Edit `k8s/overlays/upcloud-dev/config.yaml`:
 
 ```yaml
-spec:
-  tls:
-    - hosts:
-        - app.yourdomain.com  # ← Change this
-        - api.yourdomain.com  # ← Change this
-      secretName: tshub-tls-secret
-  rules:
-    - host: app.yourdomain.com  # ← Change this
-      # ...
-    - host: api.yourdomain.com  # ← Change this
-      # ...
+domain: dev.yourdomain.com
+acmeEmail: admin@yourdomain.com
 ```
 
-### Step 3: Configure cert-manager Email
+### Step 4: Configure DNS
 
-Edit [overlays/upcloud/cert-manager/cluster-issuer.yaml](../overlays/upcloud/cert-manager/cluster-issuer.yaml):
+After tofu apply, the K8s cluster gets a LoadBalancer IP. Find it:
+
+```bash
+export KUBECONFIG=k8s/scripts/upcloud-dev/kubeconfig
+kubectl get svc -n ingress-nginx
+```
+
+Create wildcard DNS A record:
+```
+*.dev.yourdomain.com  A  <LoadBalancer IP>
+```
+
+Or individual records for each service (keycloak, gitlab, argocd, grafana, etc.)
+
+### Step 5: Deploy Platform Services
+
+```bash
+cd k8s/scripts
+export KUBECONFIG=upcloud-dev/kubeconfig
+
+# Deploy everything
+./deploy.sh --env upcloud-dev
+
+# Configure Keycloak SSO
+./setup-keycloak.sh --env upcloud-dev
+
+# Initialize Vault
+./setup-vault.sh --env upcloud-dev
+
+# Bootstrap ArgoCD GitOps
+./deploy.sh --env upcloud-dev bootstrap
+```
+
+### Step 6: Verify
+
+```bash
+# Check all services
+./deploy.sh --env upcloud-dev all status
+
+# Check certificate issuance
+kubectl get certificate -A
+kubectl describe certificate -n <namespace>
+
+# Access services
+open https://keycloak.dev.yourdomain.com
+open https://argocd.dev.yourdomain.com
+open https://grafana.dev.yourdomain.com
+```
+
+## Environment Differences
+
+| Setting | Dev (`tofu/upcloud/dev`) | Prod (`tofu/upcloud/prod`) |
+|---------|--------------------------|----------------------------|
+| Prefix | `tshub-dev` | `tshub` |
+| Zone | `no-svg1` | `de-fra1` |
+| Worker nodes | 2x `DEV-1xCPU-2GB` | 3x `4xCPU-8GB` |
+| PostgreSQL | `1x1xCPU-2GB-25GB` | `2x2xCPU-4GB-100GB` |
+| Termination protection | off | on |
+
+## Data Service Secrets
+
+After deploying with managed data services, `deploy.sh` checks for required K8s secrets. Create them using tofu outputs:
+
+```bash
+cd tofu/upcloud/dev
+
+# Get passwords
+tofu output pg_keycloak_password
+tofu output pg_gitlab_password
+tofu output valkey_password
+tofu output s3_access_key
+tofu output -raw s3_secret_key
+
+# Create K8s secrets (see deploy.sh configure_managed_data_services for required keys)
+kubectl create secret generic keycloak-db-secret -n keycloak \
+    --from-literal=password="$(tofu output -raw pg_keycloak_password)"
+
+kubectl create secret generic gitlab-postgresql-secret -n gitlab \
+    --from-literal=password="$(tofu output -raw pg_gitlab_password)"
+
+kubectl create secret generic gitlab-redis-secret -n gitlab \
+    --from-literal=password="$(tofu output -raw valkey_password)"
+```
+
+## TLS Certificates
+
+cert-manager automatically provisions Let's Encrypt certificates. For initial testing, use the staging issuer to avoid rate limits:
 
 ```yaml
-spec:
-  acme:
-    email: your-actual-email@example.com  # ← Change this
+# In config.yaml
+tls:
+  clusterIssuer: letsencrypt-staging   # Switch to letsencrypt-prod when verified
 ```
-
-This email receives certificate expiry notifications from Let's Encrypt.
-
-### Step 4: Run Cluster Setup
-
-```bash
-cd k8s/scripts/upcloud
-./setup-cluster.sh
-```
-
-This:
-- Installs cert-manager for automatic TLS certificates
-- Installs nginx-ingress controller
-- Creates ClusterIssuers for Let's Encrypt (staging and production)
-- Creates the application namespace
-
-### Step 5: Configure DNS
-
-After setup, you'll see the LoadBalancer external IP:
-```
-LoadBalancer external IP: 94.xxx.xxx.xxx
-```
-
-Create DNS A records pointing your domains to this IP:
-```
-app.yourdomain.com  A  94.xxx.xxx.xxx
-api.yourdomain.com  A  94.xxx.xxx.xxx
-```
-
-Wait for DNS propagation (can take up to 24 hours, usually minutes).
-
-Verify:
-```bash
-dig app.yourdomain.com +short
-```
-
-### Step 6: Deploy Services
-
-```bash
-cd k8s/scripts/upcloud
-
-# Set environment variables
-export DOMAIN=yourdomain.com
-export ACME_EMAIL=admin@yourdomain.com
-
-# Deploy everything (apps + devops)
-./deploy.sh upcloud all
-
-# Or deploy only apps
-./deploy.sh upcloud apps
-
-# Or deploy only devops platform
-./deploy.sh upcloud devops
-```
-
-### Step 7: Verify Certificate Issuance
-
-cert-manager will automatically request a Let's Encrypt certificate:
-
-```bash
-# Check certificate status
-kubectl get certificate -n tshub
-
-# Check certificate details
-kubectl describe certificate -n tshub
-
-# Check cert-manager logs if issues
-kubectl logs -n cert-manager -l app=cert-manager
-```
-
-## Production Considerations
-
-### Use Staging First
-
-For initial testing, use the staging ClusterIssuer to avoid Let's Encrypt rate limits:
-
-In your ingress, change:
-```yaml
-annotations:
-  cert-manager.io/cluster-issuer: "letsencrypt-staging"  # for testing
-```
-
-Staging certificates are NOT trusted by browsers but have no rate limits.
-
-Once verified working, switch to:
-```yaml
-annotations:
-  cert-manager.io/cluster-issuer: "letsencrypt-prod"  # for production
-```
-
-### Resource Limits
-
-Update resource requests/limits in your deployments for production workloads.
-
-### Monitoring
-
-Consider adding:
-- Prometheus for metrics
-- Grafana for dashboards
-- Loki for log aggregation
-
-### Secrets Management
-
-For production secrets:
-- Use External Secrets Operator with UpCloud or cloud secret managers
-- Or use Sealed Secrets for GitOps
 
 ## Troubleshooting
 
 ### Certificate not issuing
-
-1. Check cert-manager logs:
 ```bash
+kubectl get certificaterequest -A
+kubectl describe challenges -A
 kubectl logs -n cert-manager deploy/cert-manager
 ```
-
-2. Check certificate request:
-```bash
-kubectl get certificaterequest -n tshub
-kubectl describe certificaterequest -n tshub
-```
-
-3. Check challenges:
-```bash
-kubectl get challenges -n tshub
-kubectl describe challenges -n tshub
-```
-
-Common issues:
-- DNS not pointing to LoadBalancer IP
-- ClusterIssuer email not configured
-- Rate limited (use staging issuer)
-
-### 502 Bad Gateway
-
-1. Check if pods are running:
-```bash
-kubectl get pods -n tshub
-```
-
-2. Check service endpoints:
-```bash
-kubectl get endpoints -n tshub
-```
-
-3. Check ingress controller logs:
-```bash
-kubectl logs -n ingress-nginx -l app.kubernetes.io/component=controller
-```
+Common causes: DNS not pointing to LoadBalancer, rate limited (use staging)
 
 ### LoadBalancer stuck in Pending
-
-UpCloud may take a few minutes to provision the LoadBalancer. If it stays pending:
-
-1. Check UpCloud quota limits
-2. Verify the cluster has the cloud-controller-manager running
-
 ```bash
 kubectl get svc -n ingress-nginx -w
 ```
+UpCloud may take a few minutes. Check quota limits if it persists.
 
-## Updating Certificates
-
-cert-manager automatically renews certificates before expiry.
-
-To force renewal:
+### Cannot connect to managed databases
+Managed services are on the private network. Verify the K8s pods can reach them:
 ```bash
-kubectl delete secret tshub-tls-secret -n tshub
+kubectl run debug --rm -it --image=busybox -- nslookup <pg-host>
 ```
 
-cert-manager will detect the missing secret and request a new certificate.
-
-## Multiple Environments
-
-For staging/production environments, create additional overlays:
-
-```
-overlays/
-├── upcloud-staging/
-│   ├── kustomization.yaml
-│   └── ingress.yaml (staging.yourdomain.com)
-└── upcloud-production/
-    ├── kustomization.yaml
-    └── ingress.yaml (app.yourdomain.com)
+### Tofu state issues
+```bash
+cd tofu/upcloud/dev
+tofu refresh          # Sync state with actual resources
+tofu state list       # List managed resources
 ```

@@ -7,7 +7,7 @@ set -euo pipefail
 # Deploys DevOps platform infrastructure to local or UpCloud environments.
 # Applications are managed via ArgoCD GitOps (see k8s/argocd/).
 #
-# Usage: ./deploy.sh --env local|upcloud [component] [action]
+# Usage: ./deploy.sh --env local|upcloud-dev|upcloud-prod [component] [action]
 #
 # Components: all, devops, or specific services
 # Actions: deploy (default), status, delete
@@ -658,7 +658,7 @@ main() {
         *)
             log_error "Unknown action: $ACTION"
             echo ""
-            echo "Usage: $0 --env local|upcloud [component] [action]"
+            echo "Usage: $0 --env local|upcloud-dev|upcloud-prod [component] [action]"
             echo ""
             echo "Components:"
             echo "  all        - Deploy entire platform (alias for devops)"
