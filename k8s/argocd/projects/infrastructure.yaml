@@ -1,0 +1,42 @@
+# ArgoCD Project for Crossplane infrastructure resources
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: infrastructure
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Crossplane infrastructure resources (admin-only)
+
+  sourceRepos:
+    - '*'
+
+  destinations:
+    - namespace: crossplane-system
+      server: https://kubernetes.default.svc
+
+  # Crossplane CRs are cluster-scoped
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: uks.upcloud.com
+      kind: '*'
+    - group: database.upcloud.com
+      kind: '*'
+    - group: storage.upcloud.com
+      kind: '*'
+    - group: upcloud.upbound.io
+      kind: '*'
+
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+
+  roles:
+    - name: admin
+      description: Admin access to infrastructure apps
+      policies:
+        - p, proj:infrastructure:admin, applications, *, infrastructure/*, allow
+      groups:
+        - devops-admins

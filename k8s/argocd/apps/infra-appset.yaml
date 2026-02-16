@@ -1,0 +1,55 @@
+# ApplicationSet: auto-discover infrastructure repos from GitLab
+# Scans the 'tshub' group for repos containing an infrastructure/ directory
+# and deploys Crossplane CRs to the management cluster.
+#
+# Requires Secret 'argocd-gitlab-scm-token' in argocd namespace:
+#   kubectl create secret generic argocd-gitlab-scm-token -n argocd \
+#     --from-literal=token=YOUR_GITLAB_PAT
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: gitlab-infrastructure
+  namespace: argocd
+spec:
+  generators:
+    - scmProvider:
+        gitlab:
+          # Use internal service URL to avoid .localhost DNS issue
+          api: http://gitlab-webservice-default.gitlab.svc.cluster.local:8181
+          group: tshub
+          includeSubgroups: true
+          tokenRef:
+            secretName: argocd-gitlab-scm-token
+            key: token
+        filters:
+          - pathsExist:
+              - infrastructure/
+        cloneProtocol: https
+  template:
+    metadata:
+      name: 'infra-{{repository}}'
+      namespace: argocd
+      labels:
+        app.kubernetes.io/part-of: tshub
+        app.kubernetes.io/managed-by: applicationset
+    spec:
+      project: infrastructure
+      source:
+        repoURL: '{{url}}'
+        targetRevision: HEAD
+        path: infrastructure
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: crossplane-system
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - PrunePropagationPolicy=foreground
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m

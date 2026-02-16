@@ -62,3 +62,10 @@ metadata:
   name: argocd
   labels:
     name: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crossplane-system
+  labels:
+    name: crossplane-system

@@ -1,0 +1,41 @@
+# ArgoCD Project for workload applications discovered via GitLab ApplicationSet
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: workloads
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Workload applications auto-discovered from GitLab
+
+  sourceRepos:
+    - '*'
+
+  destinations:
+    - namespace: tshub-*
+      server: https://kubernetes.default.svc
+
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+
+  roles:
+    - name: developer
+      description: Developer access to workload apps
+      policies:
+        - p, proj:workloads:developer, applications, get, workloads/*, allow
+        - p, proj:workloads:developer, applications, sync, workloads/*, allow
+      groups:
+        - developers
+
+    - name: admin
+      description: Admin access to workload apps
+      policies:
+        - p, proj:workloads:admin, applications, *, workloads/*, allow
+      groups:
+        - devops-admins

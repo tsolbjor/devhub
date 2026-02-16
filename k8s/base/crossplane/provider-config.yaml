@@ -1,0 +1,20 @@
+# Crossplane UpCloud ProviderConfig
+# References the upcloud-api-credentials Secret for API authentication
+#
+# The Secret must be created manually (or via Vault/External Secrets):
+#   kubectl create secret generic upcloud-api-credentials \
+#     -n crossplane-system \
+#     --from-literal=username=YOUR_UPCLOUD_USERNAME \
+#     --from-literal=password=YOUR_UPCLOUD_PASSWORD
+---
+apiVersion: upcloud.upbound.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: default
+spec:
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: upcloud-api-credentials
+      key: credentials

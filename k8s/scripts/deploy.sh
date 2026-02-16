@@ -403,6 +403,57 @@ install_gitlab() {
     log_info "GitLab installed"
 }
 
+install_crossplane() {
+    log_step "Installing Crossplane..."
+
+    kubectl create namespace crossplane-system 2>/dev/null || true
+
+    local values_args=$(get_values_args "crossplane")
+
+    helm upgrade --install crossplane crossplane-stable/crossplane \
+        --namespace crossplane-system \
+        $values_args \
+        --wait --timeout 5m
+
+    # Wait for core pods to be ready
+    kubectl wait --for=condition=ready pod -l app=crossplane -n crossplane-system --timeout=120s 2>/dev/null || true
+
+    # Install UpCloud provider
+    log_info "Applying UpCloud provider..."
+    kubectl apply -f "${BASE_DIR}/crossplane/provider-upcloud.yaml"
+
+    # Wait for provider to become healthy (up to 5 minutes)
+    log_info "Waiting for UpCloud provider to become healthy..."
+    local attempts=0
+    local max_attempts=30
+    while [[ $attempts -lt $max_attempts ]]; do
+        local healthy=$(kubectl get provider provider-upcloud -o jsonpath='{.status.conditions[?(@.type=="Healthy")].status}' 2>/dev/null || echo "")
+        if [[ "$healthy" == "True" ]]; then
+            log_info "UpCloud provider is healthy"
+            break
+        fi
+        attempts=$((attempts + 1))
+        sleep 10
+    done
+
+    if [[ $attempts -ge $max_attempts ]]; then
+        log_warn "UpCloud provider not yet healthy after 5 minutes — it may still be pulling the image"
+    fi
+
+    # Apply ProviderConfig only if the credentials secret exists
+    if kubectl get secret upcloud-api-credentials -n crossplane-system &>/dev/null; then
+        kubectl apply -f "${BASE_DIR}/crossplane/provider-config.yaml"
+        log_info "ProviderConfig applied"
+    else
+        log_warn "Secret 'upcloud-api-credentials' not found in crossplane-system"
+        log_warn "Create it before using Crossplane to provision UpCloud resources:"
+        log_warn "  kubectl create secret generic upcloud-api-credentials -n crossplane-system \\"
+        log_warn "    --from-literal=credentials='{\"username\":\"...\",\"password\":\"...\"}'"
+    fi
+
+    log_info "Crossplane installed"
+}
+
 install_argocd() {
     log_step "Installing ArgoCD..."
 
@@ -421,7 +472,12 @@ install_argocd() {
 bootstrap_argocd_apps() {
     log_step "Bootstrapping ArgoCD app-of-apps..."
 
-    kubectl apply -f "${ARGOCD_DIR}/projects/tshub.yaml"
+    # Apply all ArgoCD projects
+    for f in "${ARGOCD_DIR}"/projects/*.yaml; do
+        [[ -f "$f" ]] && kubectl apply -f "$f"
+    done
+
+    # Apply app-of-apps (it auto-discovers ApplicationSets and other apps)
     kubectl apply -f "${ARGOCD_DIR}/apps/app-of-apps.yaml"
 
     log_info "ArgoCD app-of-apps deployed"
@@ -511,12 +567,16 @@ deploy_devops() {
     install_external_secrets
     install_gitlab
     install_argocd
+    install_crossplane
     apply_devops_ingress
 }
 
 delete_devops() {
     log_step "Deleting DevOps platform..."
 
+    kubectl delete -f "${BASE_DIR}/crossplane/provider-upcloud.yaml" 2>/dev/null || true
+    kubectl delete -f "${BASE_DIR}/crossplane/provider-config.yaml" 2>/dev/null || true
+    helm uninstall crossplane -n crossplane-system 2>/dev/null || true
     helm uninstall argocd -n argocd 2>/dev/null || true
     helm uninstall gitlab -n gitlab 2>/dev/null || true
     helm uninstall prometheus -n monitoring 2>/dev/null || true
@@ -548,7 +608,7 @@ delete_devops() {
 status_devops() {
     log_step "DevOps Platform Status:"
     echo ""
-    for ns in data-services keycloak vault gitlab argocd monitoring external-secrets cert-manager; do
+    for ns in data-services keycloak vault gitlab argocd monitoring external-secrets cert-manager crossplane-system; do
         echo "=== ${ns} ==="
         kubectl get pods -n "$ns" 2>/dev/null || echo "  Namespace not found"
         echo ""
@@ -574,6 +634,7 @@ print_summary() {
     echo "  - Prometheus: https://prometheus.${DOMAIN}"
     echo "  - GitLab:     https://gitlab.${DOMAIN}"
     echo "  - ArgoCD:     https://argocd.${DOMAIN}"
+    echo "  - Crossplane: kubectl get providers (cluster-scoped)"
     echo ""
     echo "Credentials:"
     echo "  Keycloak:  kubectl get secret keycloak-admin-secret -n keycloak -o jsonpath='{.data.admin-password}' | base64 -d"
@@ -632,6 +693,9 @@ main() {
                 argocd)
                     add_helm_repos && install_argocd
                     ;;
+                crossplane)
+                    add_helm_repos && install_crossplane
+                    ;;
                 ingress)
                     apply_devops_ingress
                     ;;
@@ -663,7 +727,7 @@ main() {
             echo "Components:"
             echo "  all        - Deploy entire platform (alias for devops)"
             echo "  devops     - DevOps platform"
-            echo "  data-services, keycloak, vault, monitoring, gitlab, argocd - Individual components"
+            echo "  data-services, keycloak, vault, monitoring, gitlab, argocd, crossplane - Individual components"
             echo "  bootstrap  - Deploy ArgoCD app-of-apps for GitOps"
             echo ""
             echo "Actions:"

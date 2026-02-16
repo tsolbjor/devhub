@@ -1,0 +1,25 @@
+# Crossplane UpCloud Provider
+# Installs the UpCloud provider for managing UpCloud resources from K8s
+# Docs: https://marketplace.upbound.io/providers/UpCloudLtd/provider-upcloud
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-upcloud
+spec:
+  package: xpkg.upbound.io/upcloud/provider-upcloud:v0.1.1
+  controllerConfigRef:
+    name: provider-upcloud
+---
+apiVersion: pkg.crossplane.io/v1alpha1
+kind: ControllerConfig
+metadata:
+  name: provider-upcloud
+spec:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi

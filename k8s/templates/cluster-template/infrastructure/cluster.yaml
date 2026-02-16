@@ -1,0 +1,36 @@
+# Crossplane UpCloud Kubernetes Cluster
+# CRD API group is a best-guess — verify after provider install:
+#   kubectl get crds | grep upcloud
+---
+apiVersion: uks.upcloud.com/v1alpha1
+kind: KubernetesCluster
+metadata:
+  name: CLUSTER_NAME
+  labels:
+    team: TEAM_NAME
+spec:
+  forProvider:
+    name: CLUSTER_NAME
+    zone: fi-hel1
+    network:
+      name: CLUSTER_NAME-network
+      ipNetwork:
+        address: 172.16.1.0/24
+        family: IPv4
+    controlPlane:
+      plan: K8S-2xCPU-4GB
+    nodeGroups:
+      - name: default
+        count: 3
+        plan: K8S-4xCPU-8GB
+        storage:
+          size: 50
+        kubeletArgs:
+          - key: max-pods
+            value: "110"
+    version: "1.30"
+    labels:
+      env: dev
+      team: TEAM_NAME
+  providerConfigRef:
+    name: default

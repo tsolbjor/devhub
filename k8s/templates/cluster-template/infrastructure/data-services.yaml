@@ -1,0 +1,68 @@
+# Crossplane UpCloud Managed Data Services
+# CRD API groups are best-guess — verify after provider install:
+#   kubectl get crds | grep upcloud
+---
+apiVersion: database.upcloud.com/v1alpha1
+kind: ManagedDatabase
+metadata:
+  name: CLUSTER_NAME-postgresql
+  labels:
+    team: TEAM_NAME
+spec:
+  forProvider:
+    name: CLUSTER_NAME-pg
+    zone: fi-hel1
+    plan: 1x1xCPU-2GB-25GB
+    type: pg
+    title: "TEAM_NAME PostgreSQL"
+    maintenanceWindow:
+      dow: sunday
+      time: "03:00:00"
+    properties:
+      version: "16"
+      public_access: false
+    network:
+      family: IPv4
+      name: CLUSTER_NAME-network
+  providerConfigRef:
+    name: default
+---
+apiVersion: database.upcloud.com/v1alpha1
+kind: ManagedDatabase
+metadata:
+  name: CLUSTER_NAME-valkey
+  labels:
+    team: TEAM_NAME
+spec:
+  forProvider:
+    name: CLUSTER_NAME-valkey
+    zone: fi-hel1
+    plan: 1x1xCPU-2GB
+    type: valkey
+    title: "TEAM_NAME Valkey"
+    maintenanceWindow:
+      dow: sunday
+      time: "03:00:00"
+    properties:
+      public_access: false
+    network:
+      family: IPv4
+      name: CLUSTER_NAME-network
+  providerConfigRef:
+    name: default
+---
+apiVersion: storage.upcloud.com/v1alpha1
+kind: ObjectStorage
+metadata:
+  name: CLUSTER_NAME-s3
+  labels:
+    team: TEAM_NAME
+spec:
+  forProvider:
+    name: CLUSTER_NAME-s3
+    zone: fi-hel1
+    description: "TEAM_NAME Object Storage"
+    size: 250
+    accessKey: CLUSTER_NAME-s3-key
+  providerConfigRef:
+    name: default

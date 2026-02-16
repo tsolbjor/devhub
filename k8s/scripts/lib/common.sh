@@ -166,6 +166,7 @@ add_helm_repos() {
     helm repo add gitlab https://charts.gitlab.io 2>/dev/null || true
     helm repo add argo https://argoproj.github.io/argo-helm 2>/dev/null || true
     helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>/dev/null || true
+    helm repo add crossplane-stable https://charts.crossplane.io/stable 2>/dev/null || true
 
     helm repo update
     log_info "Helm repositories updated"

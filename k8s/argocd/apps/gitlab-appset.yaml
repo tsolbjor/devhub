@@ -1,0 +1,60 @@
+# ApplicationSet: auto-discover workload repos from GitLab
+# Scans the 'tshub' group for repos containing a k8s/ directory
+# and creates ArgoCD Applications for each one.
+#
+# Requires Secret 'argocd-gitlab-scm-token' in argocd namespace:
+#   kubectl create secret generic argocd-gitlab-scm-token -n argocd \
+#     --from-literal=token=YOUR_GITLAB_PAT
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: gitlab-workloads
+  namespace: argocd
+spec:
+  generators:
+    - scmProvider:
+        gitlab:
+          # Use internal service URL to avoid .localhost DNS issue (glibc resolves *.localhost to 127.0.0.1)
+          api: http://gitlab-webservice-default.gitlab.svc.cluster.local:8181
+          group: tshub
+          includeSubgroups: true
+          tokenRef:
+            secretName: argocd-gitlab-scm-token
+            key: token
+        filters:
+          # Only repos with k8s/ directory (workload manifests)
+          - pathsExist:
+              - k8s/
+            # Exclude the platform repo itself (has k8s/argocd/)
+            pathsDoNotExist:
+              - k8s/argocd/
+        cloneProtocol: https
+  template:
+    metadata:
+      name: 'workload-{{repository}}'
+      namespace: argocd
+      labels:
+        app.kubernetes.io/part-of: tshub
+        app.kubernetes.io/managed-by: applicationset
+    spec:
+      project: workloads
+      source:
+        repoURL: '{{url}}'
+        targetRevision: HEAD
+        path: k8s
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: 'tshub-{{repository}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - PrunePropagationPolicy=foreground
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m
