@@ -461,9 +461,23 @@ install_argocd() {
 
     local values_args=$(get_values_args "argocd")
 
+    # For local env, add hostAliases so ArgoCD server can reach keycloak.localhost
+    # (glibc resolves *.localhost to 127.0.0.1 before querying DNS)
+    local extra_args=""
+    if [[ "$ENV" == "local" ]]; then
+        local ingress_ip
+        ingress_ip=$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.spec.clusterIP}' 2>/dev/null) || true
+        if [[ -n "$ingress_ip" ]]; then
+            extra_args="--set global.hostAliases[0].ip=${ingress_ip} --set global.hostAliases[0].hostnames[0]=keycloak.${DOMAIN}"
+            log_info "ArgoCD server hostAlias: keycloak.${DOMAIN} -> ${ingress_ip}"
+        else
+            log_warn "Could not resolve ingress-nginx ClusterIP - ArgoCD OIDC may not work"
+        fi
+    fi
+
     helm upgrade --install argocd argo/argo-cd \
         --namespace argocd \
-        $values_args \
+        $values_args $extra_args \
         --wait --timeout 5m
 
     log_info "ArgoCD installed"

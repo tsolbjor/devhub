@@ -157,7 +157,8 @@ create_admin_user() {
     local secrets_file="${SCRIPT_ENV_DIR}/oidc-secrets.env"
 
     # Create devops-admin (temporary password)
-    if kcadm get users -r ${REALM} -q username=devops-admin 2>/dev/null | grep -q "username"; then
+    if kcadm get users -r ${REALM} -q username=devops-admin 2>/dev/null | grep -q '"username"' || \
+       kcadm get users -r ${REALM} -q email=devops-admin@${DOMAIN} 2>/dev/null | grep -q '"email"'; then
         log_warn "User devops-admin already exists"
     else
         local temp_password=$(openssl rand -base64 12)
@@ -187,7 +188,8 @@ create_admin_user() {
     fi
 
     # Create platform-admin (permanent password for testing/admin access)
-    if kcadm get users -r ${REALM} -q username=platform-admin 2>/dev/null | grep -q "username"; then
+    if kcadm get users -r ${REALM} -q username=platform-admin 2>/dev/null | grep -q '"username"' || \
+       kcadm get users -r ${REALM} -q email=platform-admin@${DOMAIN} 2>/dev/null | grep -q '"email"'; then
         log_warn "User platform-admin already exists"
     else
         local admin_password="Admin$(openssl rand -hex 4)"

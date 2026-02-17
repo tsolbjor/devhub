@@ -12,6 +12,8 @@ configs:
   cm:
     create: true
     url: https://argocd.${DOMAIN}
+    # Skip TLS verification for local self-signed CA
+    oidc.tls.insecure.skip.verify: "true"
     oidc.config: |
       name: Keycloak
       issuer: https://keycloak.${DOMAIN}/realms/devops
