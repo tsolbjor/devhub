@@ -107,7 +107,7 @@ wait_for_vault_pods() {
             return 0
         fi
 
-        ((attempt++))
+        ((attempt++)) || true
         echo -n "."
         sleep 5
     done
@@ -176,7 +176,7 @@ wait_for_keycloak() {
             return 0
         fi
 
-        ((attempt++))
+        ((attempt++)) || true
         echo -n "."
         sleep 10
     done
@@ -219,7 +219,7 @@ phase_gitlab() {
             break
         fi
 
-        ((attempt++))
+        ((attempt++)) || true
         if [[ $((attempt % 12)) -eq 0 ]]; then
             local elapsed=$((attempt * 10 / 60))
             log_info "Still waiting for GitLab... (${elapsed} minutes elapsed)"
