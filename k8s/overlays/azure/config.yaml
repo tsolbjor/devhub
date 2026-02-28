@@ -1,0 +1,46 @@
+# Azure environment configuration
+# This file defines all environment-specific values for Azure deployment
+#
+# CUSTOMIZE: Update domain and acmeEmail before deploying
+
+# Domain configuration - UPDATE THIS
+domain: example.com
+
+# TLS configuration
+tls:
+  type: cert-manager
+  secretName: ""           # Let cert-manager create secrets
+  clusterIssuer: letsencrypt-prod
+
+# Email for ACME certificate notifications - UPDATE THIS
+acmeEmail: admin@example.com
+
+# Service subdomains (relative to domain)
+services:
+  keycloak: keycloak
+  vault: vault
+  gitlab: gitlab
+  registry: registry
+  argocd: argocd
+  grafana: grafana
+  prometheus: prometheus
+  alertmanager: alertmanager
+
+# Managed data services - CUSTOMIZE for your Azure environment
+# Values are populated by sync-tofu-outputs.sh
+dataServices:
+  type: managed
+  postgresql:
+    host: managed-pg.postgres.database.azure.com
+  redis:
+    host: managed-redis.redis.cache.windows.net
+  azureStorage:
+    accountName: myaccount
+    identityClientId: 00000000-0000-0000-0000-000000000000
+
+# Entra ID identity federation for Keycloak
+# Users authenticate via "Sign in with Microsoft" through Keycloak.
+# clientSecret is written to k8s/scripts/<env>/entra-idp.env by sync-tofu-outputs.sh
+entraId:
+  tenantId: 00000000-0000-0000-0000-000000000000
+  clientId: 00000000-0000-0000-0000-000000000000

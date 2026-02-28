@@ -17,6 +17,12 @@
 
 # Generated local secrets (vault init keys, OIDC secrets, etc.)
 k8s/scripts/local/
+k8s/scripts/azure-dev/
+k8s/scripts/azure-prod/
+k8s/scripts/gcp-dev/
+k8s/scripts/gcp-prod/
+k8s/scripts/aws-dev/
+k8s/scripts/aws-prod/
 
 # Editor
 *.swp

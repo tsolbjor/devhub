@@ -6,7 +6,14 @@ set -euo pipefail
 # =============================================================================
 # Creates the devops realm and configures OIDC clients for all services.
 #
-# Usage: ./setup-keycloak.sh --env local|upcloud [all|realm|clients|user]
+# Usage: ./setup-keycloak.sh --env local|upcloud-dev|upcloud-prod|azure-dev|azure-prod|gcp-dev|gcp-prod|aws-dev|aws-prod \
+#                            [all|realm|clients|user|idp]
+#
+# The 'idp' action configures a cloud identity provider:
+#   azure-*: Entra ID federation (via OIDC, App Roles → Keycloak groups)
+#   gcp-*:   Google social login (requires gcp-idp.env filled in manually)
+#   aws-*:   AWS Cognito OIDC federation (Cognito Groups → Keycloak groups)
+# 'all' automatically includes 'idp' for azure/gcp/aws environments.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -332,6 +339,251 @@ EOF
     kubectl rollout restart deployment/gitlab-webservice-default -n gitlab 2>/dev/null || true
 }
 
+# Configure Entra ID as a federated identity provider in Keycloak
+# Requires: ENTRA_TENANT_ID, ENTRA_KEYCLOAK_CLIENT_ID (from config.yaml via parse_config)
+#           ENTRA_KEYCLOAK_CLIENT_SECRET (from ${SCRIPT_ENV_DIR}/entra-idp.env)
+configure_entra_idp() {
+    log_step "Configuring Entra ID identity provider..."
+
+    # Load client secret from local secrets file written by sync-tofu-outputs.sh
+    local secrets_file="${SCRIPT_ENV_DIR}/entra-idp.env"
+    if [[ ! -f "$secrets_file" ]]; then
+        log_error "Entra ID secrets not found: ${secrets_file}"
+        log_error "Run: ./sync-tofu-outputs.sh --env ${ENV}"
+        exit 1
+    fi
+    source "$secrets_file"
+
+    : "${ENTRA_TENANT_ID:?ENTRA_TENANT_ID not set — check config.yaml entraId.tenantId}"
+    : "${ENTRA_KEYCLOAK_CLIENT_ID:?ENTRA_KEYCLOAK_CLIENT_ID not set — check config.yaml entraId.clientId}"
+    : "${ENTRA_KEYCLOAK_CLIENT_SECRET:?ENTRA_KEYCLOAK_CLIENT_SECRET not set — check entra-idp.env}"
+
+    # Update the Entra ID App Registration redirect URI to the real Keycloak domain.
+    # The tofu module registers a placeholder URI; this fixes it once the domain is known.
+    local redirect_uri="https://keycloak.${DOMAIN}/realms/devops/broker/entra/endpoint"
+    if command -v az &>/dev/null; then
+        log_info "Updating App Registration redirect URI to: ${redirect_uri}"
+        az ad app update \
+            --id "${ENTRA_KEYCLOAK_CLIENT_ID}" \
+            --web-redirect-uris "${redirect_uri}" 2>/dev/null \
+            || log_warn "Could not update redirect URI via az CLI — set it manually in the Azure portal"
+    else
+        log_warn "az CLI not found — set the redirect URI manually in the Azure portal:"
+        log_warn "  ${redirect_uri}"
+    fi
+
+    # Skip if already configured
+    if kcadm get identity-provider/instances/entra -r ${REALM} >/dev/null 2>&1; then
+        log_warn "Entra ID identity provider already configured — skipping"
+        return 0
+    fi
+
+    # Create the OIDC identity provider pointing to Entra ID v2.0 endpoints
+    kcadm create identity-provider/instances -r ${REALM} \
+        -s alias=entra \
+        -s displayName="Microsoft Entra ID" \
+        -s providerId=oidc \
+        -s enabled=true \
+        -s trustEmail=true \
+        -s storeToken=false \
+        -s "firstBrokerLoginFlowAlias=first broker login" \
+        -s "config.useJwksUrl=true" \
+        -s "config.validateSignature=true" \
+        -s "config.pkceEnabled=false" \
+        -s "config.clientAuthMethod=client_secret_post" \
+        -s "config.defaultScope=openid profile email" \
+        -s "config.authorizationUrl=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0/authorize" \
+        -s "config.tokenUrl=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0/token" \
+        -s "config.jwksUrl=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/discovery/v2.0/keys" \
+        -s "config.issuer=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0" \
+        -s "config.clientId=${ENTRA_KEYCLOAK_CLIENT_ID}" \
+        -s "config.clientSecret=${ENTRA_KEYCLOAK_CLIENT_SECRET}"
+
+    log_info "Entra ID identity provider created"
+
+    # Mapper: sync email claim → Keycloak user email attribute
+    kcadm create identity-provider/instances/entra/mappers -r ${REALM} \
+        -s name="entra-email" \
+        -s identityProviderMapper=oidc-user-attribute-idp-mapper \
+        -s 'config={"syncMode":"INHERIT","claim":"email","user.attribute":"email"}'
+
+    # Mappers: map Entra ID App Roles → Keycloak groups (requires Keycloak 25+)
+    # App Roles are defined in the tofu module and appear in the token's 'roles' claim.
+    # Assign users/groups to these App Roles in the Azure portal or via azuread_app_role_assignment.
+    # syncMode=FORCE re-evaluates group membership on every login (reflects role changes immediately).
+    for role_group in "devops-admins" "developers" "viewers"; do
+        kcadm create identity-provider/instances/entra/mappers -r ${REALM} \
+            -s "name=entra-role-${role_group}" \
+            -s identityProviderMapper=oidc-group-idp-mapper \
+            -s "{\"config\":{\"syncMode\":\"FORCE\",\"claim\":\"roles\",\"claim.value\":\"${role_group}\",\"group\":\"/${role_group}\"}}"
+    done
+
+    log_info "Group mappers added: Entra ID App Role → Keycloak group (devops-admins, developers, viewers)"
+    log_info ""
+    log_info "Next steps in Azure portal (Entra ID → Enterprise Applications → ${ENTRA_KEYCLOAK_CLIENT_ID}):"
+    log_info "  Assign users or security groups to the App Roles to grant DevHub access"
+    log_info "  devops-admins → full admin    developers → dev access    viewers → read-only"
+}
+
+# Configure Google as a social identity provider in Keycloak
+# Requires: GOOGLE_IDP_CLIENT_ID (from config.yaml via parse_config)
+#           GOOGLE_IDP_CLIENT_SECRET (from ${SCRIPT_ENV_DIR}/gcp-idp.env)
+configure_google_idp() {
+    log_step "Configuring Google identity provider..."
+
+    # Load client secret from local secrets file written by the user after creating
+    # the OAuth client in Google Cloud Console (sync-tofu-outputs.sh creates the template)
+    local secrets_file="${SCRIPT_ENV_DIR}/gcp-idp.env"
+    if [[ ! -f "$secrets_file" ]]; then
+        log_error "Google IdP secrets not found: ${secrets_file}"
+        log_error "Run: ./sync-tofu-outputs.sh --env ${ENV}"
+        log_error "Then fill in GOOGLE_IDP_CLIENT_ID and GOOGLE_IDP_CLIENT_SECRET in the file"
+        exit 1
+    fi
+    source "$secrets_file"
+
+    : "${GOOGLE_IDP_CLIENT_ID:?GOOGLE_IDP_CLIENT_ID not set — fill in ${secrets_file}}"
+    : "${GOOGLE_IDP_CLIENT_SECRET:?GOOGLE_IDP_CLIENT_SECRET not set — fill in ${secrets_file}}"
+
+    if [[ "$GOOGLE_IDP_CLIENT_ID" == "FILL_IN_MANUALLY" || "$GOOGLE_IDP_CLIENT_SECRET" == "FILL_IN_MANUALLY" ]]; then
+        log_error "gcp-idp.env still has placeholder values — fill in the actual OAuth client credentials"
+        exit 1
+    fi
+
+    # Skip if already configured
+    if kcadm get identity-provider/instances/google -r ${REALM} >/dev/null 2>&1; then
+        log_warn "Google identity provider already configured — skipping"
+        return 0
+    fi
+
+    # Create the Google social IdP using Keycloak's built-in google provider type
+    kcadm create identity-provider/instances -r ${REALM} \
+        -s alias=google \
+        -s displayName="Sign in with Google" \
+        -s providerId=google \
+        -s enabled=true \
+        -s trustEmail=true \
+        -s storeToken=false \
+        -s "firstBrokerLoginFlowAlias=first broker login" \
+        -s "config.clientId=${GOOGLE_IDP_CLIENT_ID}" \
+        -s "config.clientSecret=${GOOGLE_IDP_CLIENT_SECRET}" \
+        -s "config.defaultScope=openid profile email"
+
+    log_info "Google identity provider created"
+
+    # Mapper: sync email claim → Keycloak user email attribute
+    kcadm create identity-provider/instances/google/mappers -r ${REALM} \
+        -s name="google-email" \
+        -s identityProviderMapper=oidc-user-attribute-idp-mapper \
+        -s 'config={"syncMode":"INHERIT","claim":"email","user.attribute":"email"}'
+
+    log_info "Email attribute mapper added"
+    log_info ""
+    log_info "IMPORTANT: Google tokens do not include group/role claims."
+    log_info "  After users sign in for the first time, assign them to Keycloak groups manually:"
+    log_info "  Keycloak Admin → Users → <user> → Groups → Add to group"
+    log_info "  Groups: devops-admins, developers, viewers"
+}
+
+# Configure AWS Cognito as a federated OIDC identity provider in Keycloak
+# Requires: COGNITO_ISSUER_URL, COGNITO_HOSTED_UI_DOMAIN, COGNITO_CLIENT_ID (from config.yaml)
+#           COGNITO_CLIENT_SECRET (from ${SCRIPT_ENV_DIR}/aws-idp.env)
+configure_cognito_idp() {
+    log_step "Configuring AWS Cognito identity provider..."
+
+    # Load client secret from local secrets file written by sync-tofu-outputs.sh
+    local secrets_file="${SCRIPT_ENV_DIR}/aws-idp.env"
+    if [[ ! -f "$secrets_file" ]]; then
+        log_error "Cognito secrets not found: ${secrets_file}"
+        log_error "Run: ./sync-tofu-outputs.sh --env ${ENV}"
+        exit 1
+    fi
+    source "$secrets_file"
+
+    : "${COGNITO_ISSUER_URL:?COGNITO_ISSUER_URL not set — check config.yaml cognitoIdp.issuerUrl}"
+    : "${COGNITO_HOSTED_UI_DOMAIN:?COGNITO_HOSTED_UI_DOMAIN not set — check config.yaml cognitoIdp.hostedUiDomain}"
+    : "${COGNITO_CLIENT_ID:?COGNITO_CLIENT_ID not set — check config.yaml cognitoIdp.clientId}"
+    : "${COGNITO_CLIENT_SECRET:?COGNITO_CLIENT_SECRET not set — check aws-idp.env}"
+
+    # Update the Cognito app client callback URL to the real Keycloak domain.
+    # The tofu module registers a placeholder; this fixes it once the domain is known.
+    local redirect_uri="https://keycloak.${DOMAIN}/realms/devops/broker/aws-cognito/endpoint"
+    if command -v aws &>/dev/null; then
+        local user_pool_id
+        user_pool_id=$(echo "${COGNITO_ISSUER_URL}" | sed 's|.*/||')
+        local aws_region
+        aws_region=$(echo "${COGNITO_ISSUER_URL}" | sed 's|https://cognito-idp\.||' | sed 's|\.amazonaws.*||')
+
+        log_info "Updating Cognito app client callback URL to: ${redirect_uri}"
+        aws cognito-idp update-user-pool-client \
+            --user-pool-id "${user_pool_id}" \
+            --client-id "${COGNITO_CLIENT_ID}" \
+            --region "${aws_region}" \
+            --callback-urls "${redirect_uri}" \
+            --allowed-o-auth-flows code \
+            --allowed-o-auth-scopes openid email profile \
+            --allowed-o-auth-flows-user-pool-client \
+            --supported-identity-providers COGNITO 2>/dev/null \
+            || log_warn "Could not update Cognito callback URL via aws CLI — set it manually in the AWS console"
+    else
+        log_warn "aws CLI not found — set the callback URL manually in the AWS console:"
+        log_warn "  ${redirect_uri}"
+    fi
+
+    # Skip if already configured
+    if kcadm get identity-provider/instances/aws-cognito -r ${REALM} >/dev/null 2>&1; then
+        log_warn "Cognito identity provider already configured — skipping"
+        return 0
+    fi
+
+    # Create the OIDC identity provider pointing to Cognito's OIDC endpoints
+    kcadm create identity-provider/instances -r ${REALM} \
+        -s alias=aws-cognito \
+        -s displayName="Sign in with AWS (Cognito)" \
+        -s providerId=oidc \
+        -s enabled=true \
+        -s trustEmail=true \
+        -s storeToken=false \
+        -s "firstBrokerLoginFlowAlias=first broker login" \
+        -s "config.useJwksUrl=true" \
+        -s "config.validateSignature=true" \
+        -s "config.pkceEnabled=false" \
+        -s "config.clientAuthMethod=client_secret_post" \
+        -s "config.defaultScope=openid profile email" \
+        -s "config.authorizationUrl=https://${COGNITO_HOSTED_UI_DOMAIN}/oauth2/authorize" \
+        -s "config.tokenUrl=https://${COGNITO_HOSTED_UI_DOMAIN}/oauth2/token" \
+        -s "config.jwksUrl=${COGNITO_ISSUER_URL}/.well-known/jwks.json" \
+        -s "config.issuer=${COGNITO_ISSUER_URL}" \
+        -s "config.clientId=${COGNITO_CLIENT_ID}" \
+        -s "config.clientSecret=${COGNITO_CLIENT_SECRET}"
+
+    log_info "Cognito identity provider created"
+
+    # Mapper: sync email claim → Keycloak user email attribute
+    kcadm create identity-provider/instances/aws-cognito/mappers -r ${REALM} \
+        -s name="cognito-email" \
+        -s identityProviderMapper=oidc-user-attribute-idp-mapper \
+        -s 'config={"syncMode":"INHERIT","claim":"email","user.attribute":"email"}'
+
+    # Mappers: map Cognito groups → Keycloak groups (requires Keycloak 25+)
+    # Cognito includes a `cognito:groups` array claim in the ID token when users are in groups.
+    # Assign Cognito users to groups (devops-admins, developers, viewers) in the AWS console:
+    #   Amazon Cognito → User pools → <pool> → Users → <user> → Add user to group
+    # syncMode=FORCE re-evaluates group membership on every login.
+    for group in "devops-admins" "developers" "viewers"; do
+        kcadm create identity-provider/instances/aws-cognito/mappers -r ${REALM} \
+            -s "name=cognito-group-${group}" \
+            -s identityProviderMapper=oidc-group-idp-mapper \
+            -s "{\"config\":{\"syncMode\":\"FORCE\",\"claim\":\"cognito:groups\",\"claim.value\":\"${group}\",\"group\":\"/${group}\"}}"
+    done
+
+    log_info "Group mappers added: Cognito group → Keycloak group (devops-admins, developers, viewers)"
+    log_info ""
+    log_info "Next steps in AWS console (Amazon Cognito → User pools → ${COGNITO_ISSUER_URL##*/}):"
+    log_info "  Assign users to Cognito groups to grant DevHub access"
+    log_info "  devops-admins → full admin    developers → dev access    viewers → read-only"
+}
+
 # Print summary
 print_summary() {
     echo ""
@@ -381,6 +633,13 @@ main() {
             configure_clients
             configure_groups_scope
             create_admin_user
+            if [[ "$ENV" == azure-* ]]; then
+                configure_entra_idp
+            elif [[ "$ENV" == gcp-* ]]; then
+                configure_google_idp
+            elif [[ "$ENV" == aws-* ]]; then
+                configure_cognito_idp
+            fi
             print_summary
             ;;
         realm)
@@ -392,8 +651,20 @@ main() {
         user)
             create_admin_user
             ;;
+        idp)
+            if [[ "$ENV" == azure-* ]]; then
+                configure_entra_idp
+            elif [[ "$ENV" == gcp-* ]]; then
+                configure_google_idp
+            elif [[ "$ENV" == aws-* ]]; then
+                configure_cognito_idp
+            else
+                log_error "The 'idp' action is only supported for azure-*, gcp-*, and aws-* environments"
+                exit 1
+            fi
+            ;;
         *)
-            echo "Usage: $0 --env local|upcloud [all|realm|clients|user]"
+            echo "Usage: $0 --env local|upcloud-dev|upcloud-prod|azure-dev|azure-prod|gcp-dev|gcp-prod|aws-dev|aws-prod [all|realm|clients|user|idp]"
             exit 1
             ;;
     esac

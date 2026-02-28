@@ -1,0 +1,5 @@
+# external-dns Azure overlay values
+# Domain filter for DNS management
+
+domainFilters:
+  - ${DOMAIN}

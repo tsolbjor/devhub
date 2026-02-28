@@ -1,0 +1,61 @@
+# GitLab Azure overlay values
+# Merged with base/devops/gitlab/values.yaml
+#
+# Object storage: native Azure Blob via Workload Identity (no access key).
+#   gitlab-object-storage-secret content (created by deploy.sh):
+#     provider: AzureRM
+#     azure_storage_account_name: <AZURE_STORAGE_ACCOUNT>
+#     azure_storage_domain: blob.core.windows.net
+#     use_managed_identity: true
+#
+#   gitlab-registry-storage-secret still uses the access key (Docker Registry
+#   does not support Workload Identity in the standard config).
+#
+# Redis: Azure Cache for Redis uses SSL port 6380 (TLS 1.2+, non-SSL disabled).
+
+global:
+  hosts:
+    domain: ${DOMAIN}
+    gitlab:
+      name: gitlab.${DOMAIN}
+    registry:
+      name: registry.${DOMAIN}
+
+  # Override data service hosts to Azure managed services
+  psql:
+    host: ${PG_HOST}
+
+  redis:
+    host: ${REDIS_HOST}
+    port: 6380
+
+  # Object storage via Azure Blob — connection secret uses use_managed_identity: true
+  appConfig:
+    object_store:
+      connection:
+        secret: gitlab-object-storage-secret
+        key: connection
+
+  # Shared service account annotated with the managed identity client ID.
+  # The Azure Workload Identity webhook injects AZURE_CLIENT_ID, AZURE_TENANT_ID,
+  # and a projected token volume into pods that carry the use label below.
+  serviceAccount:
+    enabled: true
+    annotations:
+      azure.workload.identity/client-id: ${GITLAB_IDENTITY_CLIENT_ID}
+
+  ingress:
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    configureCertmanager: false
+    tls:
+      enabled: true
+
+# Label the pods that need blob access so the mutating webhook injects credentials
+gitlab:
+  webservice:
+    podLabels:
+      azure.workload.identity/use: "true"
+  sidekiq:
+    podLabels:
+      azure.workload.identity/use: "true"

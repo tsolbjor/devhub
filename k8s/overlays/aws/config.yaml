@@ -1,0 +1,43 @@
+# AWS environment base configuration
+# Data service values are populated by: sync-tofu-outputs.sh --env aws-dev|aws-prod
+
+# Domain configuration - UPDATE THIS
+domain: example.com
+
+# TLS configuration
+tls:
+  type: cert-manager
+  secretName: ""
+  clusterIssuer: letsencrypt-prod
+
+# Email for ACME certificate notifications - UPDATE THIS
+acmeEmail: admin@example.com
+
+# Service subdomains (relative to domain)
+services:
+  keycloak: keycloak
+  vault: vault
+  gitlab: gitlab
+  registry: registry
+  argocd: argocd
+  grafana: grafana
+  prometheus: prometheus
+  alertmanager: alertmanager
+
+# Managed data services — populated by sync-tofu-outputs.sh
+dataServices:
+  type: managed
+  postgresql:
+    host: example.rds.amazonaws.com
+  redis:
+    host: example.cache.amazonaws.com
+  s3:
+    region: eu-west-1
+    bucketPrefix: devhub-gitlab
+    gitlabIrsaRoleArn: arn:aws:iam::123456789012:role/devhub-gitlab-irsa
+
+# Cognito Identity Provider for Keycloak — populated by sync-tofu-outputs.sh
+cognitoIdp:
+  issuerUrl: PENDING_TOFU_OUTPUT
+  hostedUiDomain: PENDING_TOFU_OUTPUT
+  clientId: PENDING_TOFU_OUTPUT

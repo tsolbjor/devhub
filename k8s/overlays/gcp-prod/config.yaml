@@ -1,0 +1,41 @@
+# GCP PROD environment configuration
+# Data service values are populated by: sync-tofu-outputs.sh --env gcp-prod
+
+# Domain configuration - UPDATE THIS
+domain: example.com
+
+# TLS configuration
+tls:
+  type: cert-manager
+  secretName: ""
+  clusterIssuer: letsencrypt-prod
+
+# Email for ACME certificate notifications - UPDATE THIS
+acmeEmail: admin@example.com
+
+# Service subdomains (relative to domain)
+services:
+  keycloak: keycloak
+  vault: vault
+  gitlab: gitlab
+  registry: registry
+  argocd: argocd
+  grafana: grafana
+  prometheus: prometheus
+  alertmanager: alertmanager
+
+# Managed data services — populated by sync-tofu-outputs.sh
+dataServices:
+  type: managed
+  postgresql:
+    host: PENDING_TOFU_OUTPUT
+  redis:
+    host: PENDING_TOFU_OUTPUT
+  gcs:
+    projectId: PENDING_TOFU_OUTPUT
+    bucketPrefix: PENDING_TOFU_OUTPUT
+    gitlabGsaEmail: PENDING_TOFU_OUTPUT
+
+# Google Identity Provider — populated by sync-tofu-outputs.sh (template)
+googleIdp:
+  clientId: FILL_IN_MANUALLY

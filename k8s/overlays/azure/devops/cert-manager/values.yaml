@@ -1,0 +1,3 @@
+# cert-manager Azure overlay values
+# Merged with base/devops/cert-manager/values.yaml
+# No Azure-specific overrides needed; cert-manager works the same via HTTP-01 challenge

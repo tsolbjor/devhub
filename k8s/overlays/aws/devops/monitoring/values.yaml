@@ -1,0 +1,49 @@
+# Monitoring AWS overlay values
+# Merged with base/devops/monitoring/prometheus-stack-values.yaml
+
+prometheus:
+  ingress:
+    hosts:
+      - prometheus.${DOMAIN}
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    tls:
+      - secretName: prometheus-tls
+        hosts:
+          - prometheus.${DOMAIN}
+
+alertmanager:
+  ingress:
+    hosts:
+      - alertmanager.${DOMAIN}
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    tls:
+      - secretName: alertmanager-tls
+        hosts:
+          - alertmanager.${DOMAIN}
+
+grafana:
+  ingress:
+    hosts:
+      - grafana.${DOMAIN}
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    tls:
+      - secretName: grafana-tls
+        hosts:
+          - grafana.${DOMAIN}
+
+  grafana.ini:
+    server:
+      root_url: https://grafana.${DOMAIN}
+    auth.generic_oauth:
+      auth_url: https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/auth
+      token_url: https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/token
+      api_url: https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/userinfo
+
+  envValueFrom:
+    GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET:
+      secretKeyRef:
+        name: grafana-oidc-secret
+        key: client-secret

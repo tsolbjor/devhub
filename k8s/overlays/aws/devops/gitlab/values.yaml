@@ -1,0 +1,52 @@
+# GitLab AWS overlay values
+# Merged with base/devops/gitlab/values.yaml
+#
+# Object storage: native AWS S3 via IRSA (IAM Roles for Service Accounts).
+#   gitlab-object-storage-secret content (created by deploy.sh):
+#     provider: AWS
+#     use_iam_profile: true
+#     region: <AWS_REGION>
+#   (no explicit credentials — uses IRSA projected token)
+#
+#   gitlab-registry-storage-secret also uses IRSA (no explicit credentials).
+#
+# Redis: ElastiCache with no AUTH (VPC-isolated, security group restricted).
+
+global:
+  hosts:
+    domain: ${DOMAIN}
+    gitlab:
+      name: gitlab.${DOMAIN}
+    registry:
+      name: registry.${DOMAIN}
+
+  # Override data service hosts to AWS managed services
+  psql:
+    host: ${PG_HOST}
+
+  redis:
+    host: ${REDIS_HOST}
+    port: 6379
+    auth:
+      enabled: false # ElastiCache has no auth — VPC security group restricts access
+
+  # Object storage via S3 — connection secret uses use_iam_profile: true
+  appConfig:
+    object_store:
+      connection:
+        secret: gitlab-object-storage-secret
+        key: connection
+
+  # Shared service account annotated with the IRSA role ARN.
+  # EKS IRSA webhook injects AWS_ROLE_ARN and a projected token into annotated pods.
+  serviceAccount:
+    enabled: true
+    annotations:
+      eks.amazonaws.com/role-arn: ${GITLAB_IRSA_ROLE_ARN}
+
+  ingress:
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    configureCertmanager: false
+    tls:
+      enabled: true
