@@ -25,7 +25,7 @@ log_phase() { echo -e "\n${CYAN}━━━━━━━━━━━━━━━━
 # Argument Parsing
 # =============================================================================
 
-# Parse --env local|upcloud|upcloud-dev|upcloud-prod from arguments.
+# Parse --env local|upcloud|upcloud-dev|upcloud-prod|azure-dev|azure-prod from arguments.
 # Sets ENV global and removes --env <val> from args.
 # Remaining args are placed in ARGS array.
 parse_env_arg() {
@@ -57,9 +57,9 @@ parse_env_arg() {
     fi
 
     case "$ENV" in
-        local|upcloud|upcloud-dev|upcloud-prod) ;;
+        local|upcloud|upcloud-dev|upcloud-prod|azure-dev|azure-prod|gcp-dev|gcp-prod|aws-dev|aws-prod) ;;
         *)
-            log_error "Invalid environment: $ENV (must be local, upcloud, upcloud-dev, or upcloud-prod)"
+            log_error "Invalid environment: $ENV (must be local, upcloud, upcloud-dev, upcloud-prod, azure-dev, azure-prod, gcp-dev, gcp-prod, aws-dev, or aws-prod)"
             exit 1
             ;;
     esac
@@ -73,7 +73,9 @@ parse_env_arg() {
 
 # Parse config.yaml for the selected environment.
 # Exports: DOMAIN, TLS_SECRET_NAME, TLS_TYPE, CLUSTER_ISSUER, ACME_EMAIL,
-#          DATA_SERVICES_TYPE, and for managed: PG_HOST, VALKEY_HOST, S3_ENDPOINT, S3_REGION
+#          DATA_SERVICES_TYPE, and for managed:
+#            UpCloud: PG_HOST, VALKEY_HOST, S3_ENDPOINT, S3_REGION
+#            Azure:   PG_HOST, REDIS_HOST, AZURE_STORAGE_ACCOUNT
 parse_config() {
     local config_file="${K8S_DIR}/overlays/${ENV}/config.yaml"
     if [[ ! -f "$config_file" ]]; then
@@ -101,14 +103,51 @@ parse_config() {
     # Managed data service endpoints (if type is managed)
     if [[ "$DATA_SERVICES_TYPE" == "managed" ]]; then
         export PG_HOST="${PG_HOST:-$(grep -A1 'postgresql:' "$config_file" | grep 'host:' | sed 's/.*host:[[:space:]]*//' | _yaml_val)}"
+        # UpCloud: valkey
         export VALKEY_HOST="${VALKEY_HOST:-$(grep -A1 'valkey:' "$config_file" | grep 'host:' | sed 's/.*host:[[:space:]]*//' | _yaml_val)}"
         export S3_ENDPOINT="${S3_ENDPOINT:-$(grep -A2 's3:' "$config_file" | grep 'endpoint:' | sed 's/.*endpoint:[[:space:]]*//' | _yaml_val)}"
         export S3_REGION="${S3_REGION:-$(grep -A2 's3:' "$config_file" | grep 'region:' | sed 's/.*region:[[:space:]]*//' | _yaml_val)}"
+        # Azure: redis and blob storage
+        export REDIS_HOST="${REDIS_HOST:-$(grep -A1 'redis:' "$config_file" | grep 'host:' | sed 's/.*host:[[:space:]]*//' | _yaml_val)}"
+        export AZURE_STORAGE_ACCOUNT="${AZURE_STORAGE_ACCOUNT:-$(grep -A2 'azureStorage:' "$config_file" | grep 'accountName:' | sed 's/.*accountName:[[:space:]]*//' | _yaml_val)}"
+        export GITLAB_IDENTITY_CLIENT_ID="${GITLAB_IDENTITY_CLIENT_ID:-$(grep -A3 'azureStorage:' "$config_file" | grep 'identityClientId:' | sed 's/.*identityClientId:[[:space:]]*//' | _yaml_val)}"
+        # Azure: Entra ID IdP (non-sensitive; secret is in entra-idp.env)
+        export ENTRA_TENANT_ID="${ENTRA_TENANT_ID:-$(grep -A1 '^entraId:' "$config_file" | grep 'tenantId:' | sed 's/.*tenantId:[[:space:]]*//' | _yaml_val)}"
+        export ENTRA_KEYCLOAK_CLIENT_ID="${ENTRA_KEYCLOAK_CLIENT_ID:-$(grep -A2 '^entraId:' "$config_file" | grep 'clientId:' | sed 's/.*clientId:[[:space:]]*//' | _yaml_val)}"
+        # GCP: GCS and Workload Identity
+        export GCS_PROJECT_ID="${GCS_PROJECT_ID:-$(grep -A2 'gcs:' "$config_file" | grep 'projectId:' | sed 's/.*projectId:[[:space:]]*//' | _yaml_val)}"
+        export GCS_BUCKET_PREFIX="${GCS_BUCKET_PREFIX:-$(grep -A3 'gcs:' "$config_file" | grep 'bucketPrefix:' | sed 's/.*bucketPrefix:[[:space:]]*//' | _yaml_val)}"
+        export GITLAB_GSA_EMAIL="${GITLAB_GSA_EMAIL:-$(grep -A4 'gcs:' "$config_file" | grep 'gitlabGsaEmail:' | sed 's/.*gitlabGsaEmail:[[:space:]]*//' | _yaml_val)}"
+        # AWS: S3 and IRSA
+        export AWS_REGION="${AWS_REGION:-$(grep -A2 's3:' "$config_file" | grep 'region:' | sed 's/.*region:[[:space:]]*//' | _yaml_val)}"
+        export S3_BUCKET_PREFIX="${S3_BUCKET_PREFIX:-$(grep -A3 's3:' "$config_file" | grep 'bucketPrefix:' | sed 's/.*bucketPrefix:[[:space:]]*//' | _yaml_val)}"
+        export GITLAB_IRSA_ROLE_ARN="${GITLAB_IRSA_ROLE_ARN:-$(grep -A4 's3:' "$config_file" | grep 'gitlabIrsaRoleArn:' | sed 's/.*gitlabIrsaRoleArn:[[:space:]]*//' | _yaml_val)}"
+        # AWS: Cognito IdP (non-sensitive; secret is in aws-idp.env)
+        export COGNITO_ISSUER_URL="${COGNITO_ISSUER_URL:-$(grep -A1 '^cognitoIdp:' "$config_file" | grep 'issuerUrl:' | sed 's/.*issuerUrl:[[:space:]]*//' | _yaml_val)}"
+        export COGNITO_HOSTED_UI_DOMAIN="${COGNITO_HOSTED_UI_DOMAIN:-$(grep -A2 '^cognitoIdp:' "$config_file" | grep 'hostedUiDomain:' | sed 's/.*hostedUiDomain:[[:space:]]*//' | _yaml_val)}"
+        export COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-$(grep -A3 '^cognitoIdp:' "$config_file" | grep 'clientId:' | sed 's/.*clientId:[[:space:]]*//' | _yaml_val)}"
+        # GCP: Google IdP (non-sensitive; secret is in gcp-idp.env)
+        export GOOGLE_IDP_CLIENT_ID="${GOOGLE_IDP_CLIENT_ID:-$(grep -A1 '^googleIdp:' "$config_file" | grep 'clientId:' | sed 's/.*clientId:[[:space:]]*//' | _yaml_val)}"
     else
         export PG_HOST="${PG_HOST:-}"
         export VALKEY_HOST="${VALKEY_HOST:-}"
         export S3_ENDPOINT="${S3_ENDPOINT:-}"
         export S3_REGION="${S3_REGION:-}"
+        export REDIS_HOST="${REDIS_HOST:-}"
+        export AZURE_STORAGE_ACCOUNT="${AZURE_STORAGE_ACCOUNT:-}"
+        export GITLAB_IDENTITY_CLIENT_ID="${GITLAB_IDENTITY_CLIENT_ID:-}"
+        export ENTRA_TENANT_ID="${ENTRA_TENANT_ID:-}"
+        export ENTRA_KEYCLOAK_CLIENT_ID="${ENTRA_KEYCLOAK_CLIENT_ID:-}"
+        export GCS_PROJECT_ID="${GCS_PROJECT_ID:-}"
+        export GCS_BUCKET_PREFIX="${GCS_BUCKET_PREFIX:-}"
+        export GITLAB_GSA_EMAIL="${GITLAB_GSA_EMAIL:-}"
+        export AWS_REGION="${AWS_REGION:-}"
+        export S3_BUCKET_PREFIX="${S3_BUCKET_PREFIX:-}"
+        export GITLAB_IRSA_ROLE_ARN="${GITLAB_IRSA_ROLE_ARN:-}"
+        export COGNITO_ISSUER_URL="${COGNITO_ISSUER_URL:-}"
+        export COGNITO_HOSTED_UI_DOMAIN="${COGNITO_HOSTED_UI_DOMAIN:-}"
+        export COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-}"
+        export GOOGLE_IDP_CLIENT_ID="${GOOGLE_IDP_CLIENT_ID:-}"
     fi
 }
 
@@ -121,7 +160,7 @@ parse_config() {
 template_values() {
     local input="$1"
     local output="$2"
-    envsubst '${DOMAIN} ${TLS_SECRET_NAME} ${CLUSTER_ISSUER} ${ACME_EMAIL} ${PG_HOST} ${VALKEY_HOST} ${S3_ENDPOINT} ${S3_REGION}' < "$input" > "$output"
+    envsubst '${DOMAIN} ${TLS_SECRET_NAME} ${CLUSTER_ISSUER} ${ACME_EMAIL} ${PG_HOST} ${VALKEY_HOST} ${S3_ENDPOINT} ${S3_REGION} ${REDIS_HOST} ${AZURE_STORAGE_ACCOUNT} ${GITLAB_IDENTITY_CLIENT_ID} ${GCS_PROJECT_ID} ${GCS_BUCKET_PREFIX} ${GITLAB_GSA_EMAIL} ${AWS_REGION} ${S3_BUCKET_PREFIX} ${GITLAB_IRSA_ROLE_ARN}' < "$input" > "$output"
 }
 
 # Get Helm values args for a component (base + templated overlay).

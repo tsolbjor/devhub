@@ -1,0 +1,43 @@
+# AWS PROD environment configuration
+# Data service values are populated by: sync-tofu-outputs.sh --env aws-prod
+
+# Domain configuration - UPDATE THIS
+domain: example.com
+
+# TLS configuration
+tls:
+  type: cert-manager
+  secretName: ""
+  clusterIssuer: letsencrypt-prod
+
+# Email for ACME certificate notifications - UPDATE THIS
+acmeEmail: admin@example.com
+
+# Service subdomains (relative to domain)
+services:
+  keycloak: keycloak
+  vault: vault
+  gitlab: gitlab
+  registry: registry
+  argocd: argocd
+  grafana: grafana
+  prometheus: prometheus
+  alertmanager: alertmanager
+
+# Managed data services — populated by sync-tofu-outputs.sh
+dataServices:
+  type: managed
+  postgresql:
+    host: PENDING_TOFU_OUTPUT
+  redis:
+    host: PENDING_TOFU_OUTPUT
+  s3:
+    region: PENDING_TOFU_OUTPUT
+    bucketPrefix: PENDING_TOFU_OUTPUT
+    gitlabIrsaRoleArn: PENDING_TOFU_OUTPUT
+
+# Cognito Identity Provider for Keycloak — populated by sync-tofu-outputs.sh
+cognitoIdp:
+  issuerUrl: PENDING_TOFU_OUTPUT
+  hostedUiDomain: PENDING_TOFU_OUTPUT
+  clientId: PENDING_TOFU_OUTPUT

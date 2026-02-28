@@ -1,0 +1,63 @@
+# GitLab GCP overlay values
+# Merged with base/devops/gitlab/values.yaml
+#
+# Object storage: native Google Cloud Storage via Workload Identity (no key file).
+#   gitlab-object-storage-secret content (created by deploy.sh):
+#     provider: Google
+#     google_project: <GCS_PROJECT_ID>
+#   (no explicit credentials — uses ADC via GKE Workload Identity)
+#
+#   gitlab-registry-storage-secret uses the same GSA via Workload Identity.
+#
+# Redis: Cloud Memorystore uses AUTH string (password). The auth_string from
+#   Tofu output must be stored in gitlab-redis-secret K8s secret.
+
+global:
+  hosts:
+    domain: ${DOMAIN}
+    gitlab:
+      name: gitlab.${DOMAIN}
+    registry:
+      name: registry.${DOMAIN}
+
+  # Override data service hosts to GCP managed services
+  psql:
+    host: ${PG_HOST}
+
+  redis:
+    host: ${REDIS_HOST}
+    port: 6379
+    auth:
+      enabled: true
+      secret: gitlab-redis-secret
+      key: password
+
+  # Object storage via GCS — connection secret uses ADC (no explicit credentials)
+  appConfig:
+    object_store:
+      connection:
+        secret: gitlab-object-storage-secret
+        key: connection
+
+  # Shared service account annotated with the GSA email.
+  # GKE Workload Identity webhook maps this K8s SA to the Google Service Account.
+  serviceAccount:
+    enabled: true
+    annotations:
+      iam.gke.io/gcp-service-account: ${GITLAB_GSA_EMAIL}
+
+  ingress:
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    configureCertmanager: false
+    tls:
+      enabled: true
+
+# Label pods that need GCS access (GKE Workload Identity is injected automatically)
+gitlab:
+  webservice:
+    podLabels:
+      iam.gke.io/gcp-service-account: ${GITLAB_GSA_EMAIL}
+  sidekiq:
+    podLabels:
+      iam.gke.io/gcp-service-account: ${GITLAB_GSA_EMAIL}

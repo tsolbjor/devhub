@@ -1,0 +1,47 @@
+# GCP environment base configuration
+# Env-specific configs (gcp-dev, gcp-prod) inherit this structure.
+# Data service values are populated by: sync-tofu-outputs.sh --env gcp-dev|gcp-prod
+
+# Domain configuration - UPDATE THIS
+domain: example.com
+
+# TLS configuration
+tls:
+  type: cert-manager
+  secretName: ""
+  clusterIssuer: letsencrypt-prod
+
+# Email for ACME certificate notifications - UPDATE THIS
+acmeEmail: admin@example.com
+
+# Service subdomains (relative to domain)
+services:
+  keycloak: keycloak
+  vault: vault
+  gitlab: gitlab
+  registry: registry
+  argocd: argocd
+  grafana: grafana
+  prometheus: prometheus
+  alertmanager: alertmanager
+
+# Managed data services — populated by sync-tofu-outputs.sh
+dataServices:
+  type: managed
+  postgresql:
+    host: example.postgres.database.gcp
+  redis:
+    host: 10.0.0.1
+  gcs:
+    projectId: my-gcp-project
+    bucketPrefix: devhub-gitlab
+    gitlabGsaEmail: devhub-gitlab@my-gcp-project.iam.gserviceaccount.com
+
+# Google Identity Provider for Keycloak — FILL IN AFTER CREATING OAUTH CLIENT
+# Create a Web Application OAuth client in Google Cloud Console:
+#   APIs & Services → Credentials → Create OAuth client ID → Web application
+#   Authorized redirect URIs: https://keycloak.<domain>/realms/devops/broker/google/endpoint
+# Then fill in k8s/scripts/gcp-{dev,prod}/gcp-idp.env and run:
+#   ./setup-keycloak.sh --env gcp-dev idp
+googleIdp:
+  clientId: FILL_IN_MANUALLY

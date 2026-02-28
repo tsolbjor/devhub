@@ -5,10 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 Kubernetes DevOps platform with two layers:
-1. **Infrastructure (OpenTofu)** — provisions UpCloud K8s clusters and managed data services (PostgreSQL, Valkey, S3)
+1. **Infrastructure (OpenTofu)** — provisions K8s clusters and managed data services on UpCloud, Azure, GCP, or AWS
 2. **Platform (Helm/K8s)** — deploys DevOps services (Keycloak, Vault, GitLab, ArgoCD, Prometheus/Grafana/Loki/Tempo)
 
-Environments: `local` (Rancher Desktop/WSL2), `upcloud-dev`, `upcloud-prod`.
+Environments: `local` (Rancher Desktop/WSL2), `upcloud-dev`, `upcloud-prod`, `azure-dev`, `azure-prod`, `gcp-dev`, `gcp-prod`, `aws-dev`, `aws-prod`.
 
 ## Common Commands
 

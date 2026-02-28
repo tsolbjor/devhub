@@ -1,0 +1,14 @@
+# Vault GCP overlay values
+# Merged with base/devops/vault/values.yaml
+
+server:
+  ingress:
+    hosts:
+      - host: vault.${DOMAIN}
+        paths: []
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    tls:
+      - secretName: vault-tls
+        hosts:
+          - vault.${DOMAIN}
