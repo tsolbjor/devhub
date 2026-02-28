@@ -152,6 +152,9 @@ kubectl get secret gitlab-gitlab-initial-root-password -n gitlab -o jsonpath='{.
 
 - [k8s/docs/LOCAL_SETUP.md](k8s/docs/LOCAL_SETUP.md) — Local development setup guide
 - [k8s/docs/UPCLOUD_SETUP.md](k8s/docs/UPCLOUD_SETUP.md) — UpCloud deployment guide
+- [k8s/docs/AZURE_SETUP.md](k8s/docs/AZURE_SETUP.md) — Azure deployment guide
+- [k8s/docs/AWS_SETUP.md](k8s/docs/AWS_SETUP.md) — AWS deployment guide
+- [k8s/docs/GCP_SETUP.md](k8s/docs/GCP_SETUP.md) — GCP deployment guide
 - [k8s/docs/KEYCLOAK_SSO.md](k8s/docs/KEYCLOAK_SSO.md) — Keycloak SSO configuration
 - [k8s/docs/SSO_TESTING_GUIDE.md](k8s/docs/SSO_TESTING_GUIDE.md) — SSO testing guide
 - [k8s/argocd/README.md](k8s/argocd/README.md) — ArgoCD app-of-apps patterns
