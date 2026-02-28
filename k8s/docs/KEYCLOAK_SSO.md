@@ -96,12 +96,12 @@ The Keycloak configuration is fully automated and integrated into the deployment
 
 ```bash
 # Run the complete setup (includes Keycloak configuration)
-./scripts/local/setup-all.sh
+cd k8s/scripts
+./setup-all.sh --env local
 
 # Or run Keycloak configuration separately
-cd k8s/scripts/local
-export DOMAIN=localhost
-./setup-keycloak.sh all
+cd k8s/scripts
+./setup-keycloak.sh --env local all
 ```
 
 ### What the Script Does
@@ -178,9 +178,9 @@ All services use these Keycloak endpoints:
 2. Check Keycloak logs: `kubectl logs -n keycloak keycloak-keycloakx-0`
 3. Try running individual steps:
    ```bash
-   ./setup-keycloak.sh realm    # Create realm only
-   ./setup-keycloak.sh clients  # Configure clients only
-   ./setup-keycloak.sh user     # Create admin user only
+   ./setup-keycloak.sh --env local realm    # Create realm only
+   ./setup-keycloak.sh --env local clients  # Configure clients only
+   ./setup-keycloak.sh --env local user     # Create admin user only
    ```
 
 ## Security Considerations

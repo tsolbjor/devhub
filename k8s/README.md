@@ -1,6 +1,6 @@
 # Kubernetes Platform
 
-Deploys the DevOps platform services onto Kubernetes clusters. Supports local development (Rancher Desktop) and UpCloud managed clusters.
+Deploys the DevOps platform services onto Kubernetes clusters. Supports local development and managed cloud clusters (UpCloud, Azure, GCP, AWS).
 
 **Applications are managed via ArgoCD GitOps** — see [argocd/README.md](argocd/README.md).
 
@@ -35,6 +35,10 @@ k8s/
 │   └── upcloud-prod/                # UpCloud prod environment
 │       ├── config.yaml
 │       └── devops -> ../upcloud/devops
+│   ├── azure/, azure-dev/, azure-prod/
+│   │                                 # Azure shared + env-specific overlays
+│   ├── gcp/, gcp-dev/, gcp-prod/     # GCP shared + env-specific overlays
+│   └── aws/, aws-dev/, aws-prod/     # AWS shared + env-specific overlays
 ├── scripts/
 │   ├── lib/common.sh                # Shared library (logging, config, templating)
 │   ├── deploy.sh                    # Main deployment script
@@ -95,13 +99,16 @@ export KUBECONFIG=upcloud-dev/kubeconfig
 ## Deploy Script Usage
 
 ```bash
-./deploy.sh --env local|upcloud-dev|upcloud-prod [component] [action]
+./deploy.sh --env <environment> [component] [action]
 ```
+
+Supported environments:
+`local`, `upcloud-dev`, `upcloud-prod`, `azure-dev`, `azure-prod`, `gcp-dev`, `gcp-prod`, `aws-dev`, `aws-prod`
 
 **Components:**
 - `all` / `devops` — Deploy entire platform (default)
 - `keycloak`, `vault`, `monitoring`, `gitlab`, `argocd` — Individual services
-- `data-services` — Data services only (local: StatefulSets, upcloud: managed config)
+- `data-services` — Data services only (local: StatefulSets, managed envs: external service wiring)
 - `bootstrap` — Deploy ArgoCD app-of-apps
 - `ingress` — Apply ingress rules only
 

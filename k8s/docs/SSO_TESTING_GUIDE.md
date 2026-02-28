@@ -30,7 +30,7 @@
 4. You'll be redirected to Keycloak login page
 5. Enter credentials:
    - Username: `platform-admin`
-   - Password: `Platform123!`
+   - Password: value from `PLATFORM_ADMIN_PASSWORD`
 6. Click "Sign In"
 7. You should be redirected back to Grafana
 8. **Expected Result**: You are logged in as admin with full access
@@ -52,7 +52,7 @@
 5. You'll be redirected to Keycloak login page
 6. Enter credentials:
    - Username: `platform-admin`
-   - Password: `Platform123!`
+   - Password: value from `PLATFORM_ADMIN_PASSWORD`
 7. Click "Sign In"
 8. You should be redirected back to GitLab
 9. **Expected Result**: You are logged in and a new GitLab account is auto-created
@@ -76,7 +76,7 @@
 5. You'll be redirected to Keycloak login page
 6. Enter credentials:
    - Username: `platform-admin`
-   - Password: `Platform123!`
+   - Password: value from `PLATFORM_ADMIN_PASSWORD`
 7. Click "Sign In"
 8. You should be redirected back to ArgoCD
 9. **Expected Result**: You are logged in with admin access
