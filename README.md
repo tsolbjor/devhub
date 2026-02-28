@@ -1,6 +1,6 @@
 # devhub
 
-Kubernetes DevOps platform for local development and UpCloud production. Two layers: **OpenTofu** provisions cloud infrastructure, **Helm/K8s scripts** deploy platform services on top.
+Kubernetes DevOps platform for local development and cloud environments. Two layers: **OpenTofu** provisions cloud infrastructure, **Helm/K8s scripts** deploy platform services on top.
 
 ## Platform Services
 
@@ -19,26 +19,31 @@ Kubernetes DevOps platform for local development and UpCloud production. Two lay
 
 | Environment | Infrastructure | Data Services | Domain |
 |-------------|---------------|---------------|--------|
-| `local` | Rancher Desktop (WSL2) | StatefulSets (PG, Valkey, MinIO) | `*.localhost` |
-| `upcloud-dev` | UpCloud Managed K8s | UpCloud Managed (PG, Valkey, S3) | configurable |
-| `upcloud-prod` | UpCloud Managed K8s | UpCloud Managed (PG, Valkey, S3) | configurable |
+| `local` | Local Kubernetes (Rancher Desktop or similar) | StatefulSets (PG, Valkey, MinIO) | `*.localhost` |
+| `upcloud-dev`, `upcloud-prod` | UpCloud Managed K8s | Managed (PG, Valkey, S3) | configurable |
+| `azure-dev`, `azure-prod` | AKS | Managed (PostgreSQL, Redis, Blob) | configurable |
+| `gcp-dev`, `gcp-prod` | GKE | Managed (PostgreSQL, Redis, GCS) | configurable |
+| `aws-dev`, `aws-prod` | EKS | Managed (PostgreSQL, Redis, S3) | configurable |
 
 ## Repository Structure
 
 ```
 devhub/
-├── tofu/upcloud/                    # Infrastructure as Code (OpenTofu)
-│   ├── modules/cluster/             #   Shared module: K8s cluster + managed data services
-│   ├── dev/                         #   Dev root module (smaller plans, no termination protection)
-│   └── prod/                        #   Prod root module (larger plans, termination protection)
+├── tofu/                            # Infrastructure as Code (OpenTofu)
+│   ├── upcloud/                     #   UpCloud modules + env roots
+│   ├── azure/                       #   Azure modules + env roots
+│   ├── gcp/                         #   GCP modules + env roots
+│   └── aws/                         #   AWS modules + env roots
 │
 ├── k8s/                             # Kubernetes platform deployment
 │   ├── base/devops/                 #   Base Helm values for each service
 │   ├── overlays/
 │   │   ├── local/                   #   Local: config.yaml + Helm overrides + data-services
-│   │   ├── upcloud/devops/          #   Shared UpCloud Helm value overrides
-│   │   ├── upcloud-dev/             #   UpCloud dev: config.yaml + symlink to upcloud/devops
-│   │   └── upcloud-prod/            #   UpCloud prod: config.yaml + symlink to upcloud/devops
+│   │   ├── upcloud/, azure/, gcp/, aws/  #   Shared cloud Helm value overrides
+│   │   ├── upcloud-dev/, upcloud-prod/   #   UpCloud env overlays
+│   │   ├── azure-dev/, azure-prod/       #   Azure env overlays
+│   │   ├── gcp-dev/, gcp-prod/           #   GCP env overlays
+│   │   └── aws-dev/, aws-prod/           #   AWS env overlays
 │   ├── argocd/                      #   ArgoCD app-of-apps manifests (GitOps)
 │   ├── scripts/                     #   Deployment and setup scripts
 │   └── docs/                        #   Detailed setup guides
@@ -80,15 +85,14 @@ export KUBECONFIG=upcloud-dev/kubeconfig
 
 ### Infrastructure Layer (OpenTofu)
 
-The `tofu/upcloud/` directory provisions UpCloud resources:
+The `tofu/` directory contains provider-specific modules and environment roots for UpCloud, Azure, GCP, and AWS. Managed deployments provision:
 
-- **Networking**: Private SDN network, router, NAT gateway
-- **Kubernetes**: Managed K8s cluster with private worker nodes
-- **PostgreSQL**: Managed database with `keycloak` and `gitlabhq_production` databases
-- **Valkey**: Managed Redis-compatible cache for GitLab
-- **Object Storage**: S3-compatible storage with GitLab buckets (artifacts, uploads, packages, LFS, registry, backups)
+- **Kubernetes cluster** (provider-managed)
+- **PostgreSQL** for Keycloak and GitLab
+- **Redis/Valkey** for GitLab caching/session workloads
+- **Object storage** for GitLab artifacts, packages, registry, and backups
 
-All managed services are attached to the private network with public access disabled. Dev and prod environments use separate tofu state files and can have different plans/sizing.
+Dev and prod environments use separate state and configurable sizing.
 
 ### Platform Layer (K8s Scripts)
 
