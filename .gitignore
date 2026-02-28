@@ -2,6 +2,9 @@
 .env
 *.env.local
 
+# Visual Studio solution files
+*.sln
+
 # Terraform/OpenTofu
 *.tfstate
 *.tfstate.*
