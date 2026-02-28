@@ -7,7 +7,7 @@ This guide sets up trusted HTTPS for local Kubernetes development on Windows wit
 - Windows 10/11
 - WSL2 (Ubuntu or similar)
 - Rancher Desktop (or another local Kubernetes distribution)
-- `kubectl`, `helm`, `openssl`, `jq`, `envsubst` in WSL
+- `kubectl`, `helm`, `openssl`, `jq`, `envsubst`, `curl` in WSL
 
 ## Quick Start (Automated)
 
