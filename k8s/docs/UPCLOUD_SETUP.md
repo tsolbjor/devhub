@@ -138,7 +138,7 @@ open https://grafana.dev.yourdomain.com
 
 | Setting | Dev (`tofu/upcloud/dev`) | Prod (`tofu/upcloud/prod`) |
 |---------|--------------------------|----------------------------|
-| Prefix | `tshub-dev` | `tshub` |
+| Prefix | `devhub-dev` | `devhub` |
 | Zone | `no-svg1` | `de-fra1` |
 | Worker nodes | 2x `DEV-1xCPU-2GB` | 3x `4xCPU-8GB` |
 | PostgreSQL | `1x1xCPU-2GB-25GB` | `2x2xCPU-4GB-100GB` |

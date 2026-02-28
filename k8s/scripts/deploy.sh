@@ -529,8 +529,8 @@ ensure_nginx_ingress() {
         sleep 5
     fi
 
-    # Ensure tshub namespace and TLS secret exist (needed for default-ssl-certificate)
-    kubectl create namespace tshub 2>/dev/null || true
+    # Ensure devhub namespace and TLS secret exist (needed for default-ssl-certificate)
+    kubectl create namespace devhub 2>/dev/null || true
     local CERT_B64=$(base64 -w 0 "${CERTS_DIR}/domains/local-dev.crt")
     local KEY_B64=$(base64 -w 0 "${CERTS_DIR}/domains/local-dev.key")
     cat <<EOF | kubectl apply -f -
@@ -538,7 +538,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: local-tls-secret
-  namespace: tshub
+  namespace: devhub
 type: kubernetes.io/tls
 data:
   tls.crt: ${CERT_B64}
@@ -555,7 +555,7 @@ EOF
         --set controller.config.use-forwarded-headers="true" \
         --set controller.config.compute-full-forwarded-for="true" \
         --set controller.config.use-proxy-protocol="false" \
-        --set controller.extraArgs.default-ssl-certificate="tshub/local-tls-secret" \
+        --set controller.extraArgs.default-ssl-certificate="devhub/local-tls-secret" \
         --set controller.admissionWebhooks.enabled=false \
         --timeout 5m
 

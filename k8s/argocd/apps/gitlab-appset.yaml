@@ -1,5 +1,5 @@
 # ApplicationSet: auto-discover workload repos from GitLab
-# Scans the 'tshub' group for repos containing a k8s/ directory
+# Scans the 'devhub' group for repos containing a k8s/ directory
 # and creates ArgoCD Applications for each one.
 #
 # Requires Secret 'argocd-gitlab-scm-token' in argocd namespace:
@@ -16,7 +16,7 @@ spec:
         gitlab:
           # Use internal service URL to avoid .localhost DNS issue (glibc resolves *.localhost to 127.0.0.1)
           api: http://gitlab-webservice-default.gitlab.svc.cluster.local:8181
-          group: tshub
+          group: devhub
           includeSubgroups: true
           tokenRef:
             secretName: argocd-gitlab-scm-token
@@ -34,7 +34,7 @@ spec:
       name: 'workload-{{repository}}'
       namespace: argocd
       labels:
-        app.kubernetes.io/part-of: tshub
+        app.kubernetes.io/part-of: devhub
         app.kubernetes.io/managed-by: applicationset
     spec:
       project: workloads
@@ -44,7 +44,7 @@ spec:
         path: k8s
       destination:
         server: https://kubernetes.default.svc
-        namespace: 'tshub-{{repository}}'
+        namespace: 'devhub-{{repository}}'
       syncPolicy:
         automated:
           prune: true

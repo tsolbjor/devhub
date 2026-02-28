@@ -1,4 +1,4 @@
-# tshub
+# devhub
 
 Kubernetes DevOps platform for local development and UpCloud production. Two layers: **OpenTofu** provisions cloud infrastructure, **Helm/K8s scripts** deploy platform services on top.
 
@@ -26,7 +26,7 @@ Kubernetes DevOps platform for local development and UpCloud production. Two lay
 ## Repository Structure
 
 ```
-tshub2/
+devhub/
 ├── tofu/upcloud/                    # Infrastructure as Code (OpenTofu)
 │   ├── modules/cluster/             #   Shared module: K8s cluster + managed data services
 │   ├── dev/                         #   Dev root module (smaller plans, no termination protection)

@@ -1,12 +1,12 @@
 # App Template
 
-Starter template for application repos that deploy to the tshub platform via ArgoCD.
+Starter template for application repos that deploy to the devhub platform via ArgoCD.
 
 Includes a minimal .NET 8 API, a multi-stage Dockerfile, K8s manifests, and a GitLab CI pipeline that builds, tests, and publishes the container image to the GitLab registry.
 
 ## Usage
 
-1. Create a new repo in GitLab under the `tshub` group
+1. Create a new repo in GitLab under the `devhub` group
 2. Copy this template into the repo root
 3. Replace placeholders:
    - `APP_NAME` — your application name (e.g., `my-service`)
@@ -45,7 +45,7 @@ ArgoCD detects the manifest change and rolls out the new image automatically.
 ## Notes
 
 - The `k8s/` directory is what ArgoCD watches. All K8s manifests go here.
-- The namespace `tshub-APP_NAME` is created automatically by ArgoCD (`CreateNamespace=true`).
+- The namespace `devhub-APP_NAME` is created automatically by ArgoCD (`CreateNamespace=true`).
 - Ingress uses `ingressClassName: nginx` — consistent with the platform.
 - Rename `APP_NAME.csproj` to match your app name (must match the `ENTRYPOINT` DLL name in the Dockerfile).
 - Replace the sample `Program.cs` with your own application code.

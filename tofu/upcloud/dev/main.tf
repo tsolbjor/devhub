@@ -1,7 +1,7 @@
 module "cluster" {
   source = "../modules/cluster"
 
-  prefix       = "tshub-dev"
+  prefix       = "devhub-dev"
   zone         = "no-svg1"
   node_plan    = "DEV-1xCPU-2GB"
   node_count   = 2

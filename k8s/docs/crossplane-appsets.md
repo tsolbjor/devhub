@@ -5,7 +5,7 @@ This document covers the setup and usage of Crossplane for infrastructure provis
 ## Overview
 
 ```
-GitLab repo (tshub group)
+GitLab repo (devhub group)
 ├── k8s/              → ArgoCD "gitlab-workloads" ApplicationSet → deploys app
 └── infrastructure/   → ArgoCD "gitlab-infrastructure" ApplicationSet → Crossplane CRs
                            → Crossplane provisions UpCloud resources
@@ -33,7 +33,7 @@ kubectl create secret generic argocd-gitlab-scm-token \
   --from-literal=token=YOUR_GITLAB_PAT
 ```
 
-The token must have access to the `tshub` group in GitLab.
+The token must have access to the `devhub` group in GitLab.
 
 ## Deploying Crossplane
 
@@ -58,7 +58,7 @@ After ArgoCD is deployed, bootstrap the app-of-apps:
 ```
 
 This applies:
-- All ArgoCD Projects (`k8s/argocd/projects/*.yaml`): `tshub`, `workloads`, `infrastructure`
+- All ArgoCD Projects (`k8s/argocd/projects/*.yaml`): `devhub`, `workloads`, `infrastructure`
 - The app-of-apps Application, which auto-discovers:
   - `gitlab-appset.yaml` — workloads ApplicationSet
   - `infra-appset.yaml` — infrastructure ApplicationSet
@@ -69,7 +69,7 @@ This applies:
 
 For teams that just need to deploy an application:
 
-1. Create a repo in GitLab under `tshub/` group
+1. Create a repo in GitLab under `devhub/` group
 2. Copy contents of `k8s/templates/app-template/` into the repo
 3. Replace `APP_NAME` and `DOMAIN` placeholders
 4. Push — ArgoCD creates `workload-<reponame>` Application within ~3 minutes
@@ -78,7 +78,7 @@ For teams that just need to deploy an application:
 
 For teams that need their own cluster and data services:
 
-1. Create a repo in GitLab under `tshub/` group
+1. Create a repo in GitLab under `devhub/` group
 2. Copy contents of `k8s/templates/cluster-template/` into the repo
 3. Replace `CLUSTER_NAME`, `TEAM_NAME`, `APP_NAME`, and `DOMAIN` placeholders
 4. Push — ArgoCD creates:
@@ -120,14 +120,14 @@ kubectl get applications -n argocd -w
 
 1. Create a test repo in GitLab:
    ```bash
-   # In GitLab UI or via API, create tshub/test-app
+   # In GitLab UI or via API, create devhub/test-app
    ```
 2. Add a `k8s/` directory with a simple deployment
 3. Wait ~3 minutes for ArgoCD to discover it
 4. Verify:
    ```bash
    kubectl get application workload-test-app -n argocd
-   kubectl get pods -n tshub-test-app
+   kubectl get pods -n devhub-test-app
    ```
 
 ## Troubleshooting
@@ -136,7 +136,7 @@ kubectl get applications -n argocd -w
 
 - Verify the `argocd-gitlab-scm-token` Secret exists: `kubectl get secret argocd-gitlab-scm-token -n argocd`
 - Check ApplicationSet controller logs: `kubectl logs -l app.kubernetes.io/name=argocd-applicationset-controller -n argocd`
-- Ensure the GitLab PAT has `read_api` scope and access to the `tshub` group
+- Ensure the GitLab PAT has `read_api` scope and access to the `devhub` group
 
 ### Crossplane provider not becoming healthy
 

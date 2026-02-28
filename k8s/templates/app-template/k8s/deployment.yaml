@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: APP_NAME
-  namespace: tshub-APP_NAME
+  namespace: devhub-APP_NAME
   labels:
     app: APP_NAME
 spec:
@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: APP_NAME
-          image: gitlab.DOMAIN:5050/tshub/APP_NAME:latest
+          image: gitlab.DOMAIN:5050/devhub/APP_NAME:latest
           ports:
             - containerPort: 8080
           resources:

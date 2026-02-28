@@ -92,7 +92,7 @@ deploy.sh --env upcloud-dev
 ### Directory Layout
 
 ```
-tshub2/
+devhub/
 ├── tofu/upcloud/                    # Infrastructure as Code (OpenTofu)
 │   ├── modules/cluster/             #   Shared module: K8s + data services
 │   ├── dev/                         #   Dev environment root module
@@ -121,7 +121,7 @@ Uses **nginx-ingress** controller (not Traefik). All ingresses use `ingressClass
 
 ### Services and Namespaces
 
-Each service gets its own namespace: `keycloak`, `vault`, `gitlab`, `argocd`, `monitoring`, `external-secrets`. Application workloads go in `tshub` namespace.
+Each service gets its own namespace: `keycloak`, `vault`, `gitlab`, `argocd`, `monitoring`, `external-secrets`. Application workloads go in `devhub` namespace.
 
 The local TLS secret (`local-tls-secret`) is copied into every service namespace by deploy.sh.
 

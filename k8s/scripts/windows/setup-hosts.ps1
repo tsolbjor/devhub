@@ -45,7 +45,7 @@ $Domains = @(
 )
 
 $HostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
-$Marker = "# tshub local development"
+$Marker = "# devhub local development"
 
 # Check if hosts file exists
 if (-not (Test-Path $HostsFile)) {
@@ -62,7 +62,7 @@ $CurrentContent = Get-Content $HostsFile -Raw
 
 # Remove existing entries if present
 if ($CurrentContent -match $Marker) {
-    Write-Step "Removing existing tshub entries..."
+    Write-Step "Removing existing devhub entries..."
     
     # Remove the block between markers
     $pattern = "(?s)$Marker.*?$Marker end"
@@ -78,7 +78,7 @@ if ($CurrentContent -match $Marker) {
 if ($Remove) {
     Write-Step "Saving hosts file..."
     Set-Content -Path $HostsFile -Value $CurrentContent -NoNewline
-    Write-Info "tshub entries removed from hosts file."
+    Write-Info "devhub entries removed from hosts file."
     exit 0
 }
 

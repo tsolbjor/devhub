@@ -4,7 +4,7 @@ Starter template for teams that need their own workload cluster and data service
 
 ## Usage
 
-1. Create a new repo in GitLab under the `tshub` group
+1. Create a new repo in GitLab under the `devhub` group
 2. Copy this template into the repo root
 3. Replace placeholders:
    - `CLUSTER_NAME` — name for the workload cluster (e.g., `team-alpha`)

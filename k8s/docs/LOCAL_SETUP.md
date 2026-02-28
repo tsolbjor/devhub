@@ -32,7 +32,7 @@ This guide walks you through setting up trusted HTTPS for local Kubernetes devel
 │  │  │                                                    │  ││
 │  │  │  ┌──────────────┐  ┌──────────────┐              │  ││
 │  │  │  │nginx-ingress │  │   Services   │              │  ││
-│  │  │  │ (port 443)   │──│  (tshub ns)  │              │  ││
+│  │  │  │ (port 443)   │──│  (devhub ns)  │              │  ││
 │  │  │  │  + TLS cert  │  │              │              │  ││
 │  │  │  └──────────────┘  └──────────────┘              │  ││
 │  │  │                                                    │  ││
@@ -115,7 +115,7 @@ cd k8s/scripts/local
 
 This:
 - Installs nginx-ingress controller via Helm
-- Creates the `tshub` namespace
+- Creates the `devhub` namespace
 - Applies TLS secrets and CA certificates
 
 #### Step 4: Deploy DevOps Platform (WSL)
@@ -236,12 +236,12 @@ kubectl get pods -n ingress-nginx
 kubectl get svc -n ingress-nginx
 
 # Check ingress rules
-kubectl get ingress -n tshub
-kubectl describe ingress -n tshub
+kubectl get ingress -n devhub
+kubectl describe ingress -n devhub
 ```
 
 #### Services can't reach each other with HTTPS
-1. Verify CA ConfigMap exists: `kubectl get configmap local-ca-certificates -n tshub`
+1. Verify CA ConfigMap exists: `kubectl get configmap local-ca-certificates -n devhub`
 2. Check pod has the volume mounted correctly
 3. Check the environment variable is set
 
@@ -262,6 +262,6 @@ Firefox uses its own certificate store. To trust the local CA:
 3. Click "View Certificates"
 4. Go to "Authorities" tab
 5. Click "Import" and select the CA certificate from:
-   - WSL path: `\\wsl$\Ubuntu\home\<user>\code\tshub2\k8s\certs\ca\ca.crt`
+   - WSL path: `\\wsl$\Ubuntu\home\<user>\code\devhub\k8s\certs\ca\ca.crt`
 6. Check "Trust this CA to identify websites"
 7. Click OK

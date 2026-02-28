@@ -69,7 +69,7 @@ install_nginx_ingress_local() {
         --set controller.config.use-forwarded-headers="true" \
         --set controller.config.compute-full-forwarded-for="true" \
         --set controller.config.use-proxy-protocol="false" \
-        --set controller.extraArgs.default-ssl-certificate="tshub/local-tls-secret" \
+        --set controller.extraArgs.default-ssl-certificate="devhub/local-tls-secret" \
         --set controller.admissionWebhooks.enabled=false \
         --timeout 5m
 
@@ -177,14 +177,14 @@ remove_traefik() {
 
 create_namespace() {
     log_step "Creating namespace..."
-    kubectl create namespace tshub 2>/dev/null || true
+    kubectl create namespace devhub 2>/dev/null || true
     log_info "Namespace created."
 }
 
 apply_secrets() {
     log_step "Applying TLS secrets and CA certificates..."
 
-    kubectl create namespace tshub 2>/dev/null || true
+    kubectl create namespace devhub 2>/dev/null || true
 
     if [[ -f "${OVERLAY_DIR}/tls-secret.yaml" ]]; then
         kubectl apply -f "${OVERLAY_DIR}/tls-secret.yaml"

@@ -13,7 +13,7 @@ spec:
     - '*'
 
   destinations:
-    - namespace: tshub-*
+    - namespace: devhub-*
       server: https://kubernetes.default.svc
 
   clusterResourceWhitelist:

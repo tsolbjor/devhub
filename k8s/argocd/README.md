@@ -10,7 +10,7 @@ argocd/
 │   ├── app-of-apps.yaml     # Root application (deploys all apps)
 │   └── *.yaml               # Individual application manifests
 ├── projects/                # ArgoCD Project definitions
-│   └── tshub.yaml           # Main project for tshub applications
+│   └── devhub.yaml           # Main project for devhub applications
 └── README.md
 ```
 
@@ -33,14 +33,14 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: tshub
+  project: devhub
   source:
-    repoURL: https://gitlab.localhost/tshub/my-service.git
+    repoURL: https://gitlab.localhost/devhub/my-service.git
     targetRevision: HEAD
     path: k8s
   destination:
     server: https://kubernetes.default.svc
-    namespace: tshub
+    namespace: devhub
   syncPolicy:
     automated:
       prune: true
@@ -88,16 +88,16 @@ spec:
     - list:
         elements:
           - env: local
-            namespace: tshub
+            namespace: devhub
           - env: staging
-            namespace: tshub-staging
+            namespace: devhub-staging
   template:
     metadata:
       name: 'my-service-{{env}}'
     spec:
-      project: tshub
+      project: devhub
       source:
-        repoURL: https://gitlab.localhost/tshub/my-service.git
+        repoURL: https://gitlab.localhost/devhub/my-service.git
         path: 'k8s/overlays/{{env}}'
       destination:
         server: https://kubernetes.default.svc

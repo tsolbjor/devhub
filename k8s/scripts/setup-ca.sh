@@ -171,7 +171,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: local-tls-secret
-  namespace: tshub
+  namespace: devhub
 type: kubernetes.io/tls
 data:
   tls.crt: ${CERT_B64}
@@ -196,7 +196,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: local-ca-certificates
-  namespace: tshub
+  namespace: devhub
 data:
   ca.crt: |
 $(cat "${CA_DIR}/ca.crt" | sed 's/^/    /')
@@ -205,7 +205,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: local-ca-secret
-  namespace: tshub
+  namespace: devhub
 type: Opaque
 data:
   ca.crt: ${CA_B64}

@@ -34,8 +34,8 @@ $K8sDir = Split-Path -Parent (Split-Path -Parent $ScriptDir)
 $PossiblePaths = @(
     (Join-Path $K8sDir "certs\ca\ca.crt"),
     (Join-Path $K8sDir "certs\ca\ca.pem"),
-    "\\wsl$\Ubuntu\home\$env:USERNAME\code\tshub2\k8s\certs\ca\ca.crt",
-    "\\wsl.localhost\Ubuntu\home\$env:USERNAME\code\tshub2\k8s\certs\ca\ca.crt"
+    "\\wsl$\Ubuntu\home\$env:USERNAME\code\devhub\k8s\certs\ca\ca.crt",
+    "\\wsl.localhost\Ubuntu\home\$env:USERNAME\code\devhub\k8s\certs\ca\ca.crt"
 )
 
 if ($CertPath -and (Test-Path $CertPath)) {

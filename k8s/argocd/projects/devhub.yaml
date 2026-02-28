@@ -1,14 +1,14 @@
-# ArgoCD Project for tshub applications
+# ArgoCD Project for devhub applications
 # Defines RBAC, allowed sources, and destinations
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
-  name: tshub
+  name: devhub
   namespace: argocd
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  description: tshub application workloads
+  description: devhub application workloads
 
   # Allowed source repositories
   sourceRepos:
@@ -16,9 +16,9 @@ spec:
 
   # Allowed destination clusters and namespaces
   destinations:
-    - namespace: tshub
+    - namespace: devhub
       server: https://kubernetes.default.svc
-    - namespace: tshub-*
+    - namespace: devhub-*
       server: https://kubernetes.default.svc
 
   # Allowed cluster-scoped resources
@@ -41,16 +41,16 @@ spec:
   # Roles for this project
   roles:
     - name: developer
-      description: Developer access to tshub apps
+      description: Developer access to devhub apps
       policies:
-        - p, proj:tshub:developer, applications, get, tshub/*, allow
-        - p, proj:tshub:developer, applications, sync, tshub/*, allow
+        - p, proj:devhub:developer, applications, get, devhub/*, allow
+        - p, proj:devhub:developer, applications, sync, devhub/*, allow
       groups:
         - developers
 
     - name: admin
-      description: Admin access to tshub apps
+      description: Admin access to devhub apps
       policies:
-        - p, proj:tshub:admin, applications, *, tshub/*, allow
+        - p, proj:devhub:admin, applications, *, devhub/*, allow
       groups:
         - admins
