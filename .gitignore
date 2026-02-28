@@ -12,6 +12,9 @@
 *kubeconfig*.yaml
 *kubeconfig*.yml
 
+# Generated local secrets (vault init keys, OIDC secrets, etc.)
+k8s/scripts/local/
+
 # Editor
 *.swp
 *.swo
