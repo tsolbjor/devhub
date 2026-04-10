@@ -24,6 +24,9 @@ module "cluster" {
   redis_num_cache_clusters = 1
   redis_automatic_failover = false
 
+  # DNS — must match an existing Route53 hosted zone
+  domain = "dev.example.com" # TODO: set to your actual domain
+
   # Cognito — domain prefix must be globally unique
   cognito_domain_prefix = "devhub-dev-devhub" # TODO: customize to avoid conflicts
 

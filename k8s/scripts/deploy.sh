@@ -318,6 +318,25 @@ install_vault() {
     log_info "Vault installed"
 }
 
+install_external_dns() {
+    if [[ "$ENV" == "local" ]]; then
+        log_info "Skipping external-dns (not needed for local)"
+        return 0
+    fi
+
+    log_step "Installing external-dns..."
+
+    local values_args=$(get_values_args "external-dns")
+
+    helm upgrade --install external-dns external-dns/external-dns \
+        --namespace external-dns \
+        --create-namespace \
+        $values_args \
+        --wait --timeout 5m
+
+    log_info "external-dns installed"
+}
+
 install_external_secrets() {
     log_step "Installing External Secrets..."
 
@@ -574,6 +593,7 @@ deploy_devops() {
     create_devops_namespaces
     [[ "$ENV" == "local" ]] && copy_tls_secrets
     install_cert_manager
+    install_external_dns
     install_data_services
     install_monitoring
     install_keycloak
@@ -592,6 +612,7 @@ delete_devops() {
     kubectl delete -f "${BASE_DIR}/crossplane/provider-config.yaml" 2>/dev/null || true
     helm uninstall crossplane -n crossplane-system 2>/dev/null || true
     helm uninstall argocd -n argocd 2>/dev/null || true
+    helm uninstall external-dns -n external-dns 2>/dev/null || true
     helm uninstall gitlab -n gitlab 2>/dev/null || true
     helm uninstall prometheus -n monitoring 2>/dev/null || true
     helm uninstall loki -n monitoring 2>/dev/null || true
@@ -622,7 +643,7 @@ delete_devops() {
 status_devops() {
     log_step "DevOps Platform Status:"
     echo ""
-    for ns in data-services keycloak vault gitlab argocd monitoring external-secrets cert-manager crossplane-system; do
+    for ns in data-services keycloak vault gitlab argocd monitoring external-secrets cert-manager crossplane-system external-dns; do
         echo "=== ${ns} ==="
         kubectl get pods -n "$ns" 2>/dev/null || echo "  Namespace not found"
         echo ""
@@ -710,6 +731,9 @@ main() {
                 crossplane)
                     add_helm_repos && install_crossplane
                     ;;
+                external-dns)
+                    add_helm_repos && install_external_dns
+                    ;;
                 ingress)
                     apply_devops_ingress
                     ;;
@@ -741,7 +765,7 @@ main() {
             echo "Components:"
             echo "  all        - Deploy entire platform (alias for devops)"
             echo "  devops     - DevOps platform"
-            echo "  data-services, keycloak, vault, monitoring, gitlab, argocd, crossplane - Individual components"
+            echo "  data-services, keycloak, vault, monitoring, gitlab, argocd, crossplane, external-dns - Individual components"
             echo "  bootstrap  - Deploy ArgoCD app-of-apps for GitOps"
             echo ""
             echo "Actions:"

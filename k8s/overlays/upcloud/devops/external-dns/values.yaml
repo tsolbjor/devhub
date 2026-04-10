@@ -1,5 +1,21 @@
-# external-dns UpCloud overlay values
-# Domain filter for DNS management
+# external-dns UpCloud overlay — Cloudflare provider
+# UpCloud does not have a native external-dns provider; use Cloudflare as the DNS authority.
+#
+# Pre-requisite: create the secret before deploying:
+#   kubectl create secret generic external-dns-cloudflare -n external-dns \
+#     --from-literal=api-token=<your-cloudflare-api-token>
+
+provider: cloudflare
+
+cloudflare:
+  proxied: false  # Set true to proxy traffic through Cloudflare (hides origin IP)
+
+env:
+  - name: CF_API_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: external-dns-cloudflare
+        key: api-token
 
 domainFilters:
   - ${DOMAIN}

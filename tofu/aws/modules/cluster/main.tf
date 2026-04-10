@@ -640,3 +640,64 @@ resource "aws_iam_role_policy" "gitlab_s3" {
   role        = aws_iam_role.gitlab_irsa.id
   policy      = data.aws_iam_policy_document.gitlab_s3.json
 }
+
+# ─── External-DNS IRSA ───────────────────────────────────────────────
+# Allows external-dns to manage Route53 records for the cluster's domain.
+# The K8s service account "external-dns/external-dns" assumes this role via IRSA.
+
+data "aws_route53_zone" "main" {
+  name         = var.domain
+  private_zone = false
+}
+
+data "aws_iam_policy_document" "external_dns_assume_role" {
+  statement {
+    effect = "Allow"
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.eks.arn]
+    }
+
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:sub"
+      values   = ["system:serviceaccount:external-dns:external-dns"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "external_dns_irsa" {
+  name_prefix        = "${var.prefix}-external-dns-irsa-"
+  assume_role_policy = data.aws_iam_policy_document.external_dns_assume_role.json
+
+  tags = var.tags
+}
+
+data "aws_iam_policy_document" "external_dns_route53" {
+  statement {
+    effect    = "Allow"
+    actions   = ["route53:ChangeResourceRecordSets"]
+    resources = ["arn:aws:route53:::hostedzone/${data.aws_route53_zone.main.zone_id}"]
+  }
+
+  statement {
+    effect  = "Allow"
+    actions = ["route53:ListHostedZones", "route53:ListResourceRecordSets", "route53:ListTagsForResource"]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "external_dns_route53" {
+  name_prefix = "${var.prefix}-external-dns-route53-"
+  role        = aws_iam_role.external_dns_irsa.id
+  policy      = data.aws_iam_policy_document.external_dns_route53.json
+}

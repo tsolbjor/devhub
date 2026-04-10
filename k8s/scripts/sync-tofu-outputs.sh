@@ -76,13 +76,15 @@ if [[ "$CLOUD" == "gcp" ]]; then
     GCS_PROJECT_ID=$(echo "$OUTPUTS" | jq -r '.project_id.value')
     GCS_BUCKET_PREFIX=$(echo "$OUTPUTS" | jq -r '.gitlab_gcs_bucket_prefix.value')
     GITLAB_GSA_EMAIL=$(echo "$OUTPUTS" | jq -r '.gitlab_gsa_email.value')
+    EXTERNAL_DNS_GSA_EMAIL=$(echo "$OUTPUTS" | jq -r '.external_dns_gsa_email.value')
     GCP_REGION=$(echo "$OUTPUTS" | jq -r '.region.value')
 
     log_info "PostgreSQL:        ${PG_HOST}:${PG_PORT}"
     log_info "Redis:             ${REDIS_HOST}:${REDIS_PORT}"
     log_info "GCS Project:       ${GCS_PROJECT_ID}"
     log_info "GCS Bucket Prefix: ${GCS_BUCKET_PREFIX}"
-    log_info "GitLab GSA:        ${GITLAB_GSA_EMAIL}"
+    log_info "GitLab GSA:           ${GITLAB_GSA_EMAIL}"
+    log_info "External-DNS GSA:     ${EXTERNAL_DNS_GSA_EMAIL}"
     log_info "Cluster:           ${CLUSTER_NAME}"
 
 elif [[ "$CLOUD" == "aws" ]]; then
@@ -91,6 +93,7 @@ elif [[ "$CLOUD" == "aws" ]]; then
     AWS_REGION=$(echo "$OUTPUTS" | jq -r '.aws_region.value')
     S3_BUCKET_PREFIX=$(echo "$OUTPUTS" | jq -r '.gitlab_s3_bucket_prefix.value')
     GITLAB_IRSA_ROLE_ARN=$(echo "$OUTPUTS" | jq -r '.gitlab_irsa_role_arn.value')
+    EXTERNAL_DNS_IRSA_ROLE_ARN=$(echo "$OUTPUTS" | jq -r '.external_dns_irsa_role_arn.value')
     COGNITO_ISSUER_URL=$(echo "$OUTPUTS" | jq -r '.cognito_issuer_url.value')
     COGNITO_HOSTED_UI_DOMAIN=$(echo "$OUTPUTS" | jq -r '.cognito_hosted_ui_domain.value')
     COGNITO_CLIENT_ID=$(echo "$OUTPUTS" | jq -r '.cognito_client_id.value')
@@ -100,7 +103,8 @@ elif [[ "$CLOUD" == "aws" ]]; then
     log_info "Redis:               ${REDIS_HOST}:${REDIS_PORT}"
     log_info "S3 Region:           ${AWS_REGION}"
     log_info "S3 Bucket Prefix:    ${S3_BUCKET_PREFIX}"
-    log_info "GitLab IRSA ARN:     ${GITLAB_IRSA_ROLE_ARN}"
+    log_info "GitLab IRSA ARN:        ${GITLAB_IRSA_ROLE_ARN}"
+    log_info "External-DNS IRSA ARN:  ${EXTERNAL_DNS_IRSA_ROLE_ARN}"
     log_info "Cognito Issuer:      ${COGNITO_ISSUER_URL}"
     log_info "Cognito Domain:      ${COGNITO_HOSTED_UI_DOMAIN}"
     log_info "Cognito Client:      ${COGNITO_CLIENT_ID}"
@@ -121,6 +125,7 @@ else
     REDIS_PORT=$(echo "$OUTPUTS" | jq -r '.redis_port.value')
     STORAGE_ACCOUNT=$(echo "$OUTPUTS" | jq -r '.storage_account_name.value')
     GITLAB_IDENTITY_CLIENT_ID=$(echo "$OUTPUTS" | jq -r '.gitlab_identity_client_id.value')
+    EXTERNAL_DNS_IDENTITY_CLIENT_ID=$(echo "$OUTPUTS" | jq -r '.external_dns_identity_client_id.value')
     RESOURCE_GROUP=$(echo "$OUTPUTS" | jq -r '.resource_group_name.value')
     ENTRA_TENANT_ID=$(echo "$OUTPUTS" | jq -r '.entra_tenant_id.value')
     ENTRA_KEYCLOAK_CLIENT_ID=$(echo "$OUTPUTS" | jq -r '.entra_keycloak_client_id.value')
@@ -129,7 +134,8 @@ else
     log_info "PostgreSQL:       ${PG_HOST}:${PG_PORT}"
     log_info "Redis:            ${REDIS_HOST}:${REDIS_PORT}"
     log_info "Storage Account:  ${STORAGE_ACCOUNT}"
-    log_info "GitLab Identity:  ${GITLAB_IDENTITY_CLIENT_ID}"
+    log_info "GitLab Identity:      ${GITLAB_IDENTITY_CLIENT_ID}"
+    log_info "External-DNS Identity: ${EXTERNAL_DNS_IDENTITY_CLIENT_ID}"
     log_info "Entra Tenant:     ${ENTRA_TENANT_ID}"
     log_info "Entra Client:     ${ENTRA_KEYCLOAK_CLIENT_ID}"
     log_info "Cluster:          ${CLUSTER_NAME}"
@@ -146,6 +152,10 @@ if [[ "$CLOUD" == "gcp" ]]; then
         /gcs:/,/projectId:/ { s|projectId: .*|projectId: ${GCS_PROJECT_ID}| }
         /gcs:/,/bucketPrefix:/ { s|bucketPrefix: .*|bucketPrefix: ${GCS_BUCKET_PREFIX}| }
         /gcs:/,/gitlabGsaEmail:/ { s|gitlabGsaEmail: .*|gitlabGsaEmail: ${GITLAB_GSA_EMAIL}| }
+    }" "$CONFIG_FILE"
+
+    sed -i "/^externalDns:/,\$ {
+        s|gsaEmail: .*|gsaEmail: ${EXTERNAL_DNS_GSA_EMAIL}|
     }" "$CONFIG_FILE"
 
     # Write Google IdP client secret template (fill in manually after creating OAuth client)
@@ -184,6 +194,10 @@ elif [[ "$CLOUD" == "aws" ]]; then
         /s3:/,/region:/ { s|region: .*|region: ${AWS_REGION}| }
         /s3:/,/bucketPrefix:/ { s|bucketPrefix: .*|bucketPrefix: ${S3_BUCKET_PREFIX}| }
         /s3:/,/gitlabIrsaRoleArn:/ { s|gitlabIrsaRoleArn: .*|gitlabIrsaRoleArn: ${GITLAB_IRSA_ROLE_ARN}| }
+    }" "$CONFIG_FILE"
+
+    sed -i "/^externalDns:/,\$ {
+        s|irsaRoleArn: .*|irsaRoleArn: ${EXTERNAL_DNS_IRSA_ROLE_ARN}|
     }" "$CONFIG_FILE"
 
     # Write non-sensitive Cognito values into config.yaml
@@ -225,6 +239,10 @@ else
     sed -i "/^entraId:/,\$ {
         s|tenantId: .*|tenantId: ${ENTRA_TENANT_ID}|
         s|clientId: .*|clientId: ${ENTRA_KEYCLOAK_CLIENT_ID}|
+    }" "$CONFIG_FILE"
+
+    sed -i "/^externalDns:/,\$ {
+        s|identityClientId: .*|identityClientId: ${EXTERNAL_DNS_IDENTITY_CLIENT_ID}|
     }" "$CONFIG_FILE"
 
     # Write the client secret to a local env file (gitignored, read by setup-keycloak.sh)

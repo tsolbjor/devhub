@@ -345,3 +345,34 @@ resource "azurerm_federated_identity_credential" "gitlab" {
   issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
   subject             = "system:serviceaccount:gitlab:gitlab"
 }
+
+# ─── External-DNS Workload Identity ──────────────────────────────────
+# Allows external-dns to manage Azure DNS records for the cluster's domain.
+# The K8s service account "external-dns/external-dns" uses the federated credential.
+
+data "azurerm_dns_zone" "main" {
+  name                = var.domain
+  resource_group_name = var.dns_zone_resource_group != "" ? var.dns_zone_resource_group : azurerm_resource_group.main.name
+}
+
+resource "azurerm_user_assigned_identity" "external_dns" {
+  name                = "${var.prefix}-external-dns-identity"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  tags                = var.tags
+}
+
+resource "azurerm_role_assignment" "external_dns_dns_contributor" {
+  scope                = data.azurerm_dns_zone.main.id
+  role_definition_name = "DNS Zone Contributor"
+  principal_id         = azurerm_user_assigned_identity.external_dns.principal_id
+}
+
+resource "azurerm_federated_identity_credential" "external_dns" {
+  name                = "${var.prefix}-external-dns-fedcred"
+  resource_group_name = azurerm_resource_group.main.name
+  parent_id           = azurerm_user_assigned_identity.external_dns.id
+  audience            = ["api://AzureADTokenExchange"]
+  issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
+  subject             = "system:serviceaccount:external-dns:external-dns"
+}

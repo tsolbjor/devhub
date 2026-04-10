@@ -39,3 +39,7 @@ dataServices:
 entraId:
   tenantId: PENDING_TOFU_OUTPUT
   clientId: PENDING_TOFU_OUTPUT
+
+# External-DNS — populated by sync-tofu-outputs.sh
+externalDns:
+  identityClientId: PENDING_TOFU_OUTPUT

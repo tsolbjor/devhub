@@ -96,6 +96,13 @@ variable "redis_automatic_failover" {
   default     = false
 }
 
+# ─── DNS ─────────────────────────────────────────────────────────────
+
+variable "domain" {
+  description = "Public domain name for the cluster (e.g., dev.example.com) — must have an existing Route53 hosted zone"
+  type        = string
+}
+
 # ─── Cognito (IdP for Keycloak) ───────────────────────────────────────
 
 variable "cognito_domain_prefix" {

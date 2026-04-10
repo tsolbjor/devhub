@@ -414,3 +414,28 @@ resource "google_service_account_iam_member" "gitlab_workload_identity" {
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[gitlab/gitlab]"
 }
+
+# ─── External-DNS Workload Identity ──────────────────────────────────
+# Allows external-dns to manage Cloud DNS records for the cluster's domain.
+# The K8s service account "external-dns/external-dns" exchanges its OIDC token
+# for a Google token via Workload Identity.
+
+resource "google_service_account" "external_dns" {
+  project      = var.project_id
+  account_id   = "${var.prefix}-external-dns"
+  display_name = "External-DNS Service Account (Workload Identity)"
+
+  depends_on = [google_project_service.iam]
+}
+
+resource "google_project_iam_member" "external_dns_dns_admin" {
+  project = var.project_id
+  role    = "roles/dns.admin"
+  member  = "serviceAccount:${google_service_account.external_dns.email}"
+}
+
+resource "google_service_account_iam_member" "external_dns_workload_identity" {
+  service_account_id = google_service_account.external_dns.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[external-dns/external-dns]"
+}

@@ -1,3 +1,11 @@
-# external-dns GCP overlay
+# external-dns GCP overlay — Cloud DNS provider via Workload Identity
+# The Google Service Account email is provisioned by tofu and written to config.yaml by sync-tofu-outputs.sh.
+
+provider: google
+
+serviceAccount:
+  annotations:
+    iam.gke.io/gcp-service-account: ${EXTERNAL_DNS_GSA_EMAIL}
+
 domainFilters:
   - ${DOMAIN}
