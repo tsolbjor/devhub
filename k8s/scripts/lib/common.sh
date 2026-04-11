@@ -132,6 +132,20 @@ parse_config() {
         export EXTERNAL_DNS_IRSA_ROLE_ARN="${EXTERNAL_DNS_IRSA_ROLE_ARN:-$(grep -A2 '^externalDns:' "$config_file" | grep 'irsaRoleArn:' | sed 's/.*irsaRoleArn:[[:space:]]*//' | _yaml_val)}"
         export EXTERNAL_DNS_IDENTITY_CLIENT_ID="${EXTERNAL_DNS_IDENTITY_CLIENT_ID:-$(grep -A2 '^externalDns:' "$config_file" | grep 'identityClientId:' | sed 's/.*identityClientId:[[:space:]]*//' | _yaml_val)}"
         export EXTERNAL_DNS_GSA_EMAIL="${EXTERNAL_DNS_GSA_EMAIL:-$(grep -A2 '^externalDns:' "$config_file" | grep 'gsaEmail:' | sed 's/.*gsaEmail:[[:space:]]*//' | _yaml_val)}"
+        # Loki workload identity (cloud-specific, set after adding loki IAM resources to tofu)
+        export LOKI_IRSA_ROLE_ARN="${LOKI_IRSA_ROLE_ARN:-$(grep -A2 '^loki:' "$config_file" | grep 'irsaRoleArn:' | sed 's/.*irsaRoleArn:[[:space:]]*//' | _yaml_val)}"
+        export LOKI_IDENTITY_CLIENT_ID="${LOKI_IDENTITY_CLIENT_ID:-$(grep -A2 '^loki:' "$config_file" | grep 'identityClientId:' | sed 's/.*identityClientId:[[:space:]]*//' | _yaml_val)}"
+        export LOKI_GSA_EMAIL="${LOKI_GSA_EMAIL:-$(grep -A2 '^loki:' "$config_file" | grep 'gsaEmail:' | sed 's/.*gsaEmail:[[:space:]]*//' | _yaml_val)}"
+        # Vault auto-unseal (cloud KMS, set after adding KMS resources to tofu)
+        export VAULT_KMS_KEY_ID="${VAULT_KMS_KEY_ID:-$(grep -A2 '^vault:' "$config_file" | grep 'kmsKeyId:' | sed 's/.*kmsKeyId:[[:space:]]*//' | _yaml_val)}"
+        export VAULT_KMS_IRSA_ROLE_ARN="${VAULT_KMS_IRSA_ROLE_ARN:-$(grep -A2 '^vault:' "$config_file" | grep 'irsaRoleArn:' | sed 's/.*irsaRoleArn:[[:space:]]*//' | _yaml_val)}"
+        export VAULT_IDENTITY_CLIENT_ID="${VAULT_IDENTITY_CLIENT_ID:-$(grep -A3 '^vault:' "$config_file" | grep 'identityClientId:' | sed 's/.*identityClientId:[[:space:]]*//' | _yaml_val)}"
+        export VAULT_KEY_VAULT_NAME="${VAULT_KEY_VAULT_NAME:-$(grep -A3 '^vault:' "$config_file" | grep 'keyVaultName:' | sed 's/.*keyVaultName:[[:space:]]*//' | _yaml_val)}"
+        export VAULT_KEY_NAME="${VAULT_KEY_NAME:-$(grep -A4 '^vault:' "$config_file" | grep 'keyName:' | sed 's/.*keyName:[[:space:]]*//' | _yaml_val)}"
+        export VAULT_GSA_EMAIL="${VAULT_GSA_EMAIL:-$(grep -A2 '^vault:' "$config_file" | grep 'gsaEmail:' | sed 's/.*gsaEmail:[[:space:]]*//' | _yaml_val)}"
+        export VAULT_KMS_REGION="${VAULT_KMS_REGION:-$(grep -A3 '^vault:' "$config_file" | grep 'kmsRegion:' | sed 's/.*kmsRegion:[[:space:]]*//' | _yaml_val)}"
+        export VAULT_KMS_KEY_RING="${VAULT_KMS_KEY_RING:-$(grep -A4 '^vault:' "$config_file" | grep 'kmsKeyRing:' | sed 's/.*kmsKeyRing:[[:space:]]*//' | _yaml_val)}"
+        export VAULT_KMS_CRYPTO_KEY="${VAULT_KMS_CRYPTO_KEY:-$(grep -A5 '^vault:' "$config_file" | grep 'kmsCryptoKey:' | sed 's/.*kmsCryptoKey:[[:space:]]*//' | _yaml_val)}"
     else
         export PG_HOST="${PG_HOST:-}"
         export VALKEY_HOST="${VALKEY_HOST:-}"
@@ -155,6 +169,18 @@ parse_config() {
         export EXTERNAL_DNS_IRSA_ROLE_ARN="${EXTERNAL_DNS_IRSA_ROLE_ARN:-}"
         export EXTERNAL_DNS_IDENTITY_CLIENT_ID="${EXTERNAL_DNS_IDENTITY_CLIENT_ID:-}"
         export EXTERNAL_DNS_GSA_EMAIL="${EXTERNAL_DNS_GSA_EMAIL:-}"
+        export LOKI_IRSA_ROLE_ARN="${LOKI_IRSA_ROLE_ARN:-}"
+        export LOKI_IDENTITY_CLIENT_ID="${LOKI_IDENTITY_CLIENT_ID:-}"
+        export LOKI_GSA_EMAIL="${LOKI_GSA_EMAIL:-}"
+        export VAULT_KMS_KEY_ID="${VAULT_KMS_KEY_ID:-}"
+        export VAULT_KMS_IRSA_ROLE_ARN="${VAULT_KMS_IRSA_ROLE_ARN:-}"
+        export VAULT_IDENTITY_CLIENT_ID="${VAULT_IDENTITY_CLIENT_ID:-}"
+        export VAULT_KEY_VAULT_NAME="${VAULT_KEY_VAULT_NAME:-}"
+        export VAULT_KEY_NAME="${VAULT_KEY_NAME:-}"
+        export VAULT_GSA_EMAIL="${VAULT_GSA_EMAIL:-}"
+        export VAULT_KMS_REGION="${VAULT_KMS_REGION:-}"
+        export VAULT_KMS_KEY_RING="${VAULT_KMS_KEY_RING:-}"
+        export VAULT_KMS_CRYPTO_KEY="${VAULT_KMS_CRYPTO_KEY:-}"
     fi
 }
 
@@ -167,7 +193,7 @@ parse_config() {
 template_values() {
     local input="$1"
     local output="$2"
-    envsubst '${DOMAIN} ${TLS_SECRET_NAME} ${CLUSTER_ISSUER} ${ACME_EMAIL} ${PG_HOST} ${VALKEY_HOST} ${S3_ENDPOINT} ${S3_REGION} ${REDIS_HOST} ${AZURE_STORAGE_ACCOUNT} ${GITLAB_IDENTITY_CLIENT_ID} ${GCS_PROJECT_ID} ${GCS_BUCKET_PREFIX} ${GITLAB_GSA_EMAIL} ${AWS_REGION} ${S3_BUCKET_PREFIX} ${GITLAB_IRSA_ROLE_ARN} ${EXTERNAL_DNS_IRSA_ROLE_ARN} ${EXTERNAL_DNS_IDENTITY_CLIENT_ID} ${EXTERNAL_DNS_GSA_EMAIL}' < "$input" > "$output"
+    envsubst '${DOMAIN} ${TLS_SECRET_NAME} ${CLUSTER_ISSUER} ${ACME_EMAIL} ${PG_HOST} ${VALKEY_HOST} ${S3_ENDPOINT} ${S3_REGION} ${REDIS_HOST} ${AZURE_STORAGE_ACCOUNT} ${GITLAB_IDENTITY_CLIENT_ID} ${GCS_PROJECT_ID} ${GCS_BUCKET_PREFIX} ${GITLAB_GSA_EMAIL} ${AWS_REGION} ${S3_BUCKET_PREFIX} ${GITLAB_IRSA_ROLE_ARN} ${EXTERNAL_DNS_IRSA_ROLE_ARN} ${EXTERNAL_DNS_IDENTITY_CLIENT_ID} ${EXTERNAL_DNS_GSA_EMAIL} ${LOKI_IRSA_ROLE_ARN} ${LOKI_IDENTITY_CLIENT_ID} ${LOKI_GSA_EMAIL} ${VAULT_KMS_KEY_ID} ${VAULT_KMS_IRSA_ROLE_ARN} ${VAULT_IDENTITY_CLIENT_ID} ${VAULT_KEY_VAULT_NAME} ${VAULT_KEY_NAME} ${ENTRA_TENANT_ID} ${VAULT_GSA_EMAIL} ${VAULT_KMS_REGION} ${VAULT_KMS_KEY_RING} ${VAULT_KMS_CRYPTO_KEY}' < "$input" > "$output"
 }
 
 # Get Helm values args for a component (base + templated overlay).

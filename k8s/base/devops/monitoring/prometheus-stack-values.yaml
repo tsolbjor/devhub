@@ -12,8 +12,8 @@
 prometheus:
   prometheusSpec:
     retention: 30d
-    retentionSize: 45GB
-    
+    retentionSize: 40GB
+
     resources:
       requests:
         cpu: 500m
@@ -28,7 +28,7 @@ prometheus:
           accessModes: ["ReadWriteOnce"]
           resources:
             requests:
-              storage: 50Gi
+              storage: 60Gi
     
     # Service discovery for all namespaces
     serviceMonitorSelectorNilUsesHelmValues: false

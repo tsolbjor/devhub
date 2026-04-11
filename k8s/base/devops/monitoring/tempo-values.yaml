@@ -1,10 +1,11 @@
 # Tempo Helm values (Single Binary)
-# Chart: grafana/tempo (deprecated, use grafana/tempo-distributed for production)
+# Chart: grafana/tempo
 # Docs: https://grafana.com/docs/tempo/latest/setup/helm-chart/
+# Note: grafana/tempo is the single-binary chart; grafana/tempo-distributed is for microservices mode.
 
 tempo:
   repository: grafana/tempo
-  tag: "2.6.1"
+  tag: "2.9.0"
   
   resources:
     requests:

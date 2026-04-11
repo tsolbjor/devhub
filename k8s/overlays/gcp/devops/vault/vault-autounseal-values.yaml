@@ -1,0 +1,45 @@
+# Vault GCP auto-unseal via GCP Cloud KMS
+# Applied by deploy.sh only when VAULT_KMS_KEY_RING is set in config.yaml.
+#
+# Setup required in tofu/gcp/modules/cluster:
+#   1. Create google_kms_key_ring "vault" and google_kms_crypto_key "vault-unseal"
+#   2. Create google_service_account "vault" with Cloud KMS CryptoKey Encrypter/Decrypter role
+#   3. Create GKE Workload Identity binding to the vault K8s SA
+#   4. Export as:  vault_kms_key_ring, vault_kms_crypto_key, vault_gsa_email
+#   5. Add to config.yaml:
+#        vault:
+#          kmsKeyRing: <from tofu output>
+#          kmsCryptoKey: <from tofu output>
+#          kmsRegion: <same region as cluster>
+#          gsaEmail: <from tofu output>
+#   6. Add to sync-tofu-outputs.sh to write the above from tofu outputs
+
+server:
+  # Workload Identity annotation — GKE injects ADC credentials automatically
+  serviceAccount:
+    annotations:
+      iam.gke.io/gcp-service-account: "${VAULT_GSA_EMAIL}"
+
+  ha:
+    raft:
+      config: |
+        ui = true
+
+        listener "tcp" {
+          tls_disable = 1
+          address = "[::]:8200"
+          cluster_address = "[::]:8201"
+        }
+
+        storage "raft" {
+          path = "/vault/data"
+        }
+
+        service_registration "kubernetes" {}
+
+        seal "gcpckms" {
+          project    = "${GCS_PROJECT_ID}"
+          region     = "${VAULT_KMS_REGION}"
+          key_ring   = "${VAULT_KMS_KEY_RING}"
+          crypto_key = "${VAULT_KMS_CRYPTO_KEY}"
+        }

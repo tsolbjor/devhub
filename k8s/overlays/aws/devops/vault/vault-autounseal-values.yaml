@@ -1,0 +1,41 @@
+# Vault AWS auto-unseal via AWS KMS
+# Applied by deploy.sh only when VAULT_KMS_KEY_ID is set in config.yaml.
+#
+# Setup required in tofu/aws/modules/cluster:
+#   1. Create aws_kms_key "vault" with enable_key_rotation = true
+#   2. Create aws_iam_role "vault-kms" with kms:Decrypt + kms:Encrypt + kms:DescribeKey
+#   3. Create IRSA binding for the vault SA
+#   4. Export as:  vault_kms_key_id  (key ARN)  and  vault_kms_irsa_role_arn
+#   5. Add to config.yaml:
+#        vault:
+#          kmsKeyId: <from tofu output>
+#          irsaRoleArn: <from tofu output>
+#   6. Add to sync-tofu-outputs.sh to write the above from tofu outputs
+
+server:
+  # IRSA annotation — EKS injects AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE automatically
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: "${VAULT_KMS_IRSA_ROLE_ARN}"
+
+  ha:
+    raft:
+      config: |
+        ui = true
+
+        listener "tcp" {
+          tls_disable = 1
+          address = "[::]:8200"
+          cluster_address = "[::]:8201"
+        }
+
+        storage "raft" {
+          path = "/vault/data"
+        }
+
+        service_registration "kubernetes" {}
+
+        seal "awskms" {
+          region     = "${AWS_REGION}"
+          kms_key_id = "${VAULT_KMS_KEY_ID}"
+        }

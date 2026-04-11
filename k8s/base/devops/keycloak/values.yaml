@@ -9,7 +9,7 @@
 # Use official Keycloak image from quay.io
 image:
   repository: quay.io/keycloak/keycloak
-  tag: "26.0"
+  tag: "26.5.5"
   pullPolicy: IfNotPresent
 
 # Number of replicas (override in local overlay for single replica)
@@ -21,7 +21,8 @@ command:
 args:
   - "start"
   - "--hostname-strict=false"
-  - "--cache=local"
+  - "--cache=ispn"
+  - "--cache-stack=kubernetes"
 
 # Database configuration - uses external PostgreSQL
 database:
@@ -104,4 +105,4 @@ serviceMonitor:
 # Service account
 serviceAccount:
   create: true
-  name: ""
+  name: keycloak

@@ -1,0 +1,35 @@
+# Loki Azure overlay: Azure Blob Storage backend
+# Requires:
+#   - Azure Blob container named "loki" in the existing storage account
+#   - Managed identity with Storage Blob Data Contributor on that container
+#   - config.yaml: loki.identityClientId — exported from tofu output loki_identity_client_id
+
+loki:
+  storage:
+    type: azure
+    azure:
+      accountName: ${AZURE_STORAGE_ACCOUNT}
+      containerName: loki
+      useFederatedToken: true
+
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: azure
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
+# Workload Identity annotation + pod label grants the Loki pod access to Blob Storage
+serviceAccount:
+  annotations:
+    azure.workload.identity/client-id: "${LOKI_IDENTITY_CLIENT_ID}"
+
+singleBinary:
+  # Pod label required for Azure Workload Identity webhook to inject credentials
+  podLabels:
+    azure.workload.identity/use: "true"
+  persistence:
+    enabled: false

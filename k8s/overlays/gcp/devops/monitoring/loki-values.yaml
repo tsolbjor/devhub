@@ -1,0 +1,33 @@
+# Loki GCP overlay: GCS object storage backend
+# Requires:
+#   - GCS bucket named ${GCS_BUCKET_PREFIX}-loki (add to tofu/gcp/modules/cluster)
+#   - GCP service account with Storage Object Admin on that bucket
+#   - GKE Workload Identity binding to the loki K8s SA
+#   - config.yaml: loki.gsaEmail — exported from tofu output loki_gsa_email
+
+loki:
+  storage:
+    type: gcs
+    gcs:
+      bucketname: ${GCS_BUCKET_PREFIX}-loki
+      chunkBufferSize: 0
+      requestTimeout: 0s
+
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: gcs
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
+# Workload Identity annotation grants the Loki pod access to GCS without a key file
+serviceAccount:
+  annotations:
+    iam.gke.io/gcp-service-account: "${LOKI_GSA_EMAIL}"
+
+singleBinary:
+  persistence:
+    enabled: false

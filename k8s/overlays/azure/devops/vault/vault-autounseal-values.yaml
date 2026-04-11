@@ -1,0 +1,46 @@
+# Vault Azure auto-unseal via Azure Key Vault
+# Applied by deploy.sh only when VAULT_KEY_VAULT_NAME is set in config.yaml.
+#
+# Setup required in tofu/azure/modules/cluster:
+#   1. Create azurerm_key_vault "vault" with an RSA-HSM key
+#   2. Create azurerm_user_assigned_identity "vault" with Key Vault Crypto Officer role
+#   3. Create federated credential binding to the vault K8s SA
+#   4. Export as:  vault_key_vault_name, vault_key_name, vault_identity_client_id
+#   5. Add to config.yaml:
+#        vault:
+#          keyVaultName: <from tofu output>
+#          keyName: <from tofu output>
+#          identityClientId: <from tofu output>
+#   6. Add to sync-tofu-outputs.sh to write the above from tofu outputs
+
+server:
+  # Azure Workload Identity annotation + pod label
+  serviceAccount:
+    annotations:
+      azure.workload.identity/client-id: "${VAULT_IDENTITY_CLIENT_ID}"
+
+  podLabels:
+    azure.workload.identity/use: "true"
+
+  ha:
+    raft:
+      config: |
+        ui = true
+
+        listener "tcp" {
+          tls_disable = 1
+          address = "[::]:8200"
+          cluster_address = "[::]:8201"
+        }
+
+        storage "raft" {
+          path = "/vault/data"
+        }
+
+        service_registration "kubernetes" {}
+
+        seal "azurekeyvault" {
+          tenant_id  = "${ENTRA_TENANT_ID}"
+          vault_name = "${VAULT_KEY_VAULT_NAME}"
+          key_name   = "${VAULT_KEY_NAME}"
+        }

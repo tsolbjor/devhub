@@ -74,8 +74,9 @@ install_cert_manager() {
     helm upgrade --install cert-manager jetstack/cert-manager \
         --namespace cert-manager \
         --create-namespace \
+        --version v1.20.1 \
         -f "${BASE_DIR}/devops/cert-manager/values.yaml" \
-        --wait --timeout 5m
+        --atomic --timeout 5m
 
     kubectl wait --for=condition=ready pod -l app=webhook -n cert-manager --timeout=60s
 
@@ -285,6 +286,9 @@ install_keycloak() {
 
     kubectl create namespace keycloak 2>/dev/null || true
 
+    # RBAC for JGroups KUBE_PING pod discovery (required for --cache-stack=kubernetes)
+    kubectl apply -f "${BASE_DIR}/devops/keycloak/rbac.yaml"
+
     # Create admin credentials secret if not exists
     if ! kubectl get secret keycloak-admin-secret -n keycloak &>/dev/null; then
         local ADMIN_PASSWORD=$(openssl rand -base64 24)
@@ -297,8 +301,9 @@ install_keycloak() {
 
     helm upgrade --install keycloak codecentric/keycloakx \
         --namespace keycloak \
+        --version 7.1.9 \
         $values_args \
-        --wait --timeout 10m
+        --atomic --timeout 10m
 
     log_info "Keycloak installed"
 }
@@ -310,10 +315,31 @@ install_vault() {
 
     local values_args=$(get_values_args "vault")
 
+    # Apply cloud KMS auto-unseal overlay if the required variables are configured.
+    # See overlays/{cloud}/devops/vault/vault-autounseal-values.yaml for setup instructions.
+    local autounseal_overlay="${OVERLAY_DIR}/devops/vault/vault-autounseal-values.yaml"
+    if [[ -f "$autounseal_overlay" ]]; then
+        local apply_autounseal=false
+        case "$ENV" in
+            aws-*)   [[ -n "${VAULT_KMS_KEY_ID:-}" ]]    && apply_autounseal=true ;;
+            azure-*) [[ -n "${VAULT_KEY_VAULT_NAME:-}" ]] && apply_autounseal=true ;;
+            gcp-*)   [[ -n "${VAULT_KMS_KEY_RING:-}" ]]   && apply_autounseal=true ;;
+        esac
+        if $apply_autounseal; then
+            template_values "$autounseal_overlay" "/tmp/vault-autounseal-values.yaml"
+            values_args="$values_args -f /tmp/vault-autounseal-values.yaml"
+            log_info "Vault auto-unseal (cloud KMS) enabled"
+        else
+            log_warn "Vault KMS variables not set — running with manual unseal"
+            log_warn "See ${autounseal_overlay} for setup instructions"
+        fi
+    fi
+
     helm upgrade --install vault hashicorp/vault \
         --namespace vault \
+        --version 0.32.0 \
         $values_args \
-        --wait --timeout 5m
+        --atomic --timeout 5m
 
     log_info "Vault installed"
 }
@@ -331,8 +357,9 @@ install_external_dns() {
     helm upgrade --install external-dns external-dns/external-dns \
         --namespace external-dns \
         --create-namespace \
+        --version 1.20.0 \
         $values_args \
-        --wait --timeout 5m
+        --atomic --timeout 5m
 
     log_info "external-dns installed"
 }
@@ -343,8 +370,9 @@ install_external_secrets() {
     helm upgrade --install external-secrets external-secrets/external-secrets \
         --namespace external-secrets \
         --create-namespace \
+        --version 2.3.0 \
         -f "${BASE_DIR}/devops/external-secrets/values.yaml" \
-        --wait --timeout 10m
+        --atomic --timeout 10m
 
     log_info "External Secrets installed"
 }
@@ -379,23 +407,47 @@ install_monitoring() {
 
     helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
         --namespace monitoring \
+        --version 83.4.0 \
         $prom_args \
-        --wait --timeout 10m
+        --atomic --timeout 10m
+
+    # Loki: apply cloud object-storage overlay if present (and WI/IRSA vars are set)
+    local loki_args="-f ${BASE_DIR}/devops/monitoring/loki-values.yaml"
+    local loki_overlay="${OVERLAY_DIR}/devops/monitoring/loki-values.yaml"
+    if [[ -f "$loki_overlay" ]]; then
+        local apply_loki_overlay=false
+        case "$ENV" in
+            aws-*)   [[ -n "${LOKI_IRSA_ROLE_ARN:-}" ]]        && apply_loki_overlay=true ;;
+            azure-*) [[ -n "${LOKI_IDENTITY_CLIENT_ID:-}" ]]    && apply_loki_overlay=true ;;
+            gcp-*)   [[ -n "${LOKI_GSA_EMAIL:-}" ]]             && apply_loki_overlay=true ;;
+        esac
+        if $apply_loki_overlay; then
+            template_values "$loki_overlay" "/tmp/loki-overlay-values.yaml"
+            loki_args="$loki_args -f /tmp/loki-overlay-values.yaml"
+            log_info "Loki cloud object storage enabled"
+        else
+            log_warn "Loki WI/IRSA variables not set — using filesystem storage"
+            log_warn "See ${loki_overlay} for setup instructions"
+        fi
+    fi
 
     helm upgrade --install loki grafana/loki \
         --namespace monitoring \
-        -f "${BASE_DIR}/devops/monitoring/loki-values.yaml" \
-        --wait --timeout 10m
+        --version 6.55.0 \
+        $loki_args \
+        --atomic --timeout 10m
 
     helm upgrade --install tempo grafana/tempo \
         --namespace monitoring \
+        --version 1.24.4 \
         -f "${BASE_DIR}/devops/monitoring/tempo-values.yaml" \
-        --wait --timeout 5m
+        --atomic --timeout 5m
 
     helm upgrade --install alloy grafana/alloy \
         --namespace monitoring \
+        --version 1.7.0 \
         -f "${BASE_DIR}/devops/monitoring/alloy-values.yaml" \
-        --wait --timeout 5m
+        --atomic --timeout 5m
 
     log_info "Monitoring stack installed"
 }
@@ -404,6 +456,9 @@ install_gitlab() {
     log_step "Installing GitLab CE..."
 
     kubectl create namespace gitlab 2>/dev/null || true
+
+    # Runner cache PVC (referenced in gitlab/values.yaml runner config)
+    kubectl apply -f "${BASE_DIR}/devops/gitlab/runner-cache-pvc.yaml"
 
     # Create placeholder OIDC secret so GitLab pods can mount volumes before Keycloak SSO is configured
     if ! kubectl get secret gitlab-oidc-secret -n gitlab &>/dev/null; then
@@ -415,9 +470,9 @@ install_gitlab() {
 
     helm upgrade --install gitlab gitlab/gitlab \
         --namespace gitlab \
+        --version 9.10.3 \
         $values_args \
-        --wait \
-        --timeout 30m
+        --atomic --timeout 30m
 
     log_info "GitLab installed"
 }
@@ -431,8 +486,9 @@ install_crossplane() {
 
     helm upgrade --install crossplane crossplane-stable/crossplane \
         --namespace crossplane-system \
+        --version 2.2.0 \
         $values_args \
-        --wait --timeout 5m
+        --atomic --timeout 5m
 
     # Wait for core pods to be ready
     kubectl wait --for=condition=ready pod -l app=crossplane -n crossplane-system --timeout=120s 2>/dev/null || true
@@ -496,8 +552,9 @@ install_argocd() {
 
     helm upgrade --install argocd argo/argo-cd \
         --namespace argocd \
+        --version 9.5.0 \
         $values_args $extra_args \
-        --wait --timeout 5m
+        --atomic --timeout 5m
 
     log_info "ArgoCD installed"
 }
@@ -567,6 +624,7 @@ EOF
     helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
         --namespace ingress-nginx \
         --create-namespace \
+        --version 4.15.1 \
         --set controller.service.type=LoadBalancer \
         --set controller.service.externalTrafficPolicy=Local \
         --set controller.config.proxy-body-size="100m" \
