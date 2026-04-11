@@ -392,9 +392,9 @@ install_monitoring() {
         -f "${BASE_DIR}/devops/monitoring/tempo-values.yaml" \
         --wait --timeout 5m
 
-    helm upgrade --install promtail grafana/promtail \
+    helm upgrade --install alloy grafana/alloy \
         --namespace monitoring \
-        -f "${BASE_DIR}/devops/monitoring/promtail-values.yaml" \
+        -f "${BASE_DIR}/devops/monitoring/alloy-values.yaml" \
         --wait --timeout 5m
 
     log_info "Monitoring stack installed"
@@ -617,7 +617,7 @@ delete_devops() {
     helm uninstall prometheus -n monitoring 2>/dev/null || true
     helm uninstall loki -n monitoring 2>/dev/null || true
     helm uninstall tempo -n monitoring 2>/dev/null || true
-    helm uninstall promtail -n monitoring 2>/dev/null || true
+    helm uninstall alloy -n monitoring 2>/dev/null || true
     helm uninstall vault -n vault 2>/dev/null || true
     helm uninstall keycloak -n keycloak 2>/dev/null || true
     # Clean up legacy per-service PostgreSQL (if migrating from old layout)

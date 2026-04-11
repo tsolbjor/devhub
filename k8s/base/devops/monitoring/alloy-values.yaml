@@ -1,0 +1,114 @@
+# Grafana Alloy Helm values (log collection agent — replaces Promtail)
+# Chart: grafana/alloy
+# Docs: https://grafana.com/docs/alloy/latest/
+
+alloy:
+  configMap:
+    content: |
+      // Discover all pods on this node
+      discovery.kubernetes "pods" {
+        role = "pod"
+      }
+
+      // Compute log file paths and extract labels from pod metadata
+      discovery.relabel "pod_logs" {
+        targets = discovery.kubernetes.pods.targets
+
+        // Drop pods that are not running
+        rule {
+          source_labels = ["__meta_kubernetes_pod_phase"]
+          regex         = "Pending|Succeeded|Failed|Completed"
+          action        = "drop"
+        }
+
+        // Build path to the container log file
+        rule {
+          source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_container_name"]
+          separator     = "/"
+          target_label  = "__path__"
+          replacement   = "/var/log/pods/*$1/*.log"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_node_name"]
+          target_label  = "node"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+          target_label  = "app"
+        }
+      }
+
+      // Tail log files discovered above
+      loki.source.file "pod_logs" {
+        targets    = discovery.relabel.pod_logs.output
+        forward_to = [loki.process.pipeline.receiver]
+      }
+
+      // Parse CRI format, detect multiline logs, drop noisy labels
+      loki.process "pipeline" {
+        stage.cri {}
+
+        stage.multiline {
+          firstline     = "^\\d{4}-\\d{2}-\\d{2}"
+          max_wait_time = "3s"
+        }
+
+        stage.label_drop {
+          values = ["filename", "stream"]
+        }
+
+        forward_to = [loki.write.loki.receiver]
+      }
+
+      // Push to Loki gateway
+      loki.write "loki" {
+        endpoint {
+          url       = "http://loki-gateway.monitoring.svc.cluster.local:80/loki/api/v1/push"
+          tenant_id = "1"
+        }
+      }
+
+  # Mount host log directory so Alloy can tail pod logs
+  mounts:
+    varlog: true
+
+# Run as DaemonSet on all nodes
+controller:
+  type: daemonset
+
+  tolerations:
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# Prometheus metrics for Alloy itself
+serviceMonitor:
+  enabled: true
