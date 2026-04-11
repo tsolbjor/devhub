@@ -81,3 +81,8 @@ output "gitlab_gsa_email" {
   description = "GitLab Google Service Account email — annotate the K8s service account with this value"
   value       = google_service_account.gitlab.email
 }
+
+output "external_dns_gsa_email" {
+  description = "External-DNS Google Service Account email — written to config.yaml by sync-tofu-outputs.sh"
+  value       = google_service_account.external_dns.email
+}

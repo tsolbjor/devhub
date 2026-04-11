@@ -41,3 +41,7 @@ cognitoIdp:
   issuerUrl: PENDING_TOFU_OUTPUT
   hostedUiDomain: PENDING_TOFU_OUTPUT
   clientId: PENDING_TOFU_OUTPUT
+
+# External-DNS — populated by sync-tofu-outputs.sh
+externalDns:
+  irsaRoleArn: PENDING_TOFU_OUTPUT

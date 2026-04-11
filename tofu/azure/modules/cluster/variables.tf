@@ -123,6 +123,19 @@ variable "storage_replication" {
   default     = "LRS"
 }
 
+# ─── DNS ─────────────────────────────────────────────────────────────
+
+variable "domain" {
+  description = "Public domain name for the cluster (e.g., dev.example.com) — must have an existing Azure DNS zone"
+  type        = string
+}
+
+variable "dns_zone_resource_group" {
+  description = "Resource group containing the Azure DNS zone (defaults to the cluster resource group)"
+  type        = string
+  default     = ""
+}
+
 # ─── Entra ID (Azure AD) ──────────────────────────────────────────────
 
 variable "entra_require_assignment" {

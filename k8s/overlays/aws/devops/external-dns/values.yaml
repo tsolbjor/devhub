@@ -1,3 +1,15 @@
-# external-dns AWS overlay
+# external-dns AWS overlay — Route53 provider via IRSA
+# The IAM role ARN is provisioned by tofu and written to config.yaml by sync-tofu-outputs.sh.
+
+provider: aws
+
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: ${EXTERNAL_DNS_IRSA_ROLE_ARN}
+
 domainFilters:
   - ${DOMAIN}
+
+# Route53-specific: use the hosted zone ID filter for faster lookups (optional but recommended)
+# aws:
+#   zoneType: public  # public | private

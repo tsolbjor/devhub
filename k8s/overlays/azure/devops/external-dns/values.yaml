@@ -1,5 +1,21 @@
-# external-dns Azure overlay values
-# Domain filter for DNS management
+# external-dns Azure overlay — Azure DNS provider via Workload Identity
+# The managed identity client ID is provisioned by tofu and written to config.yaml by sync-tofu-outputs.sh.
+
+provider: azure
+
+azure:
+  useWorkloadIdentityExtension: true
+  # resourceGroup: the resource group containing the Azure DNS zone.
+  # Defaults to the cluster resource group — override here if your DNS zone is in a separate RG.
+
+# Workload Identity: annotate the service account so AKS binds the federated credential
+serviceAccount:
+  annotations:
+    azure.workload.identity/client-id: ${EXTERNAL_DNS_IDENTITY_CLIENT_ID}
+
+# Workload Identity requires this pod label
+podLabels:
+  azure.workload.identity/use: "true"
 
 domainFilters:
   - ${DOMAIN}

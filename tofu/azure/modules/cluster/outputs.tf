@@ -110,3 +110,8 @@ output "gitlab_identity_client_id" {
   description = "Client ID of the GitLab managed identity — annotate the K8s service account with this value"
   value       = azurerm_user_assigned_identity.gitlab.client_id
 }
+
+output "external_dns_identity_client_id" {
+  description = "Client ID of the external-dns managed identity — written to config.yaml by sync-tofu-outputs.sh"
+  value       = azurerm_user_assigned_identity.external_dns.client_id
+}

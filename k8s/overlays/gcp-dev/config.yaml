@@ -39,3 +39,7 @@ dataServices:
 # Google Identity Provider — populated by sync-tofu-outputs.sh (template)
 googleIdp:
   clientId: FILL_IN_MANUALLY
+
+# External-DNS — populated by sync-tofu-outputs.sh
+externalDns:
+  gsaEmail: PENDING_TOFU_OUTPUT

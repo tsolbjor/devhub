@@ -128,6 +128,10 @@ parse_config() {
         export COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-$(grep -A3 '^cognitoIdp:' "$config_file" | grep 'clientId:' | sed 's/.*clientId:[[:space:]]*//' | _yaml_val)}"
         # GCP: Google IdP (non-sensitive; secret is in gcp-idp.env)
         export GOOGLE_IDP_CLIENT_ID="${GOOGLE_IDP_CLIENT_ID:-$(grep -A1 '^googleIdp:' "$config_file" | grep 'clientId:' | sed 's/.*clientId:[[:space:]]*//' | _yaml_val)}"
+        # External-DNS identity (cloud-specific)
+        export EXTERNAL_DNS_IRSA_ROLE_ARN="${EXTERNAL_DNS_IRSA_ROLE_ARN:-$(grep -A2 '^externalDns:' "$config_file" | grep 'irsaRoleArn:' | sed 's/.*irsaRoleArn:[[:space:]]*//' | _yaml_val)}"
+        export EXTERNAL_DNS_IDENTITY_CLIENT_ID="${EXTERNAL_DNS_IDENTITY_CLIENT_ID:-$(grep -A2 '^externalDns:' "$config_file" | grep 'identityClientId:' | sed 's/.*identityClientId:[[:space:]]*//' | _yaml_val)}"
+        export EXTERNAL_DNS_GSA_EMAIL="${EXTERNAL_DNS_GSA_EMAIL:-$(grep -A2 '^externalDns:' "$config_file" | grep 'gsaEmail:' | sed 's/.*gsaEmail:[[:space:]]*//' | _yaml_val)}"
     else
         export PG_HOST="${PG_HOST:-}"
         export VALKEY_HOST="${VALKEY_HOST:-}"
@@ -148,6 +152,9 @@ parse_config() {
         export COGNITO_HOSTED_UI_DOMAIN="${COGNITO_HOSTED_UI_DOMAIN:-}"
         export COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-}"
         export GOOGLE_IDP_CLIENT_ID="${GOOGLE_IDP_CLIENT_ID:-}"
+        export EXTERNAL_DNS_IRSA_ROLE_ARN="${EXTERNAL_DNS_IRSA_ROLE_ARN:-}"
+        export EXTERNAL_DNS_IDENTITY_CLIENT_ID="${EXTERNAL_DNS_IDENTITY_CLIENT_ID:-}"
+        export EXTERNAL_DNS_GSA_EMAIL="${EXTERNAL_DNS_GSA_EMAIL:-}"
     fi
 }
 
@@ -160,7 +167,7 @@ parse_config() {
 template_values() {
     local input="$1"
     local output="$2"
-    envsubst '${DOMAIN} ${TLS_SECRET_NAME} ${CLUSTER_ISSUER} ${ACME_EMAIL} ${PG_HOST} ${VALKEY_HOST} ${S3_ENDPOINT} ${S3_REGION} ${REDIS_HOST} ${AZURE_STORAGE_ACCOUNT} ${GITLAB_IDENTITY_CLIENT_ID} ${GCS_PROJECT_ID} ${GCS_BUCKET_PREFIX} ${GITLAB_GSA_EMAIL} ${AWS_REGION} ${S3_BUCKET_PREFIX} ${GITLAB_IRSA_ROLE_ARN}' < "$input" > "$output"
+    envsubst '${DOMAIN} ${TLS_SECRET_NAME} ${CLUSTER_ISSUER} ${ACME_EMAIL} ${PG_HOST} ${VALKEY_HOST} ${S3_ENDPOINT} ${S3_REGION} ${REDIS_HOST} ${AZURE_STORAGE_ACCOUNT} ${GITLAB_IDENTITY_CLIENT_ID} ${GCS_PROJECT_ID} ${GCS_BUCKET_PREFIX} ${GITLAB_GSA_EMAIL} ${AWS_REGION} ${S3_BUCKET_PREFIX} ${GITLAB_IRSA_ROLE_ARN} ${EXTERNAL_DNS_IRSA_ROLE_ARN} ${EXTERNAL_DNS_IDENTITY_CLIENT_ID} ${EXTERNAL_DNS_GSA_EMAIL}' < "$input" > "$output"
 }
 
 # Get Helm values args for a component (base + templated overlay).
@@ -206,6 +213,7 @@ add_helm_repos() {
     helm repo add argo https://argoproj.github.io/argo-helm 2>/dev/null || true
     helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>/dev/null || true
     helm repo add crossplane-stable https://charts.crossplane.io/stable 2>/dev/null || true
+    helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/ 2>/dev/null || true
 
     helm repo update
     log_info "Helm repositories updated"

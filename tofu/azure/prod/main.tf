@@ -25,6 +25,10 @@ module "cluster" {
   # Blob storage — geo-redundant for production
   storage_replication = "GRS"
 
+  # DNS — must match an existing Azure DNS zone
+  domain = "example.com" # TODO: set to your actual domain
+  # dns_zone_resource_group = "my-dns-rg"  # uncomment if DNS zone is in a separate RG
+
   enable_delete_lock = true
 
   # api_server_authorized_ip_ranges = ["0.0.0.0/0"] # TODO: restrict to known CIDRs

@@ -76,6 +76,11 @@ output "gitlab_irsa_role_arn" {
   value       = aws_iam_role.gitlab_irsa.arn
 }
 
+output "external_dns_irsa_role_arn" {
+  description = "IAM Role ARN for external-dns IRSA — written to config.yaml by sync-tofu-outputs.sh"
+  value       = aws_iam_role.external_dns_irsa.arn
+}
+
 # ─── Cognito ─────────────────────────────────────────────────────────
 
 output "cognito_user_pool_id" {

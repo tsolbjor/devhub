@@ -24,6 +24,10 @@ module "cluster" {
   # Blob storage — locally-redundant for dev
   storage_replication = "LRS"
 
+  # DNS — must match an existing Azure DNS zone
+  domain = "dev.example.com" # TODO: set to your actual domain
+  # dns_zone_resource_group = "my-dns-rg"  # uncomment if DNS zone is in a separate RG
+
   enable_delete_lock = false
 
   tags = {
