@@ -148,7 +148,7 @@ configure_groups_scope() {
 
     kcadm update realms/${REALM}/default-default-client-scopes/${scope_id} -r ${REALM} 2>/dev/null || true
 
-    for client_name in "grafana" "argocd" "gitlab" "vault"; do
+    for client_name in "grafana" "argocd" "gitlab" "vault" "headlamp"; do
         local client_id=$(kcadm get clients -r ${REALM} --fields id,clientId 2>/dev/null | grep "\"clientId\" : \"${client_name}\"" -B 1 | grep "\"id\"" | cut -d'"' -f4 || echo "")
         if [[ -n "$client_id" ]]; then
             kcadm update clients/${client_id}/default-client-scopes/${scope_id} -r ${REALM} 2>/dev/null || true
@@ -330,6 +330,26 @@ EOF
         --from-literal=client-secret="${vault_secret}" \
         --dry-run=client -o yaml | kubectl apply -f -
 
+    # Headlamp
+    log_info "Configuring Headlamp OIDC client..."
+    local headlamp_secret=$(create_client "headlamp" \
+        "https://headlamp.${DOMAIN}/oidc-callback")
+    echo "HEADLAMP_OIDC_SECRET=${headlamp_secret}" >> "${secrets_file}"
+
+    local headlamp_issuer
+    if [[ "$DOMAIN" == "localhost" || "$DOMAIN" == *.localhost ]]; then
+        headlamp_issuer="${KEYCLOAK_INTERNAL_URL}/realms/devops"
+    else
+        headlamp_issuer="https://keycloak.${DOMAIN}/realms/devops"
+    fi
+
+    kubectl create secret generic headlamp-oidc-secret -n headlamp \
+        --from-literal=clientID="headlamp" \
+        --from-literal=clientSecret="${headlamp_secret}" \
+        --from-literal=issuerURL="${headlamp_issuer}" \
+        --from-literal=scopes="openid,profile,email,groups" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
     log_info "Client secrets saved to: ${secrets_file}"
     log_info "Kubernetes secrets created in respective namespaces"
 
@@ -337,6 +357,7 @@ EOF
     log_info "Restarting services to pick up real OIDC secrets..."
     kubectl rollout restart deployment/prometheus-grafana -n monitoring 2>/dev/null || true
     kubectl rollout restart deployment/gitlab-webservice-default -n gitlab 2>/dev/null || true
+    kubectl rollout restart deployment/headlamp -n headlamp 2>/dev/null || true
 }
 
 # Configure Entra ID as a federated identity provider in Keycloak

@@ -1,0 +1,36 @@
+# ClusterRole for Headlamp's in-cluster ServiceAccount.
+# Grants read-only view of all resources plus pod exec/log access for debugging.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: headlamp-view
+rules:
+  # Full read access to all core and extension resources
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Non-resource URLs (healthz, metrics, etc.)
+  - nonResourceURLs: ["*"]
+    verbs: ["get"]
+  # Pod exec and log streaming for operational debugging
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/log"]
+    verbs: ["get", "create"]
+  # Node and pod metrics
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: headlamp-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: headlamp-view
+subjects:
+  - kind: ServiceAccount
+    name: headlamp
+    namespace: headlamp

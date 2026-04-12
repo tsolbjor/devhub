@@ -69,3 +69,10 @@ metadata:
   name: crossplane-system
   labels:
     name: crossplane-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: headlamp
+  labels:
+    name: headlamp

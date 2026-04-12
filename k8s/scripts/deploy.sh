@@ -45,7 +45,7 @@ copy_tls_secrets() {
     local CERT_B64=$(base64 -w 0 "${CERTS_DIR}/domains/local-dev.crt")
     local KEY_B64=$(base64 -w 0 "${CERTS_DIR}/domains/local-dev.key")
 
-    for ns in data-services keycloak vault gitlab argocd monitoring; do
+    for ns in data-services keycloak vault gitlab argocd monitoring headlamp; do
         kubectl create namespace "$ns" 2>/dev/null || true
         cat <<EOF | kubectl apply -f -
 apiVersion: v1
@@ -449,6 +449,12 @@ install_monitoring() {
         -f "${BASE_DIR}/devops/monitoring/alloy-values.yaml" \
         --atomic --timeout 5m
 
+    # Remove legacy promtail release if it still exists (replaced by Alloy)
+    if helm status promtail -n monitoring &>/dev/null; then
+        log_info "Removing legacy promtail release (replaced by Alloy)..."
+        helm uninstall promtail -n monitoring
+    fi
+
     log_info "Monitoring stack installed"
 }
 
@@ -502,7 +508,7 @@ install_crossplane() {
     local attempts=0
     local max_attempts=30
     while [[ $attempts -lt $max_attempts ]]; do
-        local healthy=$(kubectl get provider provider-upcloud -o jsonpath='{.status.conditions[?(@.type=="Healthy")].status}' 2>/dev/null || echo "")
+        local healthy=$(kubectl get providers.pkg.crossplane.io provider-upcloud -o jsonpath='{.status.conditions[?(@.type=="Healthy")].status}' 2>/dev/null || echo "")
         if [[ "$healthy" == "True" ]]; then
             log_info "UpCloud provider is healthy"
             break
@@ -645,6 +651,49 @@ EOF
     log_info "nginx-ingress controller installed"
 }
 
+install_headlamp() {
+    log_step "Installing Headlamp..."
+
+    kubectl create namespace headlamp 2>/dev/null || true
+
+    # Copy local TLS secret when running as a standalone install (deploy_devops copies it for full deploys)
+    if [[ "$ENV" == "local" ]] && ! kubectl get secret local-tls-secret -n headlamp &>/dev/null; then
+        kubectl create secret tls local-tls-secret -n headlamp \
+            --cert="${CERTS_DIR}/domains/local-dev.crt" \
+            --key="${CERTS_DIR}/domains/local-dev.key"
+    fi
+
+    # Apply RBAC for Headlamp's in-cluster ServiceAccount
+    kubectl apply -f "${BASE_DIR}/devops/headlamp/rbac.yaml"
+
+    # Create placeholder OIDC secret so Headlamp can start before Keycloak SSO is configured.
+    # Use internal K8s service URL for issuerURL so the Headlamp backend can reach Keycloak
+    # (glibc resolves *.localhost to 127.0.0.1 before DNS, breaking server-side OIDC calls).
+    if ! kubectl get secret headlamp-oidc-secret -n headlamp &>/dev/null; then
+        local oidc_issuer
+        if [[ "$DOMAIN" == "localhost" || "$DOMAIN" == *.localhost ]]; then
+            oidc_issuer="http://keycloak-keycloakx-http.keycloak.svc.cluster.local/realms/devops"
+        else
+            oidc_issuer="https://keycloak.${DOMAIN}/realms/devops"
+        fi
+        kubectl create secret generic headlamp-oidc-secret -n headlamp \
+            --from-literal=clientID="headlamp" \
+            --from-literal=clientSecret="placeholder" \
+            --from-literal=issuerURL="${oidc_issuer}" \
+            --from-literal=scopes="openid,profile,email,groups"
+    fi
+
+    local values_args=$(get_values_args "headlamp")
+
+    helm upgrade --install headlamp headlamp/headlamp \
+        --namespace headlamp \
+        --version 0.41.0 \
+        $values_args \
+        --atomic --timeout 5m
+
+    log_info "Headlamp installed"
+}
+
 deploy_devops() {
     add_helm_repos
     ensure_nginx_ingress
@@ -660,6 +709,7 @@ deploy_devops() {
     install_gitlab
     install_argocd
     install_crossplane
+    install_headlamp
     apply_devops_ingress
 }
 
@@ -669,6 +719,8 @@ delete_devops() {
     kubectl delete -f "${BASE_DIR}/crossplane/provider-upcloud.yaml" 2>/dev/null || true
     kubectl delete -f "${BASE_DIR}/crossplane/provider-config.yaml" 2>/dev/null || true
     helm uninstall crossplane -n crossplane-system 2>/dev/null || true
+    helm uninstall headlamp -n headlamp 2>/dev/null || true
+    kubectl delete -f "${BASE_DIR}/devops/headlamp/rbac.yaml" 2>/dev/null || true
     helm uninstall argocd -n argocd 2>/dev/null || true
     helm uninstall external-dns -n external-dns 2>/dev/null || true
     helm uninstall gitlab -n gitlab 2>/dev/null || true
@@ -701,7 +753,7 @@ delete_devops() {
 status_devops() {
     log_step "DevOps Platform Status:"
     echo ""
-    for ns in data-services keycloak vault gitlab argocd monitoring external-secrets cert-manager crossplane-system external-dns; do
+    for ns in data-services keycloak vault gitlab argocd monitoring external-secrets cert-manager crossplane-system external-dns headlamp; do
         echo "=== ${ns} ==="
         kubectl get pods -n "$ns" 2>/dev/null || echo "  Namespace not found"
         echo ""
@@ -727,6 +779,7 @@ print_summary() {
     echo "  - Prometheus: https://prometheus.${DOMAIN}"
     echo "  - GitLab:     https://gitlab.${DOMAIN}"
     echo "  - ArgoCD:     https://argocd.${DOMAIN}"
+    echo "  - Headlamp:   https://headlamp.${DOMAIN}"
     echo "  - Crossplane: kubectl get providers (cluster-scoped)"
     echo ""
     echo "Credentials:"
@@ -788,6 +841,9 @@ main() {
                     ;;
                 crossplane)
                     add_helm_repos && install_crossplane
+                    ;;
+                headlamp)
+                    add_helm_repos && install_headlamp
                     ;;
                 external-dns)
                     add_helm_repos && install_external_dns

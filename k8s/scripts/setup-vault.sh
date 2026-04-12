@@ -20,8 +20,53 @@ setup_paths
 # Vault uses HTTP internally (TLS at ingress)
 VAULT_EXEC="kubectl exec -n vault vault-0 -- env VAULT_ADDR=http://127.0.0.1:8200"
 
-# Keys file stored per-environment
+# Keys file stored per-environment (gitignored)
 KEYS_FILE="${SCRIPT_ENV_DIR}/vault-init-keys.json"
+
+# K8s secret used as a durable backup of the keys file.
+# Stored in the vault namespace, never in git.
+# On init: keys are written here automatically.
+# On unseal: if the local file is missing, keys are restored from here.
+KEYS_K8S_SECRET="vault-init-keys"
+KEYS_K8S_NS="vault"
+
+# Save keys JSON to the K8s secret (idempotent)
+save_keys_to_k8s_secret() {
+    local json_file="$1"
+    kubectl create secret generic "${KEYS_K8S_SECRET}" \
+        --namespace "${KEYS_K8S_NS}" \
+        --from-file=vault-init-keys.json="${json_file}" \
+        --save-config \
+        --dry-run=client -o yaml \
+        | kubectl apply -f - &>/dev/null
+    log_info "Keys backed up to K8s secret ${KEYS_K8S_NS}/${KEYS_K8S_SECRET}"
+}
+
+# Restore keys JSON from the K8s secret into KEYS_FILE
+restore_keys_from_k8s_secret() {
+    if kubectl get secret "${KEYS_K8S_SECRET}" -n "${KEYS_K8S_NS}" &>/dev/null; then
+        mkdir -p "$(dirname "${KEYS_FILE}")"
+        kubectl get secret "${KEYS_K8S_SECRET}" -n "${KEYS_K8S_NS}" \
+            -o jsonpath='{.data.vault-init-keys\.json}' \
+            | base64 -d > "${KEYS_FILE}"
+        chmod 600 "${KEYS_FILE}"
+        log_info "Keys restored from K8s secret to ${KEYS_FILE}"
+        return 0
+    fi
+    return 1
+}
+
+# Ensure the keys file is present, restoring from K8s secret if needed
+require_keys_file() {
+    if [[ ! -f "${KEYS_FILE}" ]]; then
+        log_warn "Keys file not found locally — attempting restore from K8s secret..."
+        if ! restore_keys_from_k8s_secret; then
+            log_error "vault-init-keys.json not found and no K8s secret backup exists"
+            log_error "Run './setup-vault.sh --env ${ENV} init' to re-initialize (WARNING: wipes all secrets)"
+            exit 1
+        fi
+    fi
+}
 
 # Check if Vault is already initialized
 check_vault_status() {
@@ -43,15 +88,18 @@ init_vault() {
 
     local init_output=$($VAULT_EXEC vault operator init -format=json)
 
+    mkdir -p "${SCRIPT_ENV_DIR}"
     echo "$init_output" > "${KEYS_FILE}"
     chmod 600 "${KEYS_FILE}"
 
+    # Back up to K8s secret so the keys survive even if the local file is lost
+    save_keys_to_k8s_secret "${KEYS_FILE}"
+
     log_info "Vault initialized!"
-    log_warn "IMPORTANT: Vault keys saved to ${KEYS_FILE}"
-    log_warn "Store these keys securely and delete this file!"
+    log_warn "Keys saved to ${KEYS_FILE} and backed up to K8s secret ${KEYS_K8S_NS}/${KEYS_K8S_SECRET}"
 
     echo ""
-    echo "Unseal Keys:"
+    echo "Unseal Keys (first 3 of 5):"
     echo "$init_output" | jq -r '.unseal_keys_b64[]' | head -3
     echo ""
     echo "Root Token:"
@@ -63,11 +111,7 @@ init_vault() {
 unseal_vault() {
     log_step "Unsealing Vault..."
 
-    if [[ ! -f "${KEYS_FILE}" ]]; then
-        log_error "vault-init-keys.json not found at ${KEYS_FILE}"
-        log_error "Run init first or provide unseal keys manually"
-        exit 1
-    fi
+    require_keys_file
 
     local keys=$(cat "${KEYS_FILE}" | jq -r '.unseal_keys_b64[]' | head -3)
 
@@ -85,10 +129,7 @@ unseal_vault() {
 configure_k8s_auth() {
     log_step "Configuring Kubernetes authentication..."
 
-    if [[ ! -f "${KEYS_FILE}" ]]; then
-        log_error "vault-init-keys.json not found at ${KEYS_FILE}"
-        exit 1
-    fi
+    require_keys_file
 
     local root_token=$(cat "${KEYS_FILE}" | jq -r '.root_token')
 
@@ -111,6 +152,7 @@ configure_k8s_auth() {
 create_external_secrets_role() {
     log_step "Creating role for External Secrets..."
 
+    require_keys_file
     local root_token=$(cat "${KEYS_FILE}" | jq -r '.root_token')
 
     kubectl exec -n vault vault-0 -- sh -c "
@@ -144,6 +186,7 @@ EOF
 create_example_secret() {
     log_step "Creating example secret..."
 
+    require_keys_file
     local root_token=$(cat "${KEYS_FILE}" | jq -r '.root_token')
 
     kubectl exec -n vault vault-0 -- sh -c "
@@ -167,10 +210,13 @@ print_summary() {
     echo "Vault Setup Complete!"
     echo "=============================================="
     echo ""
-    echo "Root token and unseal keys saved to:"
-    echo "  ${KEYS_FILE}"
+    echo "Root token and unseal keys stored in two places:"
+    echo "  Local:      ${KEYS_FILE}  (gitignored)"
+    echo "  K8s secret: ${KEYS_K8S_NS}/${KEYS_K8S_SECRET}  (cluster-persistent)"
     echo ""
-    echo "IMPORTANT: Store these securely and delete the file!"
+    echo "The K8s secret is the durable backup — if the local file is lost,"
+    echo "re-running any setup-vault.sh command will restore it automatically."
+    echo "For production use cloud KMS auto-unseal instead (see vault-autounseal-values.yaml)."
     echo ""
     echo "Next steps:"
     echo "  1. Apply ClusterSecretStore for External Secrets"

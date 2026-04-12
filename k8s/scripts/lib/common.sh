@@ -25,7 +25,7 @@ log_phase() { echo -e "\n${CYAN}━━━━━━━━━━━━━━━━
 # Argument Parsing
 # =============================================================================
 
-# Parse --env local|upcloud|upcloud-dev|upcloud-prod|azure-dev|azure-prod from arguments.
+# Parse --env <environment> from arguments.
 # Sets ENV global and removes --env <val> from args.
 # Remaining args are placed in ARGS array.
 parse_env_arg() {
@@ -37,7 +37,7 @@ parse_env_arg() {
             --env)
                 if [[ -z "${2:-}" ]]; then
                     log_error "Missing value for --env"
-                    echo "Usage: $0 --env local|upcloud-dev|upcloud-prod [...]"
+                    echo "Usage: $0 --env <environment> [...]"
                     exit 1
                 fi
                 ENV="$2"
@@ -52,14 +52,17 @@ parse_env_arg() {
 
     if [[ -z "$ENV" ]]; then
         log_error "Missing required --env argument"
-        echo "Usage: $0 --env local|upcloud-dev|upcloud-prod [...]"
+        echo "Usage: $0 --env <environment> [...]"
         exit 1
     fi
 
     case "$ENV" in
         local|upcloud|upcloud-dev|upcloud-prod|azure-dev|azure-prod|gcp-dev|gcp-prod|aws-dev|aws-prod) ;;
+        upcloud-workload|azure-workload|gcp-workload|aws-workload) ;;
         *)
-            log_error "Invalid environment: $ENV (must be local, upcloud, upcloud-dev, upcloud-prod, azure-dev, azure-prod, gcp-dev, gcp-prod, aws-dev, or aws-prod)"
+            log_error "Invalid environment: $ENV"
+            log_error "Valid environments: local, upcloud-dev, upcloud-prod, azure-dev, azure-prod, gcp-dev, gcp-prod, aws-dev, aws-prod"
+            log_error "Workload environments: upcloud-workload, azure-workload, gcp-workload, aws-workload"
             exit 1
             ;;
     esac
@@ -100,6 +103,12 @@ parse_config() {
     export DATA_SERVICES_TYPE=$(grep -A1 '^dataServices:' "$config_file" | grep 'type:' | sed 's/.*type:[[:space:]]*//' | _yaml_val || echo "local")
     DATA_SERVICES_TYPE="${DATA_SERVICES_TYPE:-local}"
 
+    # Workload clusters: parse externalDns identity only
+    export EXTERNAL_DNS_IRSA_ROLE_ARN="${EXTERNAL_DNS_IRSA_ROLE_ARN:-$(grep -A2 '^externalDns:' "$config_file" | grep 'irsaRoleArn:' | sed 's/.*irsaRoleArn:[[:space:]]*//' | _yaml_val)}"
+    export EXTERNAL_DNS_IDENTITY_CLIENT_ID="${EXTERNAL_DNS_IDENTITY_CLIENT_ID:-$(grep -A2 '^externalDns:' "$config_file" | grep 'identityClientId:' | sed 's/.*identityClientId:[[:space:]]*//' | _yaml_val)}"
+    export EXTERNAL_DNS_GSA_EMAIL="${EXTERNAL_DNS_GSA_EMAIL:-$(grep -A2 '^externalDns:' "$config_file" | grep 'gsaEmail:' | sed 's/.*gsaEmail:[[:space:]]*//' | _yaml_val)}"
+    export PLATFORM_VAULT_URL="${PLATFORM_VAULT_URL:-$(grep -E '^platformVaultUrl:' "$config_file" | sed 's/platformVaultUrl:[[:space:]]*//' | _yaml_val)}"
+
     # Managed data service endpoints (if type is managed)
     if [[ "$DATA_SERVICES_TYPE" == "managed" ]]; then
         export PG_HOST="${PG_HOST:-$(grep -A1 'postgresql:' "$config_file" | grep 'host:' | sed 's/.*host:[[:space:]]*//' | _yaml_val)}"
@@ -128,10 +137,6 @@ parse_config() {
         export COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-$(grep -A3 '^cognitoIdp:' "$config_file" | grep 'clientId:' | sed 's/.*clientId:[[:space:]]*//' | _yaml_val)}"
         # GCP: Google IdP (non-sensitive; secret is in gcp-idp.env)
         export GOOGLE_IDP_CLIENT_ID="${GOOGLE_IDP_CLIENT_ID:-$(grep -A1 '^googleIdp:' "$config_file" | grep 'clientId:' | sed 's/.*clientId:[[:space:]]*//' | _yaml_val)}"
-        # External-DNS identity (cloud-specific)
-        export EXTERNAL_DNS_IRSA_ROLE_ARN="${EXTERNAL_DNS_IRSA_ROLE_ARN:-$(grep -A2 '^externalDns:' "$config_file" | grep 'irsaRoleArn:' | sed 's/.*irsaRoleArn:[[:space:]]*//' | _yaml_val)}"
-        export EXTERNAL_DNS_IDENTITY_CLIENT_ID="${EXTERNAL_DNS_IDENTITY_CLIENT_ID:-$(grep -A2 '^externalDns:' "$config_file" | grep 'identityClientId:' | sed 's/.*identityClientId:[[:space:]]*//' | _yaml_val)}"
-        export EXTERNAL_DNS_GSA_EMAIL="${EXTERNAL_DNS_GSA_EMAIL:-$(grep -A2 '^externalDns:' "$config_file" | grep 'gsaEmail:' | sed 's/.*gsaEmail:[[:space:]]*//' | _yaml_val)}"
         # Loki workload identity (cloud-specific, set after adding loki IAM resources to tofu)
         export LOKI_IRSA_ROLE_ARN="${LOKI_IRSA_ROLE_ARN:-$(grep -A2 '^loki:' "$config_file" | grep 'irsaRoleArn:' | sed 's/.*irsaRoleArn:[[:space:]]*//' | _yaml_val)}"
         export LOKI_IDENTITY_CLIENT_ID="${LOKI_IDENTITY_CLIENT_ID:-$(grep -A2 '^loki:' "$config_file" | grep 'identityClientId:' | sed 's/.*identityClientId:[[:space:]]*//' | _yaml_val)}"
@@ -166,9 +171,6 @@ parse_config() {
         export COGNITO_HOSTED_UI_DOMAIN="${COGNITO_HOSTED_UI_DOMAIN:-}"
         export COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-}"
         export GOOGLE_IDP_CLIENT_ID="${GOOGLE_IDP_CLIENT_ID:-}"
-        export EXTERNAL_DNS_IRSA_ROLE_ARN="${EXTERNAL_DNS_IRSA_ROLE_ARN:-}"
-        export EXTERNAL_DNS_IDENTITY_CLIENT_ID="${EXTERNAL_DNS_IDENTITY_CLIENT_ID:-}"
-        export EXTERNAL_DNS_GSA_EMAIL="${EXTERNAL_DNS_GSA_EMAIL:-}"
         export LOKI_IRSA_ROLE_ARN="${LOKI_IRSA_ROLE_ARN:-}"
         export LOKI_IDENTITY_CLIENT_ID="${LOKI_IDENTITY_CLIENT_ID:-}"
         export LOKI_GSA_EMAIL="${LOKI_GSA_EMAIL:-}"
@@ -240,6 +242,7 @@ add_helm_repos() {
     helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>/dev/null || true
     helm repo add crossplane-stable https://charts.crossplane.io/stable 2>/dev/null || true
     helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/ 2>/dev/null || true
+    helm repo add headlamp https://kubernetes-sigs.github.io/headlamp/ 2>/dev/null || true
 
     helm repo update
     log_info "Helm repositories updated"

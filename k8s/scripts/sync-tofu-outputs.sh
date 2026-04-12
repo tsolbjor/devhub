@@ -7,12 +7,15 @@ set -euo pipefail
 # Reads managed data service outputs from tofu and writes them into the
 # matching k8s overlay config.yaml. Also fetches the cluster kubeconfig.
 #
-# Usage: ./sync-tofu-outputs.sh --env upcloud-dev|upcloud-prod|azure-dev|azure-prod
+# Usage: ./sync-tofu-outputs.sh --env <environment>
+#
+# Platform environments: upcloud-dev, upcloud-prod, azure-dev, azure-prod,
+#                        gcp-dev, gcp-prod, aws-dev, aws-prod
+# Workload environments: upcloud-workload, azure-workload, gcp-workload, aws-workload
 #
 # Prerequisites:
 #   - tofu apply has been run in the corresponding tofu environment
-#   - upctl CLI installed (for UpCloud kubeconfig fetch)
-#   - az CLI installed (for Azure kubeconfig fetch)
+#   - Cloud CLI installed (upctl / az / gcloud / aws) for kubeconfig fetch
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,19 +23,25 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 parse_env_arg "$@"
 
-# Map k8s env to tofu directory and provider
+# Map k8s env to tofu directory, provider, and cluster type
 REPO_ROOT="${SCRIPT_DIR}/../.."
 case "$ENV" in
-    upcloud-dev)  TOFU_DIR="${REPO_ROOT}/tofu/upcloud/dev";  CLOUD="upcloud" ;;
-    upcloud-prod) TOFU_DIR="${REPO_ROOT}/tofu/upcloud/prod"; CLOUD="upcloud" ;;
-    azure-dev)    TOFU_DIR="${REPO_ROOT}/tofu/azure/dev";    CLOUD="azure" ;;
-    azure-prod)   TOFU_DIR="${REPO_ROOT}/tofu/azure/prod";   CLOUD="azure" ;;
-    gcp-dev)      TOFU_DIR="${REPO_ROOT}/tofu/gcp/dev";      CLOUD="gcp" ;;
-    gcp-prod)     TOFU_DIR="${REPO_ROOT}/tofu/gcp/prod";     CLOUD="gcp" ;;
-    aws-dev)      TOFU_DIR="${REPO_ROOT}/tofu/aws/dev";      CLOUD="aws" ;;
-    aws-prod)     TOFU_DIR="${REPO_ROOT}/tofu/aws/prod";     CLOUD="aws" ;;
+    upcloud-dev)      TOFU_DIR="${REPO_ROOT}/tofu/upcloud/dev";      CLOUD="upcloud"; CLUSTER_TYPE="platform" ;;
+    upcloud-prod)     TOFU_DIR="${REPO_ROOT}/tofu/upcloud/prod";     CLOUD="upcloud"; CLUSTER_TYPE="platform" ;;
+    upcloud-workload) TOFU_DIR="${REPO_ROOT}/tofu/upcloud/workload"; CLOUD="upcloud"; CLUSTER_TYPE="workload" ;;
+    azure-dev)        TOFU_DIR="${REPO_ROOT}/tofu/azure/dev";        CLOUD="azure";   CLUSTER_TYPE="platform" ;;
+    azure-prod)       TOFU_DIR="${REPO_ROOT}/tofu/azure/prod";       CLOUD="azure";   CLUSTER_TYPE="platform" ;;
+    azure-workload)   TOFU_DIR="${REPO_ROOT}/tofu/azure/workload";   CLOUD="azure";   CLUSTER_TYPE="workload" ;;
+    gcp-dev)          TOFU_DIR="${REPO_ROOT}/tofu/gcp/dev";          CLOUD="gcp";     CLUSTER_TYPE="platform" ;;
+    gcp-prod)         TOFU_DIR="${REPO_ROOT}/tofu/gcp/prod";         CLOUD="gcp";     CLUSTER_TYPE="platform" ;;
+    gcp-workload)     TOFU_DIR="${REPO_ROOT}/tofu/gcp/workload";     CLOUD="gcp";     CLUSTER_TYPE="workload" ;;
+    aws-dev)          TOFU_DIR="${REPO_ROOT}/tofu/aws/dev";          CLOUD="aws";     CLUSTER_TYPE="platform" ;;
+    aws-prod)         TOFU_DIR="${REPO_ROOT}/tofu/aws/prod";         CLOUD="aws";     CLUSTER_TYPE="platform" ;;
+    aws-workload)     TOFU_DIR="${REPO_ROOT}/tofu/aws/workload";     CLOUD="aws";     CLUSTER_TYPE="workload" ;;
     *)
-        log_error "sync-tofu-outputs only works with upcloud-dev, upcloud-prod, azure-dev, azure-prod, gcp-dev, gcp-prod, aws-dev, or aws-prod"
+        log_error "sync-tofu-outputs only works with managed cloud environments"
+        log_error "Platform: upcloud-dev, upcloud-prod, azure-dev, azure-prod, gcp-dev, gcp-prod, aws-dev, aws-prod"
+        log_error "Workload: upcloud-workload, azure-workload, gcp-workload, aws-workload"
         exit 1
         ;;
 esac
@@ -63,9 +72,109 @@ fi
 
 OUTPUTS=$(tofu output -json)
 
+CLUSTER_NAME=$(echo "$OUTPUTS" | jq -r '.cluster_name.value')
+
+# ─── Workload cluster: only need cluster name + external-dns IAM ────
+
+if [[ "$CLUSTER_TYPE" == "workload" ]]; then
+    log_info "Cluster: ${CLUSTER_NAME}"
+
+    if [[ "$CLOUD" == "aws" ]]; then
+        EXTERNAL_DNS_IRSA_ROLE_ARN=$(echo "$OUTPUTS" | jq -r '.external_dns_irsa_role_arn.value')
+        log_info "External-DNS IRSA ARN: ${EXTERNAL_DNS_IRSA_ROLE_ARN}"
+        AWS_REGION=$(echo "$OUTPUTS" | jq -r '.aws_region.value')
+
+        sed -i "/^externalDns:/,\$ {
+            s|irsaRoleArn: .*|irsaRoleArn: ${EXTERNAL_DNS_IRSA_ROLE_ARN}|
+        }" "$CONFIG_FILE"
+
+    elif [[ "$CLOUD" == "azure" ]]; then
+        EXTERNAL_DNS_IDENTITY_CLIENT_ID=$(echo "$OUTPUTS" | jq -r '.external_dns_identity_client_id.value')
+        RESOURCE_GROUP=$(echo "$OUTPUTS" | jq -r '.resource_group_name.value')
+        LOCATION=$(echo "$OUTPUTS" | jq -r '.location.value')
+        log_info "External-DNS Identity: ${EXTERNAL_DNS_IDENTITY_CLIENT_ID}"
+
+        sed -i "/^externalDns:/,\$ {
+            s|identityClientId: .*|identityClientId: ${EXTERNAL_DNS_IDENTITY_CLIENT_ID}|
+        }" "$CONFIG_FILE"
+
+    elif [[ "$CLOUD" == "gcp" ]]; then
+        EXTERNAL_DNS_GSA_EMAIL=$(echo "$OUTPUTS" | jq -r '.external_dns_gsa_email.value')
+        GCP_REGION=$(echo "$OUTPUTS" | jq -r '.region.value')
+        GCS_PROJECT_ID=$(echo "$OUTPUTS" | jq -r '.project_id.value')
+        log_info "External-DNS GSA: ${EXTERNAL_DNS_GSA_EMAIL}"
+
+        sed -i "/^externalDns:/,\$ {
+            s|gsaEmail: .*|gsaEmail: ${EXTERNAL_DNS_GSA_EMAIL}|
+        }" "$CONFIG_FILE"
+
+    elif [[ "$CLOUD" == "upcloud" ]]; then
+        log_info "UpCloud workload cluster — no external-dns IAM needed"
+    fi
+
+    log_info "Config updated"
+
+    # Fetch kubeconfig for workload cluster
+    log_step "Fetching kubeconfig for workload cluster: ${CLUSTER_NAME}..."
+    KUBECONFIG_DIR="${SCRIPT_DIR}/${ENV}"
+    mkdir -p "$KUBECONFIG_DIR"
+    KUBECONFIG_FILE="${KUBECONFIG_DIR}/kubeconfig"
+
+    if [[ "$CLOUD" == "aws" ]]; then
+        if command -v aws &>/dev/null; then
+            aws eks update-kubeconfig \
+                --region "${AWS_REGION}" \
+                --name "${CLUSTER_NAME}" \
+                --kubeconfig "${KUBECONFIG_FILE}"
+            log_info "Kubeconfig written to: ${KUBECONFIG_FILE}"
+        else
+            log_warn "aws CLI not found — run: aws eks update-kubeconfig --region <region> --name ${CLUSTER_NAME}"
+        fi
+    elif [[ "$CLOUD" == "azure" ]]; then
+        if command -v az &>/dev/null; then
+            az aks get-credentials \
+                --resource-group "${RESOURCE_GROUP}" \
+                --name "${CLUSTER_NAME}" \
+                --file "${KUBECONFIG_FILE}" \
+                --overwrite-existing
+            log_info "Kubeconfig written to: ${KUBECONFIG_FILE}"
+        else
+            log_warn "az CLI not found — run: az aks get-credentials --resource-group ${RESOURCE_GROUP} --name ${CLUSTER_NAME}"
+        fi
+    elif [[ "$CLOUD" == "gcp" ]]; then
+        if command -v gcloud &>/dev/null; then
+            KUBECONFIG="${KUBECONFIG_FILE}" gcloud container clusters get-credentials "${CLUSTER_NAME}" \
+                --region "${GCP_REGION}" \
+                --project "${GCS_PROJECT_ID}"
+            log_info "Kubeconfig written to: ${KUBECONFIG_FILE}"
+        else
+            log_warn "gcloud not found — run: gcloud container clusters get-credentials ${CLUSTER_NAME} --region <region>"
+        fi
+    elif [[ "$CLOUD" == "upcloud" ]]; then
+        if command -v upctl &>/dev/null; then
+            upctl kubernetes config "${CLUSTER_NAME}" --write "${KUBECONFIG_FILE}"
+            log_info "Kubeconfig written to: ${KUBECONFIG_FILE}"
+        else
+            log_warn "upctl not found — download kubeconfig from UpCloud console"
+        fi
+    fi
+
+    echo ""
+    log_info "Workload sync complete. Next steps:"
+    echo ""
+    echo "  1. Set domain and acmeEmail in: ${CONFIG_FILE}"
+    echo "  2. Set platformVaultUrl in: ${CONFIG_FILE}"
+    echo "  3. export KUBECONFIG=${KUBECONFIG_FILE}"
+    echo "  4. ./deploy-workload.sh --env ${ENV}"
+    echo "  5. ./register-workload-cluster.sh --env ${ENV} (register with platform ArgoCD)"
+    echo ""
+    exit 0
+fi
+
+# ─── Platform cluster: parse all data service outputs ───────────────
+
 PG_HOST=$(echo "$OUTPUTS" | jq -r '.pg_host.value')
 PG_PORT=$(echo "$OUTPUTS" | jq -r '.pg_port.value')
-CLUSTER_NAME=$(echo "$OUTPUTS" | jq -r '.cluster_name.value')
 
 # ─── Cloud-specific output parsing ──────────────────────────────────
 

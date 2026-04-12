@@ -4,11 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Kubernetes DevOps platform with two layers:
+Kubernetes DevOps platform with three layers:
 1. **Infrastructure (OpenTofu)** — provisions K8s clusters and managed data services on UpCloud, Azure, GCP, or AWS
-2. **Platform (Helm/K8s)** — deploys DevOps services (Keycloak, Vault, GitLab, ArgoCD, Prometheus/Grafana/Loki/Tempo/Alloy, External-DNS, cert-manager, Crossplane)
+2. **Platform cluster (Helm/K8s)** — deploys DevOps services (Keycloak, Vault, GitLab, ArgoCD, Prometheus/Grafana/Loki/Tempo/Alloy, External-DNS, cert-manager, Crossplane)
+3. **Workload cluster** — lean K8s cluster running developer apps, managed by platform ArgoCD via app-of-apps
 
-Environments: `local` (Rancher Desktop/WSL2), `upcloud-dev`, `upcloud-prod`, `azure-dev`, `azure-prod`, `gcp-dev`, `gcp-prod`, `aws-dev`, `aws-prod`.
+Platform environments: `local` (Rancher Desktop/WSL2), `upcloud-dev`, `upcloud-prod`, `azure-dev`, `azure-prod`, `gcp-dev`, `gcp-prod`, `aws-dev`, `aws-prod`.
+Workload environments: `upcloud-workload`, `azure-workload`, `gcp-workload`, `aws-workload`.
 
 ## Common Commands
 
@@ -34,7 +36,7 @@ cd tofu/aws/prod && tofu init && tofu plan && tofu apply
 
 ### K8s Scripts (platform services)
 
-All scripts are in `k8s/scripts/`. Run from that directory. All scripts require `--env local|upcloud-dev|upcloud-prod|azure-dev|azure-prod|gcp-dev|gcp-prod|aws-dev|aws-prod`.
+All scripts are in `k8s/scripts/`. Run from that directory.
 
 ```bash
 # Full local automated setup (20-40 min, zero manual steps)
@@ -81,6 +83,25 @@ All scripts are in `k8s/scripts/`. Run from that directory. All scripts require 
 ./setup-vault.sh --env local
 ```
 
+### Workload Cluster (developer apps)
+
+```bash
+# Provision workload cluster infra (VPC + K8s, no data services)
+cd tofu/aws/workload  && tofu init && tofu plan && tofu apply
+cd tofu/azure/workload && tofu init && tofu plan && tofu apply
+cd tofu/gcp/workload  && tofu init && tofu plan && tofu apply
+
+# Sync workload tofu outputs + fetch kubeconfig
+./sync-tofu-outputs.sh --env aws-workload
+
+# Deploy minimal platform components to workload cluster
+# (cert-manager, nginx-ingress, external-dns, external-secrets, alloy)
+./deploy-workload.sh --env aws-workload
+
+# Register workload cluster with platform ArgoCD + create Vault token + registry pull secret
+./register-workload-cluster.sh --env aws-workload --platform-env aws-dev
+```
+
 ## Architecture
 
 ### Deployment Workflow (all clouds)
@@ -96,6 +117,30 @@ sync-tofu-outputs.sh --env <cloud>-dev
     ↓
 deploy.sh --env <cloud>-dev
     → reads config.yaml, templates Helm values, deploys services
+```
+
+### Workload Cluster Workflow
+
+```
+tofu apply (workload/ for chosen cloud)
+    → provisions: VPC + K8s cluster + external-dns IAM only (no data services)
+    ↓
+sync-tofu-outputs.sh --env <cloud>-workload
+    → writes external-dns IAM into k8s/overlays/<cloud>-workload/config.yaml
+    → fetches workload cluster kubeconfig
+    ↓
+deploy-workload.sh --env <cloud>-workload
+    → installs: cert-manager, nginx-ingress, external-dns, external-secrets, alloy
+    ↓
+register-workload-cluster.sh --env <cloud>-workload
+    → registers cluster with platform ArgoCD (argocd cluster add)
+    → creates Vault policy + token → stores in workload cluster external-secrets ns
+    → creates GitLab group deploy token → stores in Vault for registry pulls
+    ↓
+Developer creates repo in GitLab devhub group with k8s/ manifests
+    → ArgoCD auto-discovers repo via gitlab-appset.yaml
+    → Deploys to workload cluster namespace devhub-<repo-name>
+    → ExternalSecret pulls registry-pull-secret from Vault for image pulls
 ```
 
 ### Cloud-Specific Managed Services
@@ -144,19 +189,23 @@ devhub/
 │   ├── upcloud/                     # UpCloud infrastructure
 │   │   ├── modules/cluster/         #   Shared module: UCS + data services
 │   │   ├── dev/                     #   Dev root module
-│   │   └── prod/                    #   Prod root module
+│   │   ├── prod/                    #   Prod root module
+│   │   └── workload/                #   Workload cluster (no data services)
 │   ├── azure/                       # Azure infrastructure
 │   │   ├── modules/cluster/         #   Shared module: AKS + data services
 │   │   ├── dev/                     #   Dev root module
-│   │   └── prod/                    #   Prod root module
+│   │   ├── prod/                    #   Prod root module
+│   │   └── workload/                #   Workload cluster (no data services)
 │   ├── gcp/                         # GCP infrastructure
 │   │   ├── modules/cluster/         #   Shared module: GKE + data services
 │   │   ├── dev/                     #   Dev root module
-│   │   └── prod/                    #   Prod root module
+│   │   ├── prod/                    #   Prod root module
+│   │   └── workload/                #   Workload cluster (no data services)
 │   ├── aws/                         # AWS infrastructure
 │   │   ├── modules/cluster/         #   Shared module: EKS + data services
 │   │   ├── dev/                     #   Dev root module
-│   │   └── prod/                    #   Prod root module
+│   │   ├── prod/                    #   Prod root module
+│   │   └── workload/                #   Workload cluster (no data services)
 │   └── scripts/                     # Shared tofu helpers (setup-cluster.sh, upcloud-login.sh)
 ├── k8s/
 │   ├── base/devops/                 #   Base Helm values for each service
@@ -165,22 +214,30 @@ devhub/
 │   │   ├── upcloud/devops/          #   Shared UpCloud Helm overrides
 │   │   ├── upcloud-dev/             #   UpCloud dev (config.yaml + devops symlink)
 │   │   ├── upcloud-prod/            #   UpCloud prod (config.yaml + devops symlink)
+│   │   ├── upcloud-workload/        #   UpCloud workload cluster (config.yaml only)
 │   │   ├── azure/devops/            #   Shared Azure Helm overrides
 │   │   ├── azure-dev/               #   Azure dev (config.yaml + devops symlink)
 │   │   ├── azure-prod/              #   Azure prod (config.yaml + devops symlink)
+│   │   ├── azure-workload/          #   Azure workload cluster (config.yaml only)
 │   │   ├── gcp/devops/              #   Shared GCP Helm overrides
 │   │   ├── gcp-dev/                 #   GCP dev (config.yaml + devops symlink)
 │   │   ├── gcp-prod/                #   GCP prod (config.yaml + devops symlink)
+│   │   ├── gcp-workload/            #   GCP workload cluster (config.yaml only)
 │   │   ├── aws/devops/              #   Shared AWS Helm overrides
 │   │   ├── aws-dev/                 #   AWS dev (config.yaml + devops symlink)
-│   │   └── aws-prod/                #   AWS prod (config.yaml + devops symlink)
+│   │   ├── aws-prod/                #   AWS prod (config.yaml + devops symlink)
+│   │   └── aws-workload/            #   AWS workload cluster (config.yaml only)
 │   ├── argocd/                      #   App-of-apps GitOps manifests
 │   ├── scripts/                     #   Deployment and setup scripts
 │   │   ├── lib/common.sh            #     Shared library
-│   │   ├── sync-tofu-outputs.sh     #     Bridge: tofu outputs → k8s config
-│   │   ├── deploy.sh                #     Main deployment script
+│   │   ├── sync-tofu-outputs.sh     #     Bridge: tofu outputs → k8s config (platform + workload)
+│   │   ├── deploy.sh                #     Platform cluster deployment
+│   │   ├── deploy-workload.sh       #     Workload cluster deployment
+│   │   ├── register-workload-cluster.sh #  Register workload cluster with platform ArgoCD
 │   │   ├── setup-*.sh               #     Setup scripts (CA, cluster, Keycloak, Vault)
 │   │   └── windows/                 #     PowerShell scripts for Windows host
+│   ├── templates/app-template/      #   Template for developer applications
+│   │   └── k8s/                    #     K8s manifests (deployment, service, ingress, registry-pull-secret)
 │   ├── certs/                       #   Generated certs (gitignored)
 │   └── docs/                        #   Detailed guides (see below)
 ```
@@ -204,7 +261,18 @@ Uses **nginx-ingress** controller (not Traefik). All ingresses use `ingressClass
 | `data-services`    | PostgreSQL, Valkey, MinIO (local)|
 | `crossplane-system`| Crossplane                       |
 | `ingress-nginx`    | nginx-ingress controller         |
-| `devhub`           | Application workloads            |
+| `devhub`           | Application workloads (local only) |
+
+**Workload cluster namespaces** (deployed by deploy-workload.sh):
+
+| Namespace          | Service                          |
+|--------------------|----------------------------------|
+| `cert-manager`     | cert-manager (Let's Encrypt TLS) |
+| `external-dns`     | External-DNS                     |
+| `external-secrets` | External Secrets Operator        |
+| `monitoring`       | Grafana Alloy (log forwarding)   |
+| `ingress-nginx`    | nginx-ingress controller         |
+| `devhub-<app>`     | One namespace per developer app  |
 
 The local TLS secret (`local-tls-secret`) is copied into every service namespace by deploy.sh.
 
@@ -251,6 +319,26 @@ Detailed step-by-step guides in `k8s/docs/`:
 | `KEYCLOAK_SSO.md`      | Keycloak realm/client/IdP federation setup        |
 | `SSO_TESTING_GUIDE.md` | End-to-end SSO testing across all OIDC clients    |
 | `crossplane-appsets.md`| Crossplane ApplicationSets and provider config    |
+
+### Developer Application Workflow
+
+Developers create apps that are automatically deployed to the workload cluster:
+
+1. **Create a repo** in the `devhub` GitLab group (copy from `k8s/templates/app-template/`)
+2. **Replace `APP_NAME` and `DOMAIN`** in `k8s/` manifests with the app name and domain
+3. **Push code** — CI builds, tags, and pushes the image to `registry.DOMAIN/devhub/<app>`
+4. **ArgoCD auto-discovers** the repo via `gitlab-appset.yaml` (SCM provider scanning devhub group)
+5. **App deploys** to namespace `devhub-<repo-name>` on the workload cluster
+6. **Image pull** works because `registry-pull-secret.yaml` ExternalSecret pulls credentials from Vault
+
+App template provides:
+- `k8s/deployment.yaml` — uses `registry.DOMAIN/devhub/APP_NAME:latest`, `imagePullSecrets: registry-pull-secret`
+- `k8s/service.yaml` — ClusterIP on port 80
+- `k8s/ingress.yaml` — cert-manager TLS, nginx ingress, `APP_NAME.DOMAIN`
+- `k8s/registry-pull-secret.yaml` — ExternalSecret pulling deploy token from Vault path `secret/gitlab/registry-pull-token`
+- `.gitlab-ci.yml` — lint → build → test → deploy (updates image tag in deployment.yaml for ArgoCD)
+
+**Registry URL**: `registry.DOMAIN` (nginx ingress in front of GitLab registry, standard HTTPS port)
 
 ## Key Conventions
 

@@ -166,3 +166,28 @@ spec:
                 name: prometheus-kube-prometheus-prometheus
                 port:
                   number: 9090
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: headlamp-ingress
+  namespace: headlamp
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - headlamp.${DOMAIN}
+      secretName: ${TLS_SECRET_NAME}
+  rules:
+    - host: headlamp.${DOMAIN}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: headlamp
+                port:
+                  number: 80

@@ -27,6 +27,9 @@ spec:
           ports:
             - containerPort: 5432
               name: postgresql
+          args:
+            - "-c"
+            - "max_connections=300"
           env:
             - name: POSTGRES_PASSWORD
               valueFrom:

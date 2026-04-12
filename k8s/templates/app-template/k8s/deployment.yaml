@@ -15,9 +15,11 @@ spec:
       labels:
         app: APP_NAME
     spec:
+      imagePullSecrets:
+        - name: registry-pull-secret
       containers:
         - name: APP_NAME
-          image: gitlab.DOMAIN:5050/devhub/APP_NAME:latest
+          image: registry.DOMAIN/devhub/APP_NAME:latest
           ports:
             - containerPort: 8080
           resources:

@@ -43,7 +43,10 @@ spec:
         targetRevision: HEAD
         path: k8s
       destination:
-        server: https://kubernetes.default.svc
+        # Set this to the workload cluster URL after running register-workload-cluster.sh
+        # Example: https://XXXXXXXX.gr7.eu-west-1.eks.amazonaws.com
+        # Get URL: argocd cluster list
+        server: https://kubernetes.default.svc  # TODO: replace with workload cluster URL
         namespace: 'devhub-{{repository}}'
       syncPolicy:
         automated:

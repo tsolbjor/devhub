@@ -1,0 +1,19 @@
+# UpCloud Workload Cluster configuration
+# Runs application workloads only — no platform services (Keycloak, Vault, GitLab, ArgoCD).
+# Data service values are NOT needed here (they live on the platform cluster).
+
+# Domain for app ingresses (can share the same domain as the platform cluster) - UPDATE THIS
+domain: dev.example.com
+
+# TLS via cert-manager (Let's Encrypt)
+tls:
+  type: cert-manager
+  secretName: ""
+  clusterIssuer: letsencrypt-prod
+
+# Email for ACME certificate notifications - UPDATE THIS
+acmeEmail: admin@example.com
+
+# Vault API URL on the platform cluster (for External Secrets Operator)
+# UPDATE THIS after the platform cluster is running
+platformVaultUrl: https://vault.dev.example.com

@@ -1,0 +1,27 @@
+# Headlamp Kubernetes Dashboard
+# K8s API access: in-cluster ServiceAccount with view + pod exec/logs + metrics
+# UI authentication: OIDC via Keycloak (headlamp-oidc-secret)
+replicaCount: 1
+
+config:
+  oidc:
+    # Secret created by deploy.sh (placeholder) then updated by setup-keycloak.sh (real values)
+    # Keys: clientID, clientSecret, issuerURL, scopes
+    secret:
+      name: headlamp-oidc-secret
+      create: false
+
+serviceAccount:
+  create: true
+  name: headlamp
+
+# Ingress managed via ingress.yaml overlays
+ingress:
+  enabled: false
+
+resources:
+  requests:
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

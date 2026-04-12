@@ -22,7 +22,6 @@ args:
   - "start"
   - "--hostname-strict=false"
   - "--cache=ispn"
-  - "--cache-stack=kubernetes"
 
 # Database configuration - uses external PostgreSQL
 database:
