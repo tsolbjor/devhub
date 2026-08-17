@@ -56,6 +56,7 @@ CHART_TEMPO="1.24.4"
 CHART_ALLOY="1.11.1"
 CHART_ARGOCD="10.3.3"
 CHART_HEADLAMP="0.44.0"
+CHART_HOMEPAGE="2.1.0"
 CHART_VELERO="12.1.0"
 CHART_CLUSTER_AUTOSCALER="9.59.0"
 CHART_FORGEJO="17.1.4"
@@ -857,6 +858,39 @@ install_headlamp() {
     log_info "Headlamp installed"
 }
 
+install_homepage() {
+    log_step "Installing Homepage..."
+
+    kubectl create namespace homepage 2>/dev/null || true
+
+    # Placeholder so the SecurityPolicy resolves before Keycloak SSO is set up;
+    # setup-keycloak.sh replaces it with the real client secret. Envoy Gateway
+    # requires the key to be called "client-secret".
+    if ! kubectl get secret homepage-oidc-secret -n homepage &>/dev/null; then
+        kubectl create secret generic homepage-oidc-secret -n homepage \
+            --from-literal=client-secret="placeholder"
+    fi
+
+    local values_args=$(get_values_args "homepage")
+
+    helm upgrade --install homepage jameswynn/homepage \
+        --namespace homepage \
+        --version "$CHART_HOMEPAGE" \
+        $values_args \
+        --atomic --timeout 5m
+
+    # The SecurityPolicy targets the HTTPRoute, so it is applied here rather than
+    # with the routes: without the Service behind it the route does not resolve
+    # and the policy has nothing to attach to.
+    local dir
+    dir="$(render_dir)"
+    template_values "${BASE_DIR}/devops/homepage/oidc-securitypolicy.yaml" \
+        "${dir}/homepage-oidc-securitypolicy.yaml"
+    kubectl apply -f "${dir}/homepage-oidc-securitypolicy.yaml"
+
+    log_info "Homepage installed"
+}
+
 # =============================================================================
 # GitOps handover
 # =============================================================================
@@ -902,8 +936,8 @@ enable_gitops_platform() {
 
     log_info "ApplicationSet 'platform-components' applied"
     log_warn "ArgoCD now owns: cert-manager, external-dns, external-secrets,"
-    log_warn "monitoring, loki, tempo, alloy, headlamp, kyverno, reloader,"
-    log_warn "woodpecker, velero."
+    log_warn "monitoring, loki, tempo, alloy, headlamp, homepage, kyverno,"
+    log_warn "reloader, woodpecker, velero."
     log_warn "Change them through git from now on — a manual 'helm upgrade' will be reverted."
     echo ""
     log_info "The Applications stay 'Unknown' until ${GITOPS_REPO_URL} exists and holds"
@@ -1110,6 +1144,7 @@ deploy_devops() {
     configure_woodpecker_oauth
     install_argocd
     install_headlamp
+    install_homepage
     install_velero
     install_kyverno
     install_reloader
@@ -1126,6 +1161,8 @@ delete_devops() {
 
     helm uninstall velero -n velero 2>/dev/null || true
     helm uninstall headlamp -n headlamp 2>/dev/null || true
+    helm uninstall homepage -n homepage 2>/dev/null || true
+    kubectl delete securitypolicy homepage-oidc -n homepage 2>/dev/null || true
     kubectl delete -f "${BASE_DIR}/devops/headlamp/rbac.yaml" 2>/dev/null || true
     helm uninstall argocd -n argocd 2>/dev/null || true
     helm uninstall external-dns -n external-dns 2>/dev/null || true
@@ -1163,7 +1200,7 @@ status_devops() {
     log_step "DevOps Platform Status:"
     echo ""
     for ns in data-services keycloak vault forgejo woodpecker woodpecker-ci argocd monitoring \
-              external-secrets cert-manager external-dns headlamp velero kyverno envoy-gateway-system; do
+              external-secrets cert-manager external-dns headlamp homepage velero kyverno envoy-gateway-system; do
         echo "=== ${ns} ==="
         kubectl get pods -n "$ns" 2>/dev/null || echo "  Namespace not found"
         echo ""
@@ -1200,6 +1237,7 @@ print_summary() {
     echo "  - Woodpecker: https://ci.${DOMAIN}"
     echo "  - ArgoCD:     https://argocd.${DOMAIN}"
     echo "  - Headlamp:   https://headlamp.${DOMAIN}"
+    echo "  - Homepage:   https://home.${DOMAIN}   (start here)"
     echo ""
     echo "Credentials:"
     echo "  Keycloak:  kubectl get secret keycloak-admin-secret -n keycloak -o jsonpath='{.data.password}' | base64 -d"
@@ -1227,7 +1265,7 @@ usage() {
     echo "Components:"
     echo "  all | devops       Deploy the entire platform"
     echo "  data-services, keycloak, vault, monitoring, forgejo, woodpecker, argocd,"
-    echo "  headlamp, external-dns, external-secrets, velero,"
+    echo "  headlamp, homepage, external-dns, external-secrets, velero,"
     echo "  cluster-autoscaler, storage, policies, ingress"
     echo "  db-users           Create managed-PostgreSQL users (once per database)"
     echo "  loki-auth          (Re)generate Loki ingest credentials + ingress"
@@ -1269,6 +1307,7 @@ main() {
                 reloader)            add_helm_repos && install_reloader ;;
                 argocd)              add_helm_repos && install_argocd ;;
                 headlamp)            add_helm_repos && install_headlamp ;;
+                homepage)            add_helm_repos && install_homepage ;;
                 external-dns)        add_helm_repos && install_external_dns ;;
                 external-secrets)    add_helm_repos && install_external_secrets ;;
                 velero)              add_helm_repos && install_velero ;;

@@ -109,6 +109,7 @@ For a private repository, register the credentials with ArgoCD as well
 - https://grafana.localhost — dashboards
 - https://prometheus.localhost — metrics
 - https://headlamp.localhost — cluster UI
+- https://home.localhost — Homepage: links to all of the above
 
 ## Credentials
 
@@ -146,8 +147,30 @@ Keycloak-generated OIDC secrets are written to `k8s/scripts/local/oidc-secrets.e
 ```bash
 kubectl get pods -n envoy-gateway-system
 kubectl get svc -n envoy-gateway-system   # the Envoy data-plane LoadBalancer
-kubectl get ingress -A
+kubectl get gateway -A                    # ADDRESS empty means no LoadBalancer IP
 ```
+
+### Gateway stuck with no ADDRESS (`AddressNotAssigned`)
+
+Almost always Traefik. Rancher Desktop's k3s installs it from a packaged manifest
+on **every start**, and its klipper-lb pod takes host ports 80/443 — so Envoy's
+own LoadBalancer Service stays `<pending>`, the Gateway never gets an address,
+and nothing is reachable. The give-away:
+
+```bash
+kubectl get pods -n kube-system | grep svclb   # svclb-envoy-... Pending
+```
+
+Clear it, and note that this is why the fix has to be re-run after a Rancher
+Desktop restart:
+
+```bash
+./devhub cluster --env local
+```
+
+`quickstart` checks for this as the "Cluster prerequisites" step, so
+`./devhub quickstart` re-runs it on its own. To stop Traefik coming back at all:
+**Rancher Desktop → Preferences → Kubernetes → uncheck "Enable Traefik"**.
 
 ### Service communication over HTTPS fails
 

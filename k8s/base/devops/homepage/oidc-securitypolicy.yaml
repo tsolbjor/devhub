@@ -1,0 +1,47 @@
+# Authentication for Homepage.
+#
+# Homepage has no authentication of its own, and the page is a complete index of
+# the platform's internal hostnames — exactly the thing not to serve anonymously.
+# Gateway API has no built-in auth, so this uses Envoy Gateway's SecurityPolicy,
+# the same extension the Loki push endpoint uses for basic auth. The gateway runs
+# the whole OIDC code flow against Keycloak and only then forwards the request,
+# so the pod itself never sees an unauthenticated caller and needs no auth
+# sidecar (an oauth2-proxy deployment would be a second thing to run, upgrade and
+# secure for a job the data plane already does).
+#
+# Endpoints are split on purpose:
+#   authorizationEndpoint  the browser is redirected there, so it must be the
+#                          public hostname
+#   tokenEndpoint          Envoy calls it from inside the cluster, so it uses the
+#                          Keycloak Service. On local this is also the only thing
+#                          that works: glibc resolves *.localhost to 127.0.0.1
+#                          before DNS, so a keycloak.localhost token call from a
+#                          pod would hit the pod itself.
+#
+# The client secret comes from homepage-oidc-secret, which setup-keycloak.sh
+# creates. Envoy Gateway requires the key to be named "client-secret".
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: homepage-oidc
+  namespace: homepage
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: homepage
+  oidc:
+    provider:
+      issuer: "https://keycloak.${DOMAIN}/realms/devops"
+      authorizationEndpoint: "https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/auth"
+      tokenEndpoint: "http://keycloak-service.keycloak.svc.cluster.local:8080/realms/devops/protocol/openid-connect/token"
+    clientID: homepage
+    clientSecret:
+      name: homepage-oidc-secret
+    scopes:
+      - openid
+      - email
+      - profile
+      - groups
+    redirectURL: "https://home.${DOMAIN}/oauth2/callback"
+    logoutPath: "/logout"

@@ -6,7 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Kubernetes DevOps platform with three layers:
 1. **Infrastructure (OpenTofu)** — provisions K8s clusters and managed data services on UpCloud, Azure, GCP, or AWS
-2. **Platform cluster (Helm/K8s + ArgoCD)** — DevOps services (Keycloak, Vault, Forgejo, Woodpecker CI, ArgoCD, Prometheus/Grafana/Loki/Tempo/Alloy, Envoy Gateway, cert-manager, External-DNS, Kyverno, Reloader, Velero, Headlamp)
+2. **Platform cluster (Helm/K8s + ArgoCD)** — DevOps services (Keycloak, Vault, Forgejo, Woodpecker CI, ArgoCD, Prometheus/Grafana/Loki/Tempo/Alloy, Envoy Gateway, cert-manager, External-DNS, Kyverno, Reloader, Velero, Headlamp,
+   Homepage)
 3. **Workload cluster** — lean K8s cluster running developer apps, managed by platform ArgoCD via ApplicationSets
 
 Platform environments: `local` (Rancher Desktop/WSL2), `upcloud-dev`, `upcloud-prod`, `azure-dev`, `azure-prod`, `gcp-dev`, `gcp-prod`, `aws-dev`, `aws-prod`.
@@ -185,7 +186,7 @@ from that list.
 | Owner | Components | Why |
 |-------|-----------|-----|
 | `deploy.sh` (imperative) | Envoy Gateway, Keycloak (operator), Vault, Forgejo, ArgoCD | GitOps cannot install itself; these hold the bootstrap credentials and the ingress path |
-| ArgoCD (`k8s/argocd/platform-appset.yaml`) | cert-manager, external-dns, external-secrets, monitoring, loki, tempo, alloy, kyverno, reloader, woodpecker, headlamp, velero | reconciled from git; drift self-heals |
+| ArgoCD (`k8s/argocd/platform-appset.yaml`) | cert-manager, external-dns, external-secrets, monitoring, loki, tempo, alloy, kyverno, reloader, woodpecker, headlamp, homepage, velero | reconciled from git; drift self-heals |
 | ArgoCD (`k8s/argocd/apps/forgejo-appset.yaml`) | developer apps | matrix of Forgejo repos × clusters labelled `devhub.io/role=workload` |
 
 Registering a workload cluster is enough to start receiving apps — no manifest edit.
@@ -246,6 +247,9 @@ groups). Client secrets come from `secrets.env` / `manual-secrets.env`.
 - **NetworkPolicies**: default-deny ingress in every platform namespace; Vault
   reachable only from the gateway, ESO and Prometheus.
 - **Headlamp**: curated read-only ClusterRole — no Secrets, no pod exec.
+- **Homepage**: links only, no service API tokens, no cluster RBAC. It has no
+  authentication of its own — an Envoy Gateway `SecurityPolicy` runs the Keycloak
+  OIDC flow at the gateway, so the page never serves an anonymous request.
 - **Ingress**: Envoy Gateway (Gateway API). One `Gateway` owns listeners and TLS;
   each service owns an `HTTPRoute` in its own namespace. cert-manager issues one
   certificate per listener through the gateway shim.
@@ -286,6 +290,7 @@ devhub/
 │   │   │   ├── keycloak/              #   Keycloak CR for the operator
 │   │   │   ├── forgejo/               #   values (git, packages, registry)
 │   │   │   ├── woodpecker/            #   values + CI namespace RBAC
+│   │   │   ├── homepage/              #   link-portal values + OIDC SecurityPolicy
 │   │   │   ├── gateway/               #   Envoy Gateway values
 │   │   │   ├── kyverno/               #   values + platform policies
 │   │   │   ├── reloader/              #   values
@@ -335,7 +340,7 @@ devhub/
 - YAML files must not have duplicate keys (silent override) — the validator enforces this
 - Cloud overlay envs symlink `devops/` from their shared cloud overlay; only `config.yaml` is per-env
 - New platform component: add base values, per-cloud overlay values, an entry in `platform-appset.yaml`, a chart pin at the top of `deploy.sh`, and (if bootstrap-critical) an install function
-- Routing is Gateway API: add a listener to `overlays/<env>/devops/gateway.yaml` and an `HTTPRoute` to `httproutes.yaml`; never an Ingress
+- Routing is Gateway API: add a listener to `overlays/<env>/devops/gateway.yaml` and an `HTTPRoute` to `httproutes.yaml`; never an Ingress. A new local hostname also needs a line in `k8s/scripts/windows/setup-hosts.ps1`, or it resolves in WSL and 404s in the Windows browser
 - Keycloak is the **operator** (`k8s.keycloak.org/v2beta1`), pod `keycloak-0`, service `keycloak-service:8080`
 - GCP OAuth client must be created manually (no Terraform resource) → `manual-secrets.env`
 - AWS Cognito domain prefix and all bucket names are globally unique; prefix with the account/project

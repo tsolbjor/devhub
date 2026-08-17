@@ -210,7 +210,8 @@ export KUBECONFIG=gcp-dev/kubeconfig
 ```
 
 After the handover, change cert-manager, external-dns, external-secrets, the
-monitoring stack, Kyverno, Reloader, Headlamp and Velero **through git** — ArgoCD
+monitoring stack, Kyverno, Reloader, Headlamp, Homepage and Velero **through
+git** — ArgoCD
 self-heals manual `helm upgrade`s away. See [OPERATIONS.md](OPERATIONS.md).
 
 ### Step 6: Verify

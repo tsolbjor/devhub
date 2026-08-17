@@ -186,7 +186,8 @@ Alerts fire when this stops working: `VeleroBackupFailed`,
 ```
 
 After the handover ArgoCD reconciles cert-manager, external-dns, external-secrets,
-the monitoring stack, Kyverno, Reloader, Woodpecker, Headlamp and Velero from this
+the monitoring stack, Kyverno, Reloader, Woodpecker, Headlamp, Homepage and
+Velero from this
 repository. Change them with a commit; a manual `helm upgrade` is reverted by
 self-heal.
 
@@ -245,6 +246,11 @@ kubectl get quota,limitrange,networkpolicy -n devhub-<app>
   their own Workload Identity/IRSA service account.
 - **Headlamp** reads a curated resource list. It cannot read Secrets and cannot
   exec into pods; use `kubectl` under your own identity for that.
+- **Homepage** holds no credentials and talks to nothing: it is a static list of
+  links, so there are no service API tokens to leak. It has no login of its own
+  either — an Envoy Gateway `SecurityPolicy` runs the Keycloak OIDC flow before
+  the request reaches the pod, which is what keeps the platform's hostnames off
+  the public internet.
 
 ---
 

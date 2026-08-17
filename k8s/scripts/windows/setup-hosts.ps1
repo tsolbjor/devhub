@@ -34,7 +34,10 @@ $Domains = @(
     "api.localhost",
     "auth.localhost",
     "hello.localhost",
-    # DevOps domains
+    # DevOps domains — one per Gateway listener in
+    # k8s/overlays/local/devops/gateway.yaml. Adding a listener there without
+    # adding it here means the service works in-cluster and 404s from Windows.
+    "home.localhost",
     "keycloak.localhost",
     "vault.localhost",
     "git.localhost",
@@ -42,7 +45,8 @@ $Domains = @(
     "registry.localhost",
     "argocd.localhost",
     "grafana.localhost",
-    "prometheus.localhost"
+    "prometheus.localhost",
+    "headlamp.localhost"
 )
 
 $HostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"

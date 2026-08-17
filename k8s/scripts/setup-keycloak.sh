@@ -157,7 +157,7 @@ configure_groups_scope() {
 
     kcadm update realms/${REALM}/default-default-client-scopes/${scope_id} -r ${REALM} 2>/dev/null || true
 
-    for client_name in "grafana" "argocd" "forgejo" "vault" "headlamp"; do
+    for client_name in "grafana" "argocd" "forgejo" "vault" "headlamp" "homepage"; do
         local client_id=$(kcadm get clients -r ${REALM} --fields id,clientId 2>/dev/null | grep "\"clientId\" : \"${client_name}\"" -B 1 | grep "\"id\"" | cut -d'"' -f4 || echo "")
         if [[ -n "$client_id" ]]; then
             kcadm update clients/${client_id}/default-client-scopes/${scope_id} -r ${REALM} 2>/dev/null || true
@@ -315,6 +315,21 @@ configure_clients() {
         --from-literal=clientSecret="${headlamp_secret}" \
         --from-literal=issuerURL="${headlamp_issuer}" \
         --from-literal=scopes="openid,profile,email,groups" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    # Homepage
+    #
+    # Homepage itself is not an OIDC client — Envoy Gateway is, on its behalf
+    # (k8s/base/devops/homepage/oidc-securitypolicy.yaml). Hence the gateway's
+    # callback path as the redirect URI, and a secret holding only the client
+    # secret under the key Envoy Gateway expects.
+    log_info "Configuring Homepage OIDC client..."
+    local homepage_secret=$(create_client "homepage" \
+        "https://home.${DOMAIN}/oauth2/callback")
+    echo "HOMEPAGE_OIDC_SECRET=${homepage_secret}" >> "${secrets_file}"
+
+    kubectl create secret generic homepage-oidc-secret -n homepage \
+        --from-literal=client-secret="${homepage_secret}" \
         --dry-run=client -o yaml | kubectl apply -f -
 
     log_info "Client secrets saved to: ${secrets_file}"

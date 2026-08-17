@@ -126,6 +126,18 @@ spec:
         certificateRefs:
           - kind: Secret
             name: headlamp-tls
+    - name: homepage-https
+      protocol: HTTPS
+      port: 443
+      hostname: "home.${DOMAIN}"
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: homepage-tls
     - name: loki-https
       protocol: HTTPS
       port: 443

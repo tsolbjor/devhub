@@ -23,6 +23,7 @@ on separate workload clusters.
 | **Reloader** | Restarts workloads when their secrets rotate |
 | **Velero** | Cluster object and volume backups |
 | **Headlamp** | Read-only cluster UI (SSO) |
+| **Homepage** | Link portal for the services above (SSO at the gateway) |
 
 ## Environments
 
@@ -226,7 +227,8 @@ git diff.
 
 `./deploy.sh --env <env> gitops` applies an ApplicationSet that makes ArgoCD own
 cert-manager, external-dns, external-secrets, the monitoring stack, Kyverno,
-Reloader, Woodpecker, Headlamp and Velero — reconciled from this repository, with
+Reloader, Woodpecker, Headlamp, Homepage and Velero — reconciled from this
+repository, with
 drift self-healed.
 
 Developer apps are discovered automatically: a matrix of Forgejo repositories in

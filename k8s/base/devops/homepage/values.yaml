@@ -1,0 +1,162 @@
+# Homepage — the platform's front door.
+#
+# A link portal, nothing more. Every widget Homepage offers wants an API token
+# for the service it summarises (Grafana, ArgoCD, Prometheus), which would mean a
+# Vault secret and an ExternalSecret per tile to restate numbers Grafana already
+# shows. Links cost nothing and cannot leak anything, so the tiles stay links.
+#
+# Authentication is not Homepage's job either: it has none. The
+# `homepage-oidc-securitypolicy.yaml` SecurityPolicy puts Keycloak OIDC in front
+# of the HTTPRoute, so the gateway rejects anonymous requests before they reach
+# the pod. Without it this page would hand every internal hostname to anyone who
+# found it.
+
+image:
+  repository: ghcr.io/gethomepage/homepage
+  tag: v1.2.0
+
+# No Kubernetes integration: this is a link page, so the pod has no reason to
+# hold a ServiceAccount that can read the cluster. Headlamp is what inspects the
+# cluster, and it authenticates the user first.
+enableRbac: false
+serviceAccount:
+  create: true
+  name: homepage
+
+# Homepage v1 refuses requests whose Host header is not listed — an open
+# instance is otherwise trivially proxied. The gateway only ever sends
+# home.${DOMAIN}.
+env:
+  - name: HOMEPAGE_ALLOWED_HOSTS
+    value: "home.${DOMAIN}"
+
+service:
+  main:
+    ports:
+      http:
+        port: 3000
+
+# Routing is a Gateway API HTTPRoute (overlays/<env>/devops/httproutes.yaml)
+ingress:
+  main:
+    enabled: false
+
+# The homepage namespace enforces the "restricted" Pod Security Standard.
+# readOnlyRootFilesystem is deliberately absent: it is not part of "restricted",
+# and Homepage's Next.js server writes its cache under /app/.next at startup.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  privileged: false
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 128Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi
+
+config:
+  # Kubernetes and Docker service discovery both need cluster credentials; the
+  # service list below is written out instead.
+  kubernetes:
+    mode: disable
+  docker:
+
+  bookmarks:
+    - Documentation:
+        - Gateway API:
+            - abbr: GW
+              href: https://gateway-api.sigs.k8s.io/
+        - Kyverno policies:
+            - abbr: KY
+              href: https://kyverno.io/policies/
+        - Velero:
+            - abbr: VE
+              href: https://velero.io/docs/
+
+  services:
+    - Delivery:
+        - Forgejo:
+            href: https://git.${DOMAIN}
+            description: Git repositories, packages, container registry
+            icon: forgejo.png
+        - Woodpecker:
+            href: https://ci.${DOMAIN}
+            description: CI pipelines
+            icon: woodpecker-ci.png
+        - ArgoCD:
+            href: https://argocd.${DOMAIN}
+            description: GitOps — platform and application sync state
+            icon: argocd.png
+
+    - Observability:
+        - Grafana:
+            href: https://grafana.${DOMAIN}
+            description: Dashboards, logs (Loki), traces (Tempo)
+            icon: grafana.png
+        - Prometheus:
+            href: https://prometheus.${DOMAIN}
+            description: Metrics and alert rules
+            icon: prometheus.png
+
+    - Platform:
+        - Keycloak:
+            href: https://keycloak.${DOMAIN}
+            description: Single sign-on, realms, identity federation
+            icon: keycloak.png
+        - Vault:
+            href: https://vault.${DOMAIN}
+            description: Secrets — the source of truth for the platform
+            icon: vault.png
+        - Headlamp:
+            href: https://headlamp.${DOMAIN}
+            description: Cluster view — workloads, events, logs
+            icon: kubernetes.png
+
+  widgets:
+    # No `resources` widget: it reports the pod's own cgroup, not the cluster,
+    # which reads as a cluster metric and is not one. No `kubernetes` widget
+    # either — that one needs RBAC.
+    - datetime:
+        text_size: xl
+        format:
+          dateStyle: long
+          timeStyle: short
+          hour12: false
+    - search:
+        provider: duckduckgo
+        target: _blank
+
+  settingsString: |
+    title: DevHub
+    description: Platform services
+    headerStyle: boxed
+    hideVersion: true
+    layout:
+      Delivery:
+        style: row
+        columns: 3
+      Observability:
+        style: row
+        columns: 2
+      Platform:
+        style: row
+        columns: 3
+
+persistence:
+  logs:
+    enabled: true
+    type: emptyDir
+    mountPath: /app/config/logs

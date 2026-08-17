@@ -24,7 +24,10 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-REPO_ROOT="${SCRIPT_DIR}/../.."
+# Resolved, not "${SCRIPT_DIR}/../..": paths derived from it are printed, and the
+# repo-relative display trims a "${REPO_ROOT}/" prefix that an unresolved path
+# never matches — every such path came out absolute with a /../.. in the middle.
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DEVHUB="${REPO_ROOT}/devhub"
 
 ENV=""
@@ -231,6 +234,17 @@ det_gateway() {
     [[ -n "$(kc get gateway devhub -n gateway -o jsonpath='{.status.addresses[0].value}' 2>/dev/null)" ]]
 }
 
+# Cluster prerequisites, which on local means Traefik is gone (it holds the host
+# ports Envoy Gateway needs) and the node carries role=ci. Both are undone by a
+# Rancher Desktop restart — k3s re-adds Traefik from its packaged manifest — so
+# this has to be a checked step, not a one-off, or the Gateway step later stalls
+# at AddressNotAssigned with nothing pointing at the cause.
+det_cluster() {
+    [[ "$ENV" == "local" ]] || return 0
+    kc get svc traefik -n kube-system >/dev/null 2>&1 && return 1
+    kc get nodes -l role=ci -o name 2>/dev/null | grep -q .
+}
+
 det_policy() {
     kc get deploy -n kyverno -o name 2>/dev/null | grep -q admission || return 1
     kc get clusterpolicy devhub-namespace-defaults >/dev/null
@@ -280,6 +294,7 @@ if [[ "$ENV" == "local" ]]; then
     step prereq    "Prerequisites confirmed"                 det_prereq    "preflight --env ${ENV}"
     step certs     "Local CA and TLS certificates"           det_certs     "ca --env ${ENV}"
     step reachable "Cluster reachable"                       det_reachable ""
+    step cluster   "Cluster prerequisites (host ports free)" det_cluster   "cluster --env ${ENV}"
     step deployed  "Platform deployed"                       det_deployed  "deploy --env ${ENV}"
     step gateway   "Gateway serving traffic"                 det_gateway   "deploy --env ${ENV} gateway"
     step policy    "Kyverno policies active"                 det_policy    "deploy --env ${ENV} kyverno"
@@ -339,6 +354,51 @@ refresh_state() {
     done
 }
 
+# Which account to sign in with is not guessable, and the two that exist are easy
+# to confuse: the Keycloak *admin console* account lives in the master realm and
+# cannot log in to any platform service, while platform-admin is a user in the
+# devops realm and is the one SSO expects.
+#
+# The passwords are shown as commands rather than values on purpose. This runs on
+# every --status, so printing them would scatter credentials through shell
+# scrollback and any shared screen, for a file the user can read at will.
+print_login_hint() {
+    local secrets="${ENV_DIR}/oidc-secrets.env"
+    [[ -f "$secrets" ]] || return 0
+
+    echo ""
+    echo -e "  ${BOLD}Sign in as:${NC} platform-admin   (realm 'devops' — SSO for every service)"
+    echo "              grep PLATFORM_ADMIN_PASSWORD k8s/scripts/${ENV}/oidc-secrets.env"
+    echo "              Keycloak's own admin console is a separate account:"
+    echo "              kubectl get secret keycloak-admin-secret -n keycloak \\"
+    echo "                -o jsonpath='{.data.password}' | base64 -d"
+}
+
+# WSL leaves half the setup outside this shell's reach. The cluster is reachable
+# from Linux, but the browser runs on Windows, where *.localhost is not in the
+# hosts file and the local CA is not in the trust store — so every URL printed
+# above is NXDOMAIN or a certificate warning until one PowerShell script has run.
+# It needs Administrator, so it cannot be run from here; saying so beats letting
+# someone conclude the platform is broken.
+windows_setup_note() {
+    local domain="$1"
+    [[ "$ENV" == "local" ]] || return 0
+    grep -qi microsoft /proc/version 2>/dev/null || return 0
+
+    # The hosts entries and the CA install are one script, so the entries being
+    # present means the whole thing has been run and there is nothing to say.
+    local win_hosts="/mnt/c/Windows/System32/drivers/etc/hosts"
+    if [[ -r "$win_hosts" ]] && grep -q "home\.${domain}" "$win_hosts" 2>/dev/null; then
+        return 0
+    fi
+
+    echo ""
+    log_warn "WSL detected. Windows cannot open these URLs yet: *.${domain} is missing"
+    log_warn "from the Windows hosts file and the local CA is not trusted there."
+    log_warn "Run once in an Administrator PowerShell, from the repository root:"
+    log_warn "  cd k8s\\scripts\\windows; .\\setup-all.ps1"
+}
+
 print_checklist() {
     local i mark colour
     echo ""
@@ -359,7 +419,15 @@ print_checklist() {
     if [[ $NEXT_INDEX -lt 0 ]]; then
         log_info "Everything is done for ${ENV}"
         local d; d="$(yaml_get "$CONFIG_FILE" domain)"
-        [[ -n "$d" ]] && echo "         https://argocd.${d}  https://grafana.${d}  https://git.${d}  https://ci.${d}"
+        if [[ -n "$d" ]]; then
+            echo ""
+            # One URL, not eight: Homepage lists the rest, so this is the only
+            # address anyone has to remember.
+            echo -e "  ${BOLD}Start here:${NC} https://home.${d}"
+            echo "              Homepage links to every service. Sign in with Keycloak."
+        fi
+        print_login_hint
+        windows_setup_note "$d"
         # The one thing no script can do for you: the GitOps repo has to exist.
         local repo; repo="$(yaml_get "$CONFIG_FILE" gitops.repoUrl)"
         if [[ -n "$repo" ]] && kc get application -n argocd -o jsonpath='{.items[*].status.sync.status}' 2>/dev/null | grep -q Unknown; then

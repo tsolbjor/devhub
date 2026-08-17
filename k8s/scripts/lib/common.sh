@@ -379,6 +379,7 @@ add_helm_repos() {
         "argo https://argoproj.github.io/argo-helm"
         "external-dns https://kubernetes-sigs.github.io/external-dns/"
         "headlamp https://kubernetes-sigs.github.io/headlamp/"
+        "jameswynn https://jameswynn.github.io/helm-charts"
         "woodpecker https://woodpecker-ci.org/"
         "kyverno https://kyverno.github.io/kyverno"
         "stakater https://stakater.github.io/stakater-charts"

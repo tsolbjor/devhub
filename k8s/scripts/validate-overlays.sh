@@ -253,6 +253,7 @@ check_helm_template() {
         [external-dns]="external-dns/external-dns:1.21.1"
         [external-secrets]="external-secrets/external-secrets:2.9.0"
         [headlamp]="headlamp/headlamp:0.44.0"
+        [homepage]="jameswynn/homepage:2.1.0"
         [velero]="vmware-tanzu/velero:12.1.0"
         [kyverno]="kyverno/kyverno:3.8.2"
         [reloader]="stakater/reloader:2.2.16"

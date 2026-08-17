@@ -123,6 +123,18 @@ spec:
         certificateRefs:
           - kind: Secret
             name: local-tls-secret
+    - name: homepage-https
+      protocol: HTTPS
+      port: 443
+      hostname: "home.${DOMAIN}"
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: local-tls-secret
 ---
 # Everything on :80 is redirected to :443. Attached to the http listener only.
 apiVersion: gateway.networking.k8s.io/v1

@@ -103,6 +103,14 @@ metadata:
     name: headlamp
     pod-security.kubernetes.io/enforce: restricted
 ---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: homepage
+  labels:
+    name: homepage
+    pod-security.kubernetes.io/enforce: restricted
+---
 # CI job pods live here, never beside Forgejo itself. That keeps build containers
 # out of the namespace holding the database credentials, and lets one
 # NetworkPolicy govern all CI egress.

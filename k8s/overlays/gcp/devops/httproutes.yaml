@@ -156,3 +156,20 @@ spec:
     - backendRefs:
         - name: loki-gateway
           port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: homepage
+  namespace: homepage
+spec:
+  parentRefs:
+    - name: devhub
+      namespace: gateway
+      sectionName: homepage-https
+  hostnames:
+    - "home.${DOMAIN}"
+  rules:
+    - backendRefs:
+        - name: homepage
+          port: 3000
