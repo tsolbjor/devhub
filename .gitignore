@@ -6,23 +6,32 @@
 *.sln
 
 # Terraform/OpenTofu
+# Note: .terraform.lock.hcl is deliberately NOT ignored — provider checksums must
+# be committed so every apply and CI run resolves the same provider versions.
 *.tfstate
 *.tfstate.*
 .terraform/
-.terraform.lock.hcl
+
+# Backend and variable files hold account-specific values (state bucket names,
+# allowed API CIDRs, admin group IDs). Only the *.example templates are tracked.
+backend.hcl
+*.tfvars
+!*.tfvars.example
 
 # Kubernetes
 *kubeconfig*.yaml
 *kubeconfig*.yml
 
-# Generated local secrets (vault init keys, OIDC secrets, etc.)
-k8s/scripts/local/
-k8s/scripts/azure-dev/
-k8s/scripts/azure-prod/
-k8s/scripts/gcp-dev/
-k8s/scripts/gcp-prod/
-k8s/scripts/aws-dev/
-k8s/scripts/aws-prod/
+# Generated per-environment files: kubeconfig, tofu-outputs.env, secrets.env,
+# manual-secrets.env, vault-init-keys.json, oidc-secrets.env.
+#
+# Ignore every environment directory rather than listing them: the previous
+# explicit list covered aws/azure/gcp dev+prod and local, but not upcloud-dev,
+# upcloud-prod, or any of the four *-workload environments — so their credentials
+# were one `git add -A` away from being committed.
+k8s/scripts/*/
+!k8s/scripts/lib/
+!k8s/scripts/windows/
 
 # Editor
 *.swp

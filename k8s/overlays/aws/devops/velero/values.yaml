@@ -1,0 +1,31 @@
+# Velero AWS overlay — S3 backup location + EBS snapshots via IRSA.
+#
+# Bucket and role come from tofu/aws/modules/cluster/platform.tf
+# (outputs: velero_bucket, velero_irsa_role_arn).
+
+# Plugin version tracks the Velero app version in the pinned chart (1.18.x).
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.14.2
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+serviceAccount:
+  server:
+    annotations:
+      eks.amazonaws.com/role-arn: "${VELERO_IRSA_ROLE_ARN}"
+
+configuration:
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: ${VELERO_BUCKET}
+      default: true
+      config:
+        region: ${AWS_REGION}
+  volumeSnapshotLocation:
+    - name: default
+      provider: aws
+      config:
+        region: ${AWS_REGION}

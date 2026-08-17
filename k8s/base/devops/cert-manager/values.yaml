@@ -39,3 +39,12 @@ prometheus:
   enabled: true
   servicemonitor:
     enabled: true
+
+# Gateway API support: cert-manager watches Gateway listeners annotated with
+# cert-manager.io/cluster-issuer and issues one certificate per listener (the
+# "gateway shim"), and solves HTTP-01 challenges with a temporary HTTPRoute.
+# Without this flag the Gateway's listeners would have no certificates at all.
+config:
+  apiVersion: controller.config.cert-manager.io/v1alpha1
+  kind: ControllerConfiguration
+  enableGatewayAPI: true

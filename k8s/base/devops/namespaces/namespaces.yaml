@@ -1,4 +1,7 @@
-# All namespaces for the DevOps cluster
+# All namespaces for the DevOps cluster.
+#
+# Each namespace carries Pod Security Admission labels. Platform components that
+# genuinely need host access stay at "baseline"; everything else is "restricted".
 ---
 apiVersion: v1
 kind: Namespace
@@ -6,6 +9,7 @@ metadata:
   name: cert-manager
   labels:
     name: cert-manager
+    pod-security.kubernetes.io/enforce: restricted
 ---
 apiVersion: v1
 kind: Namespace
@@ -13,6 +17,7 @@ metadata:
   name: external-dns
   labels:
     name: external-dns
+    pod-security.kubernetes.io/enforce: restricted
 ---
 apiVersion: v1
 kind: Namespace
@@ -20,6 +25,12 @@ metadata:
   name: keycloak
   labels:
     name: keycloak
+    # The Keycloak Operator's own Deployment (upstream manifest, not ours) sets no
+    # seccompProfile and does not drop capabilities, so "restricted" would reject
+    # it. The Keycloak instance itself is hardened through the CR's podTemplate,
+    # which we do control.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
 ---
 apiVersion: v1
 kind: Namespace
@@ -27,6 +38,10 @@ metadata:
   name: vault
   labels:
     name: vault
+    # The chart drops all capabilities and runs non-root; restricted also needs a
+    # seccompProfile, which the chart does not set.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
 ---
 apiVersion: v1
 kind: Namespace
@@ -34,6 +49,7 @@ metadata:
   name: external-secrets
   labels:
     name: external-secrets
+    pod-security.kubernetes.io/enforce: restricted
 ---
 apiVersion: v1
 kind: Namespace
@@ -41,13 +57,27 @@ metadata:
   name: monitoring
   labels:
     name: monitoring
+    # node-exporter needs hostNetwork, hostPID and hostPath mounts to read node
+    # metrics — none of which "baseline" permits, so the level has to be
+    # privileged. `warn: baseline` still flags anything else added here.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: baseline
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: gitlab
+  name: forgejo
   labels:
-    name: gitlab
+    name: forgejo
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: woodpecker
+  labels:
+    name: woodpecker
+    pod-security.kubernetes.io/enforce: restricted
 ---
 apiVersion: v1
 kind: Namespace
@@ -55,6 +85,7 @@ metadata:
   name: data-services
   labels:
     name: data-services
+    pod-security.kubernetes.io/enforce: baseline
 ---
 apiVersion: v1
 kind: Namespace
@@ -62,13 +93,7 @@ metadata:
   name: argocd
   labels:
     name: argocd
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: crossplane-system
-  labels:
-    name: crossplane-system
+    pod-security.kubernetes.io/enforce: restricted
 ---
 apiVersion: v1
 kind: Namespace
@@ -76,3 +101,49 @@ metadata:
   name: headlamp
   labels:
     name: headlamp
+    pod-security.kubernetes.io/enforce: restricted
+---
+# CI job pods live here, never beside Forgejo itself. That keeps build containers
+# out of the namespace holding the database credentials, and lets one
+# NetworkPolicy govern all CI egress.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: woodpecker-ci
+  labels:
+    name: woodpecker-ci
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velero
+  labels:
+    name: velero
+    pod-security.kubernetes.io/enforce: baseline
+---
+# Gateway API: the Gateway object and its TLS secrets.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway
+  labels:
+    name: gateway
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kyverno
+  labels:
+    name: kyverno
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: reloader
+  labels:
+    name: reloader
+    pod-security.kubernetes.io/enforce: restricted

@@ -1,10 +1,11 @@
-# GCP Workload Cluster configuration
-# Runs application workloads only — no platform services (Keycloak, Vault, GitLab, ArgoCD).
-# Data service values are NOT needed here (they live on the platform cluster).
-# External-DNS GSA is populated by: sync-tofu-outputs.sh --env gcp-workload
+# GCP workload cluster configuration
+#
+# Runs application workloads only — no platform services (Keycloak, Vault,
+# Forgejo, ArgoCD). Infrastructure values come from
+# k8s/scripts/gcp-workload/tofu-outputs.env (written by sync-tofu-outputs.sh).
 
-# Domain for app ingresses (can share the same domain as the platform cluster) - UPDATE THIS
-domain: example.com
+# Domain for app ingresses - UPDATE THIS
+domain: apps.example.com
 
 # TLS via cert-manager (Let's Encrypt)
 tls:
@@ -13,12 +14,11 @@ tls:
   clusterIssuer: letsencrypt-prod
 
 # Email for ACME certificate notifications - UPDATE THIS
-acmeEmail: admin@example.com
+acmeEmail: admin@apps.example.com
 
-# External-DNS — populated by sync-tofu-outputs.sh
-externalDns:
-  gsaEmail: PENDING_TOFU_OUTPUT
-
-# Vault API URL on the platform cluster (for External Secrets Operator)
-# UPDATE THIS after the platform cluster is running
+# Platform cluster endpoints this cluster depends on - UPDATE THESE
+# Vault: External Secrets Operator pulls app secrets from here.
+# Loki:  Alloy ships this cluster's logs here (requires the platform Loki
+#        ingress, which deploy.sh only creates when auth is configured).
 platformVaultUrl: https://vault.example.com
+platformLokiUrl: https://loki.example.com

@@ -1,0 +1,538 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =============================================================================
+# devhub — single entry point for the whole platform
+# =============================================================================
+# Thin dispatcher. It contains no deployment logic of its own: every command
+# forwards to the script that already owns that step. What it does own is the
+# knowledge you otherwise have to keep in your head:
+#
+#   - which tofu directory an environment maps to
+#   - that platform envs use deploy.sh and workload envs use deploy-workload.sh
+#   - that `tofu init` needs -backend-config=backend.hcl
+#   - which kubeconfig belongs to which environment
+#
+# Run without arguments for help.
+# =============================================================================
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS="${ROOT_DIR}/k8s/scripts"
+
+source "${SCRIPTS}/lib/common.sh"
+
+# ─── Environment → directory mapping ─────────────────────────────────
+
+# tofu_dir <env> — prints the tofu root module for an environment, or nothing
+# for `local` (which has no infrastructure to provision).
+tofu_dir() {
+    local env="$1" cloud
+    [[ "$env" == "local" ]] && return 0
+    cloud="${env%%-*}"
+    case "$env" in
+        *-workload) echo "${ROOT_DIR}/tofu/${cloud}/workload" ;;
+        *-dev)      echo "${ROOT_DIR}/tofu/${cloud}/dev" ;;
+        *-prod)     echo "${ROOT_DIR}/tofu/${cloud}/prod" ;;
+    esac
+}
+
+is_workload() { [[ "$1" == *-workload ]]; }
+
+# Cloud for a given environment name (common.sh's env_cloud reads the global $ENV).
+env_cloud_of() {
+    [[ "$1" == "local" ]] && { echo local; return; }
+    echo "${1%%-*}"
+}
+
+# Validate an environment name against the lists in lib/common.sh.
+check_env() {
+    local env="${1:-}"
+    if [[ -z "$env" ]]; then
+        log_error "Missing --env"
+        echo "  Platform: ${PLATFORM_ENVS}"
+        echo "  Workload: ${WORKLOAD_ENVS}"
+        exit 1
+    fi
+    if [[ " ${PLATFORM_ENVS} ${WORKLOAD_ENVS} " != *" ${env} "* ]]; then
+        log_error "Unknown environment: ${env}"
+        echo "  Platform: ${PLATFORM_ENVS}"
+        echo "  Workload: ${WORKLOAD_ENVS}"
+        exit 1
+    fi
+}
+
+# ─── Argument parsing ────────────────────────────────────────────────
+#
+# Everything after the command is scanned for --env / --platform-env; the rest is
+# passed through untouched, so `devhub infra apply --env aws-dev -auto-approve`
+# and `devhub deploy --env local keycloak` both work.
+
+COMMAND="${1:-help}"
+[[ $# -gt 0 ]] && shift
+
+ENV_ARG=""
+PLATFORM_ENV_ARG=""
+PASSTHROUGH=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --env)          ENV_ARG="${2:-}"; shift 2 ;;
+        --platform-env) PLATFORM_ENV_ARG="${2:-}"; shift 2 ;;
+        --)             shift; PASSTHROUGH+=("$@"); break ;;
+        *)              PASSTHROUGH+=("$1"); shift ;;
+    esac
+done
+
+# ─── Commands ────────────────────────────────────────────────────────
+
+cmd_infra() {
+    check_env "$ENV_ARG"
+
+    local action="${PASSTHROUGH[0]:-plan}"
+    local dir
+    dir="$(tofu_dir "$ENV_ARG")"
+
+    if [[ -z "$dir" ]]; then
+        log_error "The 'local' environment has no infrastructure layer"
+        log_error "Use: ./devhub bootstrap --env local"
+        exit 1
+    fi
+    [[ -d "$dir" ]] || { log_error "No tofu module at ${dir}"; exit 1; }
+
+    # Drop the action from the passthrough list before forwarding the remainder.
+    local extra=("${PASSTHROUGH[@]:1}")
+
+    cd "$dir"
+
+    case "$action" in
+        init)
+            if [[ -f backend.hcl ]]; then
+                log_info "tofu init -backend-config=backend.hcl  (${dir#"${ROOT_DIR}/"})"
+                exec tofu init -backend-config=backend.hcl "${extra[@]+"${extra[@]}"}"
+            fi
+            log_warn "No backend.hcl in ${dir#"${ROOT_DIR}/"} — state would be local."
+            log_warn "State holds database passwords and IdP secrets, so it belongs in the cloud."
+            log_warn ""
+            log_warn "Generate it (and terraform.tfvars, and your domain in config.yaml):"
+            log_warn "  ./devhub setup --env ${ENV_ARG}"
+            exit 1
+            ;;
+        plan|apply|destroy|output|show|refresh|state|import|validate|fmt|providers)
+            if [[ ! -d .terraform ]]; then
+                log_error "Module not initialised. Run: ./devhub infra init --env ${ENV_ARG}"
+                exit 1
+            fi
+            if [[ ! -f terraform.tfvars && -f terraform.tfvars.example ]]; then
+                log_warn "No terraform.tfvars — api_allowed_cidrs has no default and is required."
+                log_warn "  cp ${dir#"${ROOT_DIR}/"}/terraform.tfvars.example ${dir#"${ROOT_DIR}/"}/terraform.tfvars"
+            fi
+            log_info "tofu ${action}  (${dir#"${ROOT_DIR}/"})"
+            exec tofu "$action" "${extra[@]+"${extra[@]}"}"
+            ;;
+        *)
+            log_error "Unknown infra action: ${action}"
+            echo "  init | plan | apply | destroy | output | show | state | import | validate"
+            exit 1
+            ;;
+    esac
+}
+
+cmd_quickstart() {
+    local extra=()
+    [[ -n "$ENV_ARG" ]] && extra=(--env "$ENV_ARG")
+    exec "${SCRIPTS}/quickstart.sh" "${extra[@]+"${extra[@]}"}" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+}
+
+cmd_preflight() {
+    check_env "$ENV_ARG"
+    exec "${SCRIPTS}/preflight.sh" --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+}
+
+cmd_setup() {
+    check_env "$ENV_ARG"
+    exec "${SCRIPTS}/setup-env.sh" --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+}
+
+cmd_sync() {
+    check_env "$ENV_ARG"
+    exec "${SCRIPTS}/sync-tofu-outputs.sh" --env "$ENV_ARG"
+}
+
+cmd_deploy() {
+    check_env "$ENV_ARG"
+    # Routing the two deploy scripts is the whole point: running deploy.sh
+    # against a workload env (or the reverse) is an easy and expensive mistake.
+    if is_workload "$ENV_ARG"; then
+        exec "${SCRIPTS}/deploy-workload.sh" --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+    fi
+    exec "${SCRIPTS}/deploy.sh" --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+}
+
+# Everything after `infra apply`: sync outputs, create database users, then run the
+# full platform setup (deploy → Vault → Keycloak → secrets → GitOps).
+#
+# The steps between apply and setup-all.sh are mechanical, so they belong here
+# rather than in a runbook someone has to remember:
+#   git clone → devhub init → devhub plan → devhub apply → devhub bootstrap
+cmd_bootstrap() {
+    check_env "$ENV_ARG"
+
+    if is_workload "$ENV_ARG"; then
+        log_error "bootstrap is for platform clusters. For a workload cluster:"
+        log_error "  ./devhub deploy --env ${ENV_ARG} && ./devhub register --env ${ENV_ARG}"
+        exit 1
+    fi
+
+    local config="${ROOT_DIR}/k8s/overlays/${ENV_ARG}/config.yaml"
+    local dir
+    dir="$(tofu_dir "$ENV_ARG")"
+
+    if [[ -n "$dir" ]]; then
+        # Cloud environment: infrastructure has to exist and be readable first.
+        # Presence of .terraform is not enough — `tofu init -backend=false` (what CI
+        # runs) creates it without any state at all. Reading an output is the real test.
+        if ! (cd "$dir" && tofu output -json >/dev/null 2>&1); then
+            log_error "No readable tofu state for ${ENV_ARG} (${dir#"${ROOT_DIR}/"})"
+            log_error "Provision the infrastructure first:"
+            log_error "  ./devhub init  --env ${ENV_ARG}"
+            log_error "  ./devhub plan  --env ${ENV_ARG}"
+            log_error "  ./devhub apply --env ${ENV_ARG}"
+            exit 1
+        fi
+
+        # Pull the tofu outputs and kubeconfig unless a previous sync already did.
+        if [[ ! -f "${SCRIPTS}/${ENV_ARG}/tofu-outputs.env" ]]; then
+            log_phase "Syncing tofu outputs (no tofu-outputs.env yet)"
+            "${SCRIPTS}/sync-tofu-outputs.sh" --env "$ENV_ARG"
+        else
+            log_info "tofu outputs already synced — run './devhub sync --env ${ENV_ARG}' to refresh"
+        fi
+
+        # The domain is the one value no automation can guess.
+        local domain
+        domain="$(yaml_get "$config" domain)"
+        if [[ -z "$domain" || "$domain" == *example.com ]]; then
+            log_error "Set your real domain before bootstrapping: ${config}"
+            log_error "  domain:    ${domain:-<empty>}   → e.g. dev.yourcompany.com"
+            log_error "  acmeEmail: → an address you monitor (Let's Encrypt notices)"
+            log_error ""
+            log_error "DNS for *.<domain> must eventually point at the ingress LoadBalancer."
+            log_error "It does not exist yet; certificates are issued once the records resolve."
+            exit 1
+        fi
+
+        # Managed PostgreSQL has no Terraform resource for local users, and both
+        # Keycloak and GitLab fail to start without them — so this runs before the
+        # platform deploy, not after.
+        if [[ "$(env_cloud_of "$ENV_ARG")" != "upcloud" ]]; then
+            log_phase "Creating managed PostgreSQL users"
+            "${SCRIPTS}/deploy.sh" --env "$ENV_ARG" db-users deploy
+        fi
+    fi
+
+    "${SCRIPTS}/setup-all.sh" --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+
+    # Closing DNS reminder with the address people actually need.
+    if [[ -n "$dir" ]]; then
+        local lb
+        lb="$(KUBECONFIG="${SCRIPTS}/${ENV_ARG}/kubeconfig" kubectl get svc -n ingress-nginx \
+              ingress-nginx-controller \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}' \
+              2>/dev/null || true)"
+        if [[ -n "$lb" ]]; then
+            echo ""
+            log_info "DNS: point *.$(yaml_get "$config" domain) at ${lb}"
+            log_info "Certificates are issued automatically once those records resolve."
+        fi
+    fi
+}
+
+cmd_register() {
+    check_env "$ENV_ARG"
+    is_workload "$ENV_ARG" || { log_error "register takes a *-workload environment"; exit 1; }
+
+    local extra=()
+    [[ -n "$PLATFORM_ENV_ARG" ]] && extra=(--platform-env "$PLATFORM_ENV_ARG")
+    exec "${SCRIPTS}/register-workload-cluster.sh" --env "$ENV_ARG" "${extra[@]+"${extra[@]}"}"
+}
+
+cmd_vault()    { check_env "$ENV_ARG"; exec "${SCRIPTS}/setup-vault.sh"    --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"; }
+cmd_keycloak() { check_env "$ENV_ARG"; exec "${SCRIPTS}/setup-keycloak.sh" --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"; }
+cmd_ca()       { check_env "$ENV_ARG"; exec "${SCRIPTS}/setup-ca.sh"       --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"; }
+cmd_cluster()  { check_env "$ENV_ARG"; exec "${SCRIPTS}/setup-cluster.sh"  --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"; }
+
+# Named shortcuts for deploy.sh actions people run often enough to forget the syntax.
+cmd_secrets()  { check_env "$ENV_ARG"; exec "${SCRIPTS}/deploy.sh" --env "$ENV_ARG" platform-secrets deploy; }
+cmd_gitops()   { check_env "$ENV_ARG"; exec "${SCRIPTS}/deploy.sh" --env "$ENV_ARG" gitops deploy; }
+cmd_dbusers()  { check_env "$ENV_ARG"; exec "${SCRIPTS}/deploy.sh" --env "$ENV_ARG" db-users deploy; }
+
+cmd_status() {
+    check_env "$ENV_ARG"
+    if is_workload "$ENV_ARG"; then
+        # No deploy-workload.sh status action, so report the workload namespaces here.
+        ENV="$ENV_ARG"
+        SCRIPT_DIR="$SCRIPTS"
+        setup_paths
+        use_env_kubeconfig
+
+        for ns in ingress-nginx cert-manager external-dns external-secrets monitoring; do
+            echo "=== ${ns} ==="
+            kubectl get pods -n "$ns" 2>/dev/null || echo "  namespace not found"
+            echo ""
+        done
+
+        echo "=== application namespaces ==="
+        kubectl get ns --no-headers 2>/dev/null | awk '$1 ~ /^devhub/ { print $1, $2 }' || true
+        echo ""
+        echo "=== secret store ==="
+        kubectl get clustersecretstore 2>/dev/null || echo "  none"
+        return
+    fi
+    exec "${SCRIPTS}/deploy.sh" --env "$ENV_ARG" all status
+}
+
+cmd_validate() {
+    exec "${SCRIPTS}/validate-overlays.sh" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+}
+
+# Print the export line for an environment's kubeconfig. Use with eval:
+#   eval "$(./devhub kubeconfig --env aws-dev)"
+cmd_kubeconfig() {
+    check_env "$ENV_ARG"
+    local kc="${SCRIPTS}/${ENV_ARG}/kubeconfig"
+    if [[ ! -f "$kc" ]]; then
+        log_error "No kubeconfig for ${ENV_ARG} at ${kc}"
+        log_error "Run: ./devhub sync --env ${ENV_ARG}"
+        exit 1
+    fi
+    echo "export KUBECONFIG=${kc}"
+}
+
+# What state is each environment in? Answers "where did I get to" without
+# digging through directories.
+cmd_envs() {
+    printf '%-18s %-8s %-9s %-8s %-8s %-10s %s\n' \
+        ENVIRONMENT CLOUD TOFU BACKEND TFVARS OUTPUTS KUBECONFIG
+    local env dir tofu_state backend tfvars outputs kubeconfig cloud
+    for env in ${PLATFORM_ENVS} ${WORKLOAD_ENVS}; do
+        [[ -f "${ROOT_DIR}/k8s/overlays/${env}/config.yaml" ]] || continue
+
+        cloud="$([[ "$env" == "local" ]] && echo local || echo "${env%%-*}")"
+        dir="$(tofu_dir "$env")"
+
+        tofu_state="-"; backend="-"; tfvars="-"
+        if [[ -n "$dir" && -d "$dir" ]]; then
+            [[ -d "${dir}/.terraform" ]] && tofu_state="init" || tofu_state="no"
+            [[ -f "${dir}/terraform.tfstate" ]] && tofu_state="local!"
+            [[ -f "${dir}/backend.hcl" ]] && backend="yes" || backend="no"
+            [[ -f "${dir}/terraform.tfvars" ]] && tfvars="yes" || tfvars="no"
+        fi
+
+        outputs="no"
+        [[ -f "${SCRIPTS}/${env}/tofu-outputs.env" ]] && outputs="yes"
+        [[ "$env" == "local" ]] && outputs="n/a"
+
+        kubeconfig="no"
+        [[ -f "${SCRIPTS}/${env}/kubeconfig" ]] && kubeconfig="yes"
+        [[ "$env" == "local" ]] && kubeconfig="current-context"
+
+        printf '%-18s %-8s %-9s %-8s %-8s %-10s %s\n' \
+            "$env" "$cloud" "$tofu_state" "$backend" "$tfvars" "$outputs" "$kubeconfig"
+    done
+    echo ""
+    echo "TOFU 'local!' means state is on this machine — migrate it to the remote backend."
+}
+
+# Are the tools this repo needs actually installed?
+cmd_doctor() {
+    local required=(kubectl helm jq envsubst openssl curl git)
+    local optional=(tofu argocd vault aws az gcloud upctl shellcheck python3)
+    local missing=0 tool
+
+    echo "Required:"
+    for tool in "${required[@]}"; do
+        if command -v "$tool" &>/dev/null; then
+            printf '  %-12s %s\n' "$tool" "$(command -v "$tool")"
+        else
+            printf '  %-12s MISSING\n' "$tool"
+            missing=$((missing + 1))
+        fi
+    done
+
+    echo ""
+    echo "Optional (needed per cloud / for specific steps):"
+    for tool in "${optional[@]}"; do
+        if command -v "$tool" &>/dev/null; then
+            printf '  %-12s %s\n' "$tool" "$(command -v "$tool")"
+        else
+            printf '  %-12s not installed\n' "$tool"
+        fi
+    done
+
+    echo ""
+    if command -v python3 &>/dev/null && ! python3 -c 'import yaml' 2>/dev/null; then
+        log_warn "python3 has no pyyaml — validate skips the duplicate-key check"
+    fi
+
+    if [[ $missing -gt 0 ]]; then
+        log_error "${missing} required tool(s) missing"
+        exit 1
+    fi
+    log_info "All required tools present"
+}
+
+cmd_completion() {
+    cat <<'EOF'
+# bash completion for devhub — add to ~/.bashrc:
+#   source <(/path/to/devhub completion)
+_devhub() {
+    local cur prev commands envs
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    commands="quickstart setup infra sync deploy bootstrap register vault keycloak
+              ca cluster secrets gitops db-users status validate kubeconfig envs
+              doctor completion help preflight"
+    envs="local upcloud-dev upcloud-prod azure-dev azure-prod gcp-dev gcp-prod
+          aws-dev aws-prod upcloud-workload azure-workload gcp-workload aws-workload"
+
+    case "$prev" in
+        --env|--platform-env) COMPREPLY=($(compgen -W "$envs" -- "$cur")); return ;;
+        infra) COMPREPLY=($(compgen -W "init plan apply destroy output state" -- "$cur")); return ;;
+        quickstart) COMPREPLY=($(compgen -W "--env --status --run-remaining-steps --auto" -- "$cur")); return ;;
+        setup) COMPREPLY=($(compgen -W "--env --dry-run --force --non-interactive --yes" -- "$cur")); return ;;
+        preflight) COMPREPLY=($(compgen -W "--env --dns --recheck" -- "$cur")); return ;;
+    esac
+
+    if [[ $COMP_CWORD -eq 1 ]]; then
+        COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+    else
+        COMPREPLY=($(compgen -W "--env --platform-env" -- "$cur"))
+    fi
+}
+complete -F _devhub devhub ./devhub
+EOF
+}
+
+cmd_help() {
+    cat <<EOF
+devhub — entry point for the DevHub platform
+
+Usage: ./devhub <command> --env <environment> [args...]
+
+Start here
+  quickstart [--env <env>]        guided, resumable walkthrough of everything below.
+                                  Detects what is already done; re-run any time.
+                                    --status                  checklist only
+                                    --run-remaining-steps     run all pending steps
+                                                              (still asks before apply)
+                                    --auto                    as above, answer yes to all
+
+Getting a platform up (the individual steps)
+  preflight --env <env>           external prerequisites: cloud account, CLI auth,
+                                  domain, DNS zone + delegation. --dns re-checks DNS
+  setup --env <env>               wizard: backend.hcl, terraform.tfvars, domain,
+                                  and optionally creates the state bucket
+  init  --env <env>               tofu init (needs backend.hcl + terraform.tfvars)
+  plan  --env <env>               tofu plan — read it before applying
+  apply --env <env>               tofu apply — provisions cluster + data services
+  bootstrap --env <env>           everything else: sync, db users, deploy, Vault,
+                                  Keycloak, secrets → Vault, GitOps handover
+
+  For local there is no infrastructure layer: ./devhub bootstrap --env local
+
+Infrastructure (long form)
+  infra init|plan|apply|destroy|output|state|import --env <env>
+  sync --env <env>                tofu outputs → generated env files + kubeconfig
+
+Platform / workload clusters
+  deploy --env <env> [component]  deploy.sh (platform) or deploy-workload.sh (workload)
+  register --env <env> [--platform-env <env>]
+                                  register a workload cluster with the platform
+  ca --env <env>                  local CA + TLS certificates
+  cluster --env <env>             nginx-ingress + cluster resources
+
+Identity, secrets, GitOps
+  vault --env <env> [action]      init | unseal | configure | seed-secrets | status
+  keycloak --env <env> [action]   realm | clients | user | idp | all
+  secrets --env <env>             move platform credentials into Vault + ExternalSecrets
+  gitops --env <env>              hand platform components over to ArgoCD
+  db-users --env <env>            create managed-PostgreSQL users (once per database)
+
+Inspection
+  status --env <env>              pods, Vault seal state, backups, GitOps state
+  envs                            what state every environment is in
+  validate [--helm] [env...]      static checks (no cluster needed)
+  doctor                          check required tooling
+  kubeconfig --env <env>          print the KUBECONFIG export line
+  completion                      bash completion script
+
+Environments
+  platform: ${PLATFORM_ENVS}
+  workload: ${WORKLOAD_ENVS}
+
+Examples
+  # Don't know where to start
+  ./devhub quickstart
+  ./devhub quickstart --env local --run-remaining-steps
+
+  # Local, from a fresh clone
+  ./devhub bootstrap --env local
+
+  # Cloud, from a fresh clone
+  ./devhub setup --env aws-dev        # answers 4 questions, writes the config
+  ./devhub init  --env aws-dev
+  ./devhub plan  --env aws-dev
+  ./devhub apply --env aws-dev
+  ./devhub bootstrap --env aws-dev
+
+  # Non-interactive equivalent (CI)
+  ./devhub setup --env aws-dev --non-interactive --yes \
+      --domain dev.example.org --acme-email ops@example.org \
+      --api-cidrs 203.0.113.4/32 --state-bucket acme-tfstate --create-state-store
+
+  # Individual steps stay available
+  ./devhub deploy --env aws-dev keycloak
+  ./devhub vault  --env aws-dev status
+  eval "\$(./devhub kubeconfig --env aws-dev)"
+
+Every command forwards to the script that owns the step; nothing is duplicated
+here. See k8s/docs/OPERATIONS.md for day-two procedures.
+EOF
+}
+
+case "$COMMAND" in
+    quickstart)     cmd_quickstart ;;
+    preflight)      cmd_preflight ;;
+    setup)          cmd_setup ;;
+    # `init`, `plan`, `apply` and friends are aliases for the infra layer, so the
+    # top-level flow reads: clone → init → plan → apply → bootstrap.
+    init|plan|apply|destroy|output|refresh|import)
+        PASSTHROUGH=("$COMMAND" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"})
+        cmd_infra
+        ;;
+    infra)          cmd_infra ;;
+    sync)           cmd_sync ;;
+    deploy)         cmd_deploy ;;
+    bootstrap)      cmd_bootstrap ;;
+    register)       cmd_register ;;
+    vault)          cmd_vault ;;
+    keycloak)       cmd_keycloak ;;
+    ca)             cmd_ca ;;
+    cluster)        cmd_cluster ;;
+    secrets)        cmd_secrets ;;
+    gitops)         cmd_gitops ;;
+    db-users)       cmd_dbusers ;;
+    status)         cmd_status ;;
+    validate)       cmd_validate ;;
+    kubeconfig)     cmd_kubeconfig ;;
+    envs)           cmd_envs ;;
+    doctor)         cmd_doctor ;;
+    completion)     cmd_completion ;;
+    help|-h|--help) cmd_help ;;
+    *)
+        log_error "Unknown command: ${COMMAND}"
+        echo ""
+        cmd_help
+        exit 1
+        ;;
+esac

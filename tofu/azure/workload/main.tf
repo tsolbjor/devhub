@@ -138,8 +138,34 @@ resource "azurerm_kubernetes_cluster" "main" {
     network_policy = "azure"
   }
 
+  # API server exposure: empty allow-list = private cluster, no public endpoint.
+  private_cluster_enabled = length(var.api_allowed_cidrs) == 0
+
+  dynamic "api_server_access_profile" {
+    for_each = length(var.api_allowed_cidrs) > 0 ? [1] : []
+    content {
+      authorized_ip_ranges = var.api_allowed_cidrs
+    }
+  }
+
+  dynamic "azure_active_directory_role_based_access_control" {
+    for_each = length(var.aad_admin_group_object_ids) > 0 ? [1] : []
+    content {
+      azure_rbac_enabled     = true
+      admin_group_object_ids = var.aad_admin_group_object_ids
+    }
+  }
+
+  local_account_disabled = length(var.aad_admin_group_object_ids) > 0
+
   oidc_issuer_enabled       = true
   workload_identity_enabled = true
+}
+
+variable "aad_admin_group_object_ids" {
+  description = "Entra ID group object IDs granted cluster-admin via Azure RBAC (disables the local admin account when set)"
+  type        = list(string)
+  default     = []
 }
 
 # ─── External-DNS Workload Identity ──────────────────────────────────

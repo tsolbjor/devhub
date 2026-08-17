@@ -13,7 +13,8 @@ global:
 # Server
 server:
   replicas: 2
-  
+  priorityClassName: platform-critical
+
   resources:
     requests:
       cpu: 100m
@@ -21,29 +22,10 @@ server:
     limits:
       cpu: 500m
       memory: 512Mi
-  
-  # Ingress - annotations overridden by overlays
+
+  # Routing is a Gateway API HTTPRoute (overlays/<env>/devops/httproutes.yaml).
   ingress:
-    enabled: true
-    ingressClassName: nginx
-    annotations: {}
-    tls: true
-  
-  # SSO config - domain overridden by overlays
-  config:
-    url: https://argocd.example.com
-    oidc.config: |
-      name: Keycloak
-      issuer: https://keycloak.example.com/realms/devops
-      clientID: argocd
-      clientSecret: $oidc.keycloak.clientSecret
-      requestedScopes: ["openid", "profile", "email", "groups"]
-    
-    # RBAC
-    policy.default: role:readonly
-    policy.csv: |
-      g, /devops-admins, role:admin
-      g, /developers, role:readonly
+    enabled: false
 
   # Metrics
   metrics:
@@ -54,6 +36,7 @@ server:
 # Repo server
 repoServer:
   replicas: 2
+  priorityClassName: platform-critical
   resources:
     requests:
       cpu: 100m
@@ -70,6 +53,7 @@ repoServer:
 # Application controller
 controller:
   replicas: 1  # Controller runs as singleton
+  priorityClassName: platform-critical
   resources:
     requests:
       cpu: 250m
@@ -121,20 +105,47 @@ notifications:
 dex:
   enabled: false
 
-# Config Management Plugins (optional)
 configs:
+  # ─── Server configuration and SSO ──────────────────────────────────
+  # Domain is substituted per environment by the overlays.
+  cm:
+    create: true
+    url: https://argocd.example.com
+    oidc.config: |
+      name: Keycloak
+      issuer: https://keycloak.example.com/realms/devops
+      clientID: argocd
+      clientSecret: $oidc.keycloak.clientSecret
+      requestedScopes: ["openid", "profile", "email", "groups"]
+
+  # ─── RBAC ──────────────────────────────────────────────────────────
+  # Group names must match the Keycloak realm groups exactly
+  # (devops-admins / developers / viewers). The previous policy referenced
+  # "/devops-admins" and an "admins" group that does not exist, so nobody
+  # was ever granted admin and everyone silently fell back to read-only.
+  rbac:
+    create: true
+    policy.default: role:readonly
+    policy.csv: |
+      g, devops-admins, role:admin
+      g, developers, role:readonly
+      g, viewers, role:readonly
+    scopes: "[groups, email]"
+
+  params:
+    # Application controller resource tracking
+    application.instanceLabelKey: argocd.argoproj.io/instance
+    # TLS is terminated by the Gateway, so the server speaks plain HTTP inside
+    # the cluster. Without this it would redirect to HTTPS in a loop.
+    server.insecure: true
+
   # Known hosts for Git SSH
   ssh:
     knownHosts: |
-      # Add your GitLab server's SSH host key
-      # gitlab.devops.example.com ssh-rsa AAAA...
-  
-  # Repository credentials
-  repositories:
-    # Configure via UI or CLI after installation
-    # Or use credentialTemplates for URL patterns
-  
-  # Keycloak client secret (reference from external secret)
+      # Add the Forgejo SSH host key if repositories are cloned over SSH
+      # git.example.com ssh-ed25519 AAAA...
+
+  # Keycloak client secret — populated by setup-keycloak.sh
   secret:
     extra:
       oidc.keycloak.clientSecret: ""

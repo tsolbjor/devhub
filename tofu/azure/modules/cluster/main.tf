@@ -66,9 +66,14 @@ resource "azurerm_kubernetes_cluster" "main" {
     node_count     = var.aks_node_count
     vm_size        = var.aks_node_vm_size
     vnet_subnet_id = azurerm_subnet.aks.id
+
+    auto_scaling_enabled = true
+    min_count            = var.aks_node_min_count
+    max_count            = var.aks_node_max_count
+
     node_labels = {
       prefix = var.prefix
-      role   = "worker"
+      role   = "platform"
       env    = lookup(var.tags, "Environment", "dev")
     }
   }
@@ -82,9 +87,69 @@ resource "azurerm_kubernetes_cluster" "main" {
     network_policy = "azure"
   }
 
+  # API server exposure. An empty api_allowed_cidrs means no public endpoint at
+  # all (private cluster, reachable over the VNet / VPN / `az aks command invoke`).
+  private_cluster_enabled = length(var.api_allowed_cidrs) == 0
+
+  dynamic "api_server_access_profile" {
+    for_each = length(var.api_allowed_cidrs) > 0 ? [1] : []
+    content {
+      authorized_ip_ranges = var.api_allowed_cidrs
+    }
+  }
+
+  # Entra ID + Azure RBAC for cluster auth. When admin groups are supplied the
+  # local admin kubeconfig (a permanent cluster-admin client cert that cannot be
+  # revoked or audited per-user) is switched off.
+  dynamic "azure_active_directory_role_based_access_control" {
+    for_each = length(var.aad_admin_group_object_ids) > 0 ? [1] : []
+    content {
+      azure_rbac_enabled     = true
+      admin_group_object_ids = var.aad_admin_group_object_ids
+    }
+  }
+
+  local_account_disabled = length(var.aad_admin_group_object_ids) > 0
+
   # Enable Workload Identity for keyless Azure service access (MSI)
   oidc_issuer_enabled       = true
   workload_identity_enabled = true
+
+  lifecycle {
+    # Node count is owned by the AKS autoscaler once it is running.
+    ignore_changes = [default_node_pool[0].node_count]
+  }
+}
+
+# Tainted, spot-backed pool for Woodpecker CI jobs so build containers never share a
+# node with Vault/Keycloak/PostgreSQL.
+resource "azurerm_kubernetes_cluster_node_pool" "ci" {
+  count = var.ci_node_max_count > 0 ? 1 : 0
+
+  name                  = "ci"
+  kubernetes_cluster_id = azurerm_kubernetes_cluster.main.id
+  vm_size               = var.ci_node_vm_size
+  vnet_subnet_id        = azurerm_subnet.aks.id
+
+  auto_scaling_enabled = true
+  min_count            = var.ci_node_min_count
+  max_count            = var.ci_node_max_count
+
+  priority        = var.ci_node_spot ? "Spot" : "Regular"
+  eviction_policy = var.ci_node_spot ? "Delete" : null
+  spot_max_price  = var.ci_node_spot ? -1 : null
+
+  node_labels = merge(
+    { role = "ci" },
+    var.ci_node_spot ? { "kubernetes.azure.com/scalesetpriority" = "spot" } : {}
+  )
+
+  node_taints = concat(
+    ["workload=ci:NoSchedule"],
+    var.ci_node_spot ? ["kubernetes.azure.com/scalesetpriority=spot:NoSchedule"] : []
+  )
+
+  tags = var.tags
 }
 
 # ─── PostgreSQL Flexible Server ───────────────────────────────────────
@@ -111,30 +176,31 @@ resource "random_password" "pg_admin" {
 # Passwords for application DB users.
 # NOTE: The users themselves must be created post-provision — Azure PostgreSQL
 # Flexible Server has no Terraform resource for local user creation. Use
-# setup scripts to run: CREATE USER keycloak/gitlab WITH PASSWORD '...';
+# setup scripts to run: CREATE USER keycloak/forgejo WITH PASSWORD '...';
 resource "random_password" "pg_keycloak" {
   length  = 32
   special = false
 }
 
-resource "random_password" "pg_gitlab" {
+resource "random_password" "pg_forgejo" {
   length  = 32
   special = false
 }
 
 resource "azurerm_postgresql_flexible_server" "main" {
-  name                   = "${var.prefix}-postgresql"
-  resource_group_name    = azurerm_resource_group.main.name
-  location               = azurerm_resource_group.main.location
-  version                = var.pg_version
-  sku_name               = var.pg_sku_name
-  storage_mb             = var.pg_storage_mb
-  backup_retention_days  = var.pg_backup_retention_days
-  administrator_login    = "pgadmin"
-  administrator_password = random_password.pg_admin.result
-  delegated_subnet_id    = azurerm_subnet.postgresql.id
-  private_dns_zone_id    = azurerm_private_dns_zone.postgresql.id
-  tags                   = var.tags
+  name                         = "${var.prefix}-postgresql"
+  resource_group_name          = azurerm_resource_group.main.name
+  location                     = azurerm_resource_group.main.location
+  version                      = var.pg_version
+  sku_name                     = var.pg_sku_name
+  storage_mb                   = var.pg_storage_mb
+  backup_retention_days        = var.pg_backup_retention_days
+  geo_redundant_backup_enabled = var.pg_geo_redundant_backup
+  administrator_login          = "pgadmin"
+  administrator_password       = random_password.pg_admin.result
+  delegated_subnet_id          = azurerm_subnet.postgresql.id
+  private_dns_zone_id          = azurerm_private_dns_zone.postgresql.id
+  tags                         = var.tags
 
   dynamic "high_availability" {
     for_each = var.pg_ha_mode != "Disabled" ? [1] : []
@@ -154,8 +220,8 @@ resource "azurerm_postgresql_flexible_server_database" "keycloak" {
   charset   = "UTF8"
 }
 
-resource "azurerm_postgresql_flexible_server_database" "gitlab" {
-  name      = "gitlabhq_production"
+resource "azurerm_postgresql_flexible_server_database" "forgejo" {
+  name      = "forgejo"
   server_id = azurerm_postgresql_flexible_server.main.id
   collation = "en_US.utf8"
   charset   = "UTF8"
@@ -190,49 +256,30 @@ resource "azurerm_storage_account" "main" {
   account_replication_type = var.storage_replication
   min_tls_version          = "TLS1_2"
 
+  # Blob versioning + soft delete so a bad backup overwrite is recoverable.
+  blob_properties {
+    versioning_enabled = true
+
+    delete_retention_policy {
+      days = 30
+    }
+
+    container_delete_retention_policy {
+      days = 30
+    }
+  }
+
   # Enable hierarchical namespace for better performance (optional, uncomment for Premium)
   # is_hns_enabled = false
 
   tags = var.tags
 }
 
-# GitLab storage containers — native Azure Blob (provider: AzureRM)
-# No S3 shim required: GitLab CE Helm chart supports Azure Blob natively
-resource "azurerm_storage_container" "gitlab_artifacts" {
-  name                  = "gitlab-artifacts"
-  storage_account_id    = azurerm_storage_account.main.id
-  container_access_type = "private"
-}
-
-resource "azurerm_storage_container" "gitlab_uploads" {
-  name                  = "gitlab-uploads"
-  storage_account_id    = azurerm_storage_account.main.id
-  container_access_type = "private"
-}
-
-resource "azurerm_storage_container" "gitlab_packages" {
-  name                  = "gitlab-packages"
-  storage_account_id    = azurerm_storage_account.main.id
-  container_access_type = "private"
-}
-
-resource "azurerm_storage_container" "gitlab_lfs" {
-  name                  = "gitlab-lfs"
-  storage_account_id    = azurerm_storage_account.main.id
-  container_access_type = "private"
-}
-
-resource "azurerm_storage_container" "gitlab_registry" {
-  name                  = "gitlab-registry"
-  storage_account_id    = azurerm_storage_account.main.id
-  container_access_type = "private"
-}
-
-resource "azurerm_storage_container" "gitlab_backups" {
-  name                  = "gitlab-backups"
-  storage_account_id    = azurerm_storage_account.main.id
-  container_access_type = "private"
-}
+# NOTE: Forgejo keeps repositories, LFS objects, packages and container registry
+# blobs on its PersistentVolume. Forgejo supports local disk or S3-compatible
+# storage only — Azure Blob and GCS have no S3 API — so rather than run two
+# storage models, every cloud uses the volume, and Velero backs it up alongside
+# the managed PostgreSQL PITR.
 
 # ─── Entra ID Identity Provider for Keycloak ─────────────────────────
 #
@@ -278,7 +325,7 @@ resource "azuread_application" "keycloak_idp" {
     description          = "Full access to DevOps platform administration"
     display_name         = "DevOps Admins"
     enabled              = true
-    id                   = "a1b2c3d4-0001-4000-8000-devopsadmins0" # stable GUID
+    id                   = "a1b2c3d4-0001-4000-8000-0de70d5ad115" # stable GUID: devops-admins
     value                = "devops-admins"
   }
 
@@ -287,7 +334,7 @@ resource "azuread_application" "keycloak_idp" {
     description          = "Developer access to DevOps platform services"
     display_name         = "Developers"
     enabled              = true
-    id                   = "a1b2c3d4-0002-4000-8000-developers000" # stable GUID
+    id                   = "a1b2c3d4-0002-4000-8000-0de7e10be5c0" # stable GUID: developers
     value                = "developers"
   }
 
@@ -296,7 +343,7 @@ resource "azuread_application" "keycloak_idp" {
     description          = "Read-only access to DevOps platform services"
     display_name         = "Viewers"
     enabled              = true
-    id                   = "a1b2c3d4-0003-4000-8000-viewers000000" # stable GUID
+    id                   = "a1b2c3d4-0003-4000-8000-00a1e0e50003" # stable GUID: viewers
     value                = "viewers"
   }
 }
@@ -310,40 +357,6 @@ resource "azuread_application_password" "keycloak_idp" {
   application_id = azuread_application.keycloak_idp.id
   display_name   = "keycloak-idp-secret"
   end_date       = "2099-01-01T00:00:00Z"
-}
-
-# ─── Workload Identity for GitLab ─────────────────────────────────────
-#
-# Allows GitLab pods (webservice, sidekiq) to access Blob Storage without
-# a storage account key. The K8s service account "gitlab" in the "gitlab"
-# namespace exchanges its projected OIDC token for an Azure AD token.
-#
-# AKS must have oidc_issuer_enabled and workload_identity_enabled (set above).
-
-resource "azurerm_user_assigned_identity" "gitlab" {
-  name                = "${var.prefix}-gitlab-identity"
-  resource_group_name = azurerm_resource_group.main.name
-  location            = azurerm_resource_group.main.location
-  tags                = var.tags
-}
-
-# Grant the identity read/write access to all blob containers in the storage account
-resource "azurerm_role_assignment" "gitlab_storage" {
-  scope                = azurerm_storage_account.main.id
-  role_definition_name = "Storage Blob Data Contributor"
-  principal_id         = azurerm_user_assigned_identity.gitlab.principal_id
-}
-
-# Federated credential: trusts tokens from the AKS OIDC issuer for the
-# "gitlab" service account in the "gitlab" namespace.
-# The GitLab Helm chart creates this SA when global.serviceAccount.enabled=true.
-resource "azurerm_federated_identity_credential" "gitlab" {
-  name                = "${var.prefix}-gitlab-fedcred"
-  resource_group_name = azurerm_resource_group.main.name
-  parent_id           = azurerm_user_assigned_identity.gitlab.id
-  audience            = ["api://AzureADTokenExchange"]
-  issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
-  subject             = "system:serviceaccount:gitlab:gitlab"
 }
 
 # ─── External-DNS Workload Identity ──────────────────────────────────

@@ -126,6 +126,26 @@ resource "google_container_cluster" "main" {
     workload_pool = "${var.project_id}.svc.id.goog"
   }
 
+  # Private nodes (no public IPs); egress goes through Cloud NAT below.
+  private_cluster_config {
+    enable_private_nodes    = true
+    enable_private_endpoint = length(var.api_allowed_cidrs) == 0
+    master_ipv4_cidr_block  = var.master_ipv4_cidr_block
+  }
+
+  dynamic "master_authorized_networks_config" {
+    for_each = length(var.api_allowed_cidrs) > 0 ? [1] : []
+    content {
+      dynamic "cidr_blocks" {
+        for_each = var.api_allowed_cidrs
+        content {
+          cidr_block   = cidr_blocks.value
+          display_name = "allowed-${cidr_blocks.key}"
+        }
+      }
+    }
+  }
+
   remove_default_node_pool = true
   initial_node_count       = 1
 
@@ -191,4 +211,35 @@ resource "google_service_account_iam_member" "external_dns_workload_identity" {
   service_account_id = google_service_account.external_dns.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[external-dns/external-dns]"
+}
+
+variable "master_ipv4_cidr_block" {
+  description = "/28 CIDR for the GKE control plane peering range (must not overlap the VPC)"
+  type        = string
+  default     = "172.17.0.0/28"
+}
+
+# ─── Cloud NAT ────────────────────────────────────────────────────────
+# Private nodes need NAT for image pulls, ACME challenges and webhooks.
+
+resource "google_compute_router" "main" {
+  project = var.project_id
+  name    = "${var.prefix}-router"
+  region  = var.region
+  network = google_compute_network.main.id
+}
+
+resource "google_compute_router_nat" "main" {
+  project = var.project_id
+  name    = "${var.prefix}-nat"
+  router  = google_compute_router.main.name
+  region  = var.region
+
+  nat_ip_allocate_option             = "AUTO_ONLY"
+  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+
+  log_config {
+    enable = true
+    filter = "ERRORS_ONLY"
+  }
 }

@@ -23,9 +23,9 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
 
   tags = merge(var.tags, {
-    Name                                        = "${var.prefix}-public-${count.index + 1}"
-    "kubernetes.io/cluster/${var.prefix}-eks"   = "shared"
-    "kubernetes.io/role/elb"                    = "1"
+    Name                                      = "${var.prefix}-public-${count.index + 1}"
+    "kubernetes.io/cluster/${var.prefix}-eks" = "shared"
+    "kubernetes.io/role/elb"                  = "1"
   })
 }
 
@@ -37,22 +37,29 @@ resource "aws_subnet" "private" {
   availability_zone = var.availability_zones[count.index]
 
   tags = merge(var.tags, {
-    Name                                        = "${var.prefix}-private-${count.index + 1}"
-    "kubernetes.io/cluster/${var.prefix}-eks"   = "shared"
-    "kubernetes.io/role/internal-elb"           = "1"
+    Name                                      = "${var.prefix}-private-${count.index + 1}"
+    "kubernetes.io/cluster/${var.prefix}-eks" = "shared"
+    "kubernetes.io/role/internal-elb"         = "1"
   })
 }
 
-# NAT Gateway (single, in first public subnet — use one per AZ for prod HA)
+# NAT Gateways — one per AZ when nat_gateway_per_az is true (prod HA), otherwise a single
+# shared gateway in the first public subnet (cheaper, but an AZ outage takes egress down).
+locals {
+  nat_gateway_count = var.nat_gateway_per_az ? length(var.availability_zones) : 1
+}
+
 resource "aws_eip" "nat" {
+  count  = local.nat_gateway_count
   domain = "vpc"
-  tags   = merge(var.tags, { Name = "${var.prefix}-nat-eip" })
+  tags   = merge(var.tags, { Name = "${var.prefix}-nat-eip-${count.index + 1}" })
 }
 
 resource "aws_nat_gateway" "main" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public[0].id
-  tags          = merge(var.tags, { Name = "${var.prefix}-nat" })
+  count         = local.nat_gateway_count
+  allocation_id = aws_eip.nat[count.index].id
+  subnet_id     = aws_subnet.public[count.index].id
+  tags          = merge(var.tags, { Name = "${var.prefix}-nat-${count.index + 1}" })
 
   depends_on = [aws_internet_gateway.main]
 }
@@ -74,21 +81,23 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# One private route table per AZ so each AZ can use its own NAT gateway.
 resource "aws_route_table" "private" {
+  count  = length(var.availability_zones)
   vpc_id = aws_vpc.main.id
 
   route {
     cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main.id
+    nat_gateway_id = aws_nat_gateway.main[var.nat_gateway_per_az ? count.index : 0].id
   }
 
-  tags = merge(var.tags, { Name = "${var.prefix}-private-rt" })
+  tags = merge(var.tags, { Name = "${var.prefix}-private-rt-${count.index + 1}" })
 }
 
 resource "aws_route_table_association" "private" {
   count          = length(var.availability_zones)
   subnet_id      = aws_subnet.private[count.index].id
-  route_table_id = aws_route_table.private.id
+  route_table_id = aws_route_table.private[count.index].id
 }
 
 # ─── Security Groups ──────────────────────────────────────────────────
@@ -169,6 +178,19 @@ resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
   role       = aws_iam_role.eks_cluster.name
 }
 
+# KMS key for envelope-encrypting Kubernetes Secrets in etcd.
+resource "aws_kms_key" "eks_secrets" {
+  description             = "${var.prefix} EKS secret envelope encryption"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+  tags                    = var.tags
+}
+
+resource "aws_kms_alias" "eks_secrets" {
+  name          = "alias/${var.prefix}-eks-secrets"
+  target_key_id = aws_kms_key.eks_secrets.key_id
+}
+
 resource "aws_eks_cluster" "main" {
   name     = "${var.prefix}-eks"
   role_arn = aws_iam_role.eks_cluster.arn
@@ -177,7 +199,22 @@ resource "aws_eks_cluster" "main" {
   vpc_config {
     subnet_ids              = concat(aws_subnet.private[*].id, aws_subnet.public[*].id)
     endpoint_private_access = true
-    endpoint_public_access  = true
+
+    # Public endpoint is only enabled when an explicit allow-list is supplied.
+    # api_allowed_cidrs = [] means the API server is reachable from inside the VPC only
+    # (use a bastion, VPN, or SSM port-forward).
+    endpoint_public_access = length(var.api_allowed_cidrs) > 0
+    public_access_cidrs    = length(var.api_allowed_cidrs) > 0 ? var.api_allowed_cidrs : null
+  }
+
+  # Control-plane audit trail — required to investigate anything after the fact.
+  enabled_cluster_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
+
+  encryption_config {
+    provider {
+      key_arn = aws_kms_key.eks_secrets.arn
+    }
+    resources = ["secrets"]
   }
 
   # Enable OIDC issuer for IRSA (IAM Roles for Service Accounts)
@@ -253,7 +290,66 @@ resource "aws_eks_node_group" "main" {
     max_unavailable = 1
   }
 
-  tags = var.tags
+  labels = {
+    role = "platform"
+  }
+
+  # Tags consumed by cluster-autoscaler auto-discovery.
+  tags = merge(var.tags, {
+    "k8s.io/cluster-autoscaler/enabled"           = "true"
+    "k8s.io/cluster-autoscaler/${var.prefix}-eks" = "owned"
+  })
+
+  lifecycle {
+    # desired_size is owned by cluster-autoscaler once it is running.
+    ignore_changes = [scaling_config[0].desired_size]
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_worker_node_policy,
+    aws_iam_role_policy_attachment.eks_cni_policy,
+    aws_iam_role_policy_attachment.eks_ecr_readonly,
+  ]
+}
+
+# Dedicated, tainted node group for Woodpecker CI jobs. Build workloads never share
+# nodes with Vault/Keycloak/PostgreSQL, so a container escape in a CI job does not
+# hand over the platform's secrets. Scales from zero.
+resource "aws_eks_node_group" "ci" {
+  count = var.ci_node_max_count > 0 ? 1 : 0
+
+  cluster_name    = aws_eks_cluster.main.name
+  node_group_name = "${var.prefix}-ci"
+  node_role_arn   = aws_iam_role.eks_nodes.arn
+  subnet_ids      = aws_subnet.private[*].id
+
+  instance_types = [var.ci_node_instance_type]
+  capacity_type  = var.ci_node_capacity_type
+
+  scaling_config {
+    desired_size = var.ci_node_min_count
+    max_size     = var.ci_node_max_count
+    min_size     = var.ci_node_min_count
+  }
+
+  labels = {
+    role = "ci"
+  }
+
+  taint {
+    key    = "workload"
+    value  = "ci"
+    effect = "NO_SCHEDULE"
+  }
+
+  tags = merge(var.tags, {
+    "k8s.io/cluster-autoscaler/enabled"           = "true"
+    "k8s.io/cluster-autoscaler/${var.prefix}-eks" = "owned"
+  })
+
+  lifecycle {
+    ignore_changes = [scaling_config[0].desired_size]
+  }
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_worker_node_policy,
@@ -285,7 +381,7 @@ resource "random_password" "pg_keycloak" {
   special = false
 }
 
-resource "random_password" "pg_gitlab" {
+resource "random_password" "pg_forgejo" {
   length  = 32
   special = false
 }
@@ -310,17 +406,33 @@ resource "aws_db_instance" "main" {
   deletion_protection = var.enable_deletion_protection
   skip_final_snapshot = !var.enable_deletion_protection
 
+  # Point-in-time recovery + a maintenance window that does not overlap the backup window.
+  backup_retention_period = var.rds_backup_retention_days
+  backup_window           = "01:00-02:00"
+  maintenance_window      = "sun:03:00-sun:04:00"
+  copy_tags_to_snapshot   = true
+
+  auto_minor_version_upgrade      = true
+  performance_insights_enabled    = var.rds_performance_insights
+  enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]
+
   tags = var.tags
 }
 
 # ─── ElastiCache Redis ────────────────────────────────────────────────
 #
-# In-VPC Redis with no TLS/auth — security via security group (VPC-only access).
-# For production, consider enabling transit_encryption_enabled + auth_token.
+# TLS in transit + AUTH token, on top of VPC/security-group isolation. Clients
+# connect with rediss:// and the token from a K8s secret.
+
+resource "random_password" "redis_auth" {
+  length  = 64
+  special = false
+}
 
 resource "aws_elasticache_subnet_group" "main" {
-  name_prefix = "${var.prefix}-redis-"
-  subnet_ids  = aws_subnet.private[*].id
+  # ElastiCache subnet groups take a fixed name (no name_prefix support).
+  name       = "${var.prefix}-redis"
+  subnet_ids = aws_subnet.private[*].id
 
   tags = var.tags
 }
@@ -338,135 +450,21 @@ resource "aws_elasticache_replication_group" "main" {
   security_group_ids = [aws_security_group.redis.id]
 
   at_rest_encryption_enabled = true
+  transit_encryption_enabled = true
+  auth_token                 = random_password.redis_auth.result
+  auth_token_update_strategy = "ROTATE"
+
+  snapshot_retention_limit = var.redis_snapshot_retention_days
+  maintenance_window       = "sun:04:00-sun:05:00"
 
   tags = var.tags
 }
 
-# ─── S3 Buckets (GitLab Object Storage) ──────────────────────────────
-#
-# GitLab supports S3 natively — no shim needed.
-# IRSA (IAM Role for Service Accounts) provides keyless access.
-# NOTE: S3 bucket names are globally unique. Adjust var.prefix if conflicts arise.
-
-locals {
-  s3_bucket_prefix = "${var.prefix}-gitlab"
-}
-
-resource "aws_s3_bucket" "gitlab_artifacts" {
-  bucket        = "${local.s3_bucket_prefix}-artifacts"
-  force_destroy = true
-  tags          = var.tags
-}
-
-resource "aws_s3_bucket" "gitlab_uploads" {
-  bucket        = "${local.s3_bucket_prefix}-uploads"
-  force_destroy = true
-  tags          = var.tags
-}
-
-resource "aws_s3_bucket" "gitlab_packages" {
-  bucket        = "${local.s3_bucket_prefix}-packages"
-  force_destroy = true
-  tags          = var.tags
-}
-
-resource "aws_s3_bucket" "gitlab_lfs" {
-  bucket        = "${local.s3_bucket_prefix}-lfs"
-  force_destroy = true
-  tags          = var.tags
-}
-
-resource "aws_s3_bucket" "gitlab_registry" {
-  bucket        = "${local.s3_bucket_prefix}-registry"
-  force_destroy = true
-  tags          = var.tags
-}
-
-resource "aws_s3_bucket" "gitlab_backups" {
-  bucket        = "${local.s3_bucket_prefix}-backups"
-  force_destroy = true
-  tags          = var.tags
-}
-
-# Block public access on all GitLab buckets
-resource "aws_s3_bucket_public_access_block" "gitlab_artifacts" {
-  bucket                  = aws_s3_bucket.gitlab_artifacts.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_public_access_block" "gitlab_uploads" {
-  bucket                  = aws_s3_bucket.gitlab_uploads.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_public_access_block" "gitlab_packages" {
-  bucket                  = aws_s3_bucket.gitlab_packages.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_public_access_block" "gitlab_lfs" {
-  bucket                  = aws_s3_bucket.gitlab_lfs.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_public_access_block" "gitlab_registry" {
-  bucket                  = aws_s3_bucket.gitlab_registry.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_public_access_block" "gitlab_backups" {
-  bucket                  = aws_s3_bucket.gitlab_backups.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-# Server-side encryption for all buckets
-resource "aws_s3_bucket_server_side_encryption_configuration" "gitlab_artifacts" {
-  bucket = aws_s3_bucket.gitlab_artifacts.id
-  rule { apply_server_side_encryption_by_default { sse_algorithm = "AES256" } }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "gitlab_uploads" {
-  bucket = aws_s3_bucket.gitlab_uploads.id
-  rule { apply_server_side_encryption_by_default { sse_algorithm = "AES256" } }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "gitlab_packages" {
-  bucket = aws_s3_bucket.gitlab_packages.id
-  rule { apply_server_side_encryption_by_default { sse_algorithm = "AES256" } }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "gitlab_lfs" {
-  bucket = aws_s3_bucket.gitlab_lfs.id
-  rule { apply_server_side_encryption_by_default { sse_algorithm = "AES256" } }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "gitlab_registry" {
-  bucket = aws_s3_bucket.gitlab_registry.id
-  rule { apply_server_side_encryption_by_default { sse_algorithm = "AES256" } }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "gitlab_backups" {
-  bucket = aws_s3_bucket.gitlab_backups.id
-  rule { apply_server_side_encryption_by_default { sse_algorithm = "AES256" } }
-}
+# NOTE: Forgejo keeps repositories, LFS objects, packages and container registry
+# blobs on its PersistentVolume. Forgejo supports local disk or S3-compatible
+# storage only — Azure Blob and GCS have no S3 API — so rather than run two
+# storage models, every cloud uses the volume, and Velero backs it up alongside
+# the managed PostgreSQL PITR.
 
 # ─── Cognito User Pool (IdP for Keycloak) ────────────────────────────
 #
@@ -563,84 +561,6 @@ resource "aws_cognito_user_group" "viewers" {
   description  = "Read-only access to DevOps platform services"
 }
 
-# ─── IRSA for GitLab ─────────────────────────────────────────────────
-#
-# Allows GitLab pods (webservice, sidekiq) to access S3 without explicit
-# AWS credentials. The K8s service account "gitlab" in the "gitlab" namespace
-# exchanges its projected OIDC token for temporary AWS credentials.
-
-data "aws_iam_policy_document" "gitlab_assume_role" {
-  statement {
-    effect = "Allow"
-
-    principals {
-      type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.eks.arn]
-    }
-
-    actions = ["sts:AssumeRoleWithWebIdentity"]
-
-    condition {
-      test     = "StringEquals"
-      variable = "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:sub"
-      values   = ["system:serviceaccount:gitlab:gitlab"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:aud"
-      values   = ["sts.amazonaws.com"]
-    }
-  }
-}
-
-resource "aws_iam_role" "gitlab_irsa" {
-  name_prefix        = "${var.prefix}-gitlab-irsa-"
-  assume_role_policy = data.aws_iam_policy_document.gitlab_assume_role.json
-
-  tags = var.tags
-}
-
-data "aws_iam_policy_document" "gitlab_s3" {
-  statement {
-    effect = "Allow"
-    actions = [
-      "s3:GetObject",
-      "s3:PutObject",
-      "s3:DeleteObject",
-      "s3:ListMultipartUploadParts",
-      "s3:AbortMultipartUpload",
-    ]
-    resources = [
-      "${aws_s3_bucket.gitlab_artifacts.arn}/*",
-      "${aws_s3_bucket.gitlab_uploads.arn}/*",
-      "${aws_s3_bucket.gitlab_packages.arn}/*",
-      "${aws_s3_bucket.gitlab_lfs.arn}/*",
-      "${aws_s3_bucket.gitlab_registry.arn}/*",
-      "${aws_s3_bucket.gitlab_backups.arn}/*",
-    ]
-  }
-
-  statement {
-    effect    = "Allow"
-    actions   = ["s3:ListBucket"]
-    resources = [
-      aws_s3_bucket.gitlab_artifacts.arn,
-      aws_s3_bucket.gitlab_uploads.arn,
-      aws_s3_bucket.gitlab_packages.arn,
-      aws_s3_bucket.gitlab_lfs.arn,
-      aws_s3_bucket.gitlab_registry.arn,
-      aws_s3_bucket.gitlab_backups.arn,
-    ]
-  }
-}
-
-resource "aws_iam_role_policy" "gitlab_s3" {
-  name_prefix = "${var.prefix}-gitlab-s3-"
-  role        = aws_iam_role.gitlab_irsa.id
-  policy      = data.aws_iam_policy_document.gitlab_s3.json
-}
-
 # ─── External-DNS IRSA ───────────────────────────────────────────────
 # Allows external-dns to manage Route53 records for the cluster's domain.
 # The K8s service account "external-dns/external-dns" assumes this role via IRSA.
@@ -690,8 +610,8 @@ data "aws_iam_policy_document" "external_dns_route53" {
   }
 
   statement {
-    effect  = "Allow"
-    actions = ["route53:ListHostedZones", "route53:ListResourceRecordSets", "route53:ListTagsForResource"]
+    effect    = "Allow"
+    actions   = ["route53:ListHostedZones", "route53:ListResourceRecordSets", "route53:ListTagsForResource"]
     resources = ["*"]
   }
 }

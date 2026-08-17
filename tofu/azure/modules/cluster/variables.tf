@@ -49,6 +49,79 @@ variable "aks_kubernetes_version" {
   default     = null
 }
 
+variable "aks_node_min_count" {
+  description = "Minimum AKS nodes in the platform pool (autoscaler lower bound)"
+  type        = number
+  default     = 2
+}
+
+variable "aks_node_max_count" {
+  description = "Maximum AKS nodes in the platform pool (autoscaler upper bound)"
+  type        = number
+  default     = 6
+}
+
+# ─── API server exposure ──────────────────────────────────────────────
+
+variable "api_allowed_cidrs" {
+  description = <<-EOT
+    CIDR blocks allowed to reach the AKS API server.
+    Empty list = private cluster, no public endpoint.
+    No default on purpose: an open control plane must be an explicit decision.
+  EOT
+  type        = list(string)
+}
+
+variable "aad_admin_group_object_ids" {
+  description = <<-EOT
+    Entra ID group object IDs granted cluster-admin via Azure RBAC.
+    When set, the AKS local admin account (an unrevocable cluster-admin client
+    certificate) is disabled and all cluster access is audited per user.
+  EOT
+  type        = list(string)
+  default     = []
+}
+
+# ─── CI node pool (Woodpecker agents) ─────────────────────────────────
+
+variable "ci_node_vm_size" {
+  description = "VM size for the tainted CI node pool"
+  type        = string
+  default     = "Standard_D4s_v3"
+}
+
+variable "ci_node_min_count" {
+  description = "Minimum CI nodes (0 = scale to zero when idle)"
+  type        = number
+  default     = 0
+}
+
+variable "ci_node_max_count" {
+  description = "Maximum CI nodes (0 disables the CI node pool)"
+  type        = number
+  default     = 3
+}
+
+variable "ci_node_spot" {
+  description = "Run CI nodes as Azure Spot VMs"
+  type        = bool
+  default     = true
+}
+
+# ─── Backups / retention ──────────────────────────────────────────────
+
+variable "backup_retention_days" {
+  description = "Retention for Velero backup blob versions"
+  type        = number
+  default     = 30
+}
+
+variable "log_retention_days" {
+  description = "Retention for Loki log chunks in blob storage"
+  type        = number
+  default     = 30
+}
+
 variable "enable_delete_lock" {
   description = "Protect the resource group from accidental deletion"
   type        = bool
@@ -84,6 +157,12 @@ variable "pg_backup_retention_days" {
   description = "PostgreSQL backup retention in days (7-35)"
   type        = number
   default     = 7
+}
+
+variable "pg_geo_redundant_backup" {
+  description = "Replicate PostgreSQL backups to the Azure paired region"
+  type        = bool
+  default     = false
 }
 
 variable "pg_ha_mode" {

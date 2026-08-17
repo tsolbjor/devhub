@@ -1,0 +1,132 @@
+# Grafana Alloy on a workload cluster — ships logs to the platform Loki.
+#
+# Templated by deploy-workload.sh with ${PLATFORM_LOKI_URL} and ${ENV}.
+#
+# Two things that were previously wrong and are fixed here:
+#   - the tenant is a real Loki tenant (Loki now runs auth_enabled: true), so a
+#     workload cluster's logs are isolated from the platform's
+#   - the push endpoint is authenticated; credentials come from the
+#     loki-ingest-credentials secret that register-workload-cluster.sh copies
+#     from the platform cluster
+
+controller:
+  type: daemonset
+  priorityClassName: platform-standard
+
+  tolerations:
+    - operator: Exists
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+alloy:
+  mounts:
+    varlog: true
+
+  # Basic-auth credentials for the platform Loki ingress.
+  envFrom:
+    - secretRef:
+        name: loki-ingest-credentials
+
+  configMap:
+    create: true
+    content: |
+      discovery.kubernetes "pods" {
+        role = "pod"
+      }
+
+      discovery.relabel "pod_logs" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_phase"]
+          regex         = "Pending|Succeeded|Failed|Completed"
+          action        = "drop"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_container_name"]
+          separator     = "/"
+          target_label  = "__path__"
+          replacement   = "/var/log/pods/*$1/*.log"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_node_name"]
+          target_label  = "node"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+          target_label  = "app"
+        }
+      }
+
+      loki.source.file "pod_logs" {
+        targets    = discovery.relabel.pod_logs.output
+        forward_to = [loki.process.parse.receiver]
+      }
+
+      loki.process "parse" {
+        stage.cri {}
+
+        stage.multiline {
+          firstline     = "^\\d{4}-\\d{2}-\\d{2}"
+          max_wait_time = "3s"
+        }
+
+        stage.label_drop {
+          values = ["filename", "stream"]
+        }
+
+        // Every log line carries the source cluster, so a noisy workload cluster
+        // is identifiable in Grafana without guessing from namespaces.
+        stage.static_labels {
+          values = {
+            cluster = "${ENV}",
+          }
+        }
+
+        forward_to = [loki.write.platform.receiver]
+      }
+
+      loki.write "platform" {
+        endpoint {
+          url       = "${PLATFORM_LOKI_URL}/loki/api/v1/push"
+          tenant_id = "${ENV}"
+
+          basic_auth {
+            username = sys.env("USERNAME")
+            password = sys.env("PASSWORD")
+          }
+        }
+
+        // Survive a platform-side outage instead of dropping logs on the floor.
+        wal {
+          enabled           = true
+          max_segment_age   = "1h"
+        }
+      }
+
+serviceMonitor:
+  enabled: false # no Prometheus on the workload cluster

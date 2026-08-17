@@ -1,20 +1,11 @@
 # Monitoring local overlay values
 # Merged with base/devops/monitoring/prometheus-stack-values.yaml
-# Uses ${DOMAIN} and ${TLS_SECRET_NAME} from config.yaml
+# Uses ${DOMAIN} from config.yaml
 
-# Ingresses are managed via k8s/overlays/local/devops/ingress.yaml
-prometheus:
-  ingress:
-    enabled: false
-
-alertmanager:
-  ingress:
-    enabled: false
+# Routing is via Gateway API HTTPRoutes (devops/httproutes.yaml)
 
 grafana:
-  ingress:
-    enabled: false
-  
+
   grafana.ini:
     server:
       root_url: https://grafana.${DOMAIN}
@@ -27,8 +18,8 @@ grafana:
       # auth_url is browser-facing (external HTTPS)
       auth_url: https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/auth
       # token_url and api_url are server-side (internal HTTP, bypasses .localhost DNS issue)
-      token_url: http://keycloak-keycloakx-http.keycloak.svc.cluster.local/realms/devops/protocol/openid-connect/token
-      api_url: http://keycloak-keycloakx-http.keycloak.svc.cluster.local/realms/devops/protocol/openid-connect/userinfo
+      token_url: http://keycloak-service.keycloak.svc.cluster.local:8080/realms/devops/protocol/openid-connect/token
+      api_url: http://keycloak-service.keycloak.svc.cluster.local:8080/realms/devops/protocol/openid-connect/userinfo
       role_attribute_path: contains(groups[*], 'devops-admins') && 'Admin' || contains(groups[*], 'developers') && 'Editor' || 'Viewer'
 
   initChownData:

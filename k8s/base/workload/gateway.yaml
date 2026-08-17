@@ -1,0 +1,79 @@
+# Gateway for a workload cluster.
+#
+# Application hostnames are not known in advance, so this Gateway uses a single
+# wildcard listener instead of one listener per service. That needs a wildcard
+# certificate, which Let's Encrypt only issues over DNS-01 — hence the dedicated
+# ClusterIssuer created by deploy-workload.sh.
+#
+# Apps then attach with:
+#   parentRefs: [{name: devhub, namespace: gateway, sectionName: apps}]
+#
+# Templated with ${DOMAIN}.
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: devhub
+  namespace: gateway
+spec:
+  gatewayClassName: envoy
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: apps
+      protocol: HTTPS
+      port: 443
+      hostname: "*.${DOMAIN}"
+      allowedRoutes:
+        # Any devhub-* namespace may attach a route for its own hostname.
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: apps-wildcard-tls
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: https-redirect
+  namespace: gateway
+spec:
+  parentRefs:
+    - name: devhub
+      namespace: gateway
+      sectionName: http
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+---
+# The wildcard certificate the apps listener serves. DNS-01 is mandatory for
+# wildcards: an HTTP-01 challenge can only prove control of one exact hostname.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: apps-wildcard
+  namespace: gateway
+spec:
+  secretName: apps-wildcard-tls
+  issuerRef:
+    name: letsencrypt-dns01
+    kind: ClusterIssuer
+  dnsNames:
+    - "*.${DOMAIN}"
+    - "${DOMAIN}"

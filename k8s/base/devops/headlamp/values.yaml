@@ -11,11 +11,30 @@ config:
       name: headlamp-oidc-secret
       create: false
 
+# The headlamp namespace enforces the "restricted" Pod Security Standard, and the
+# chart's defaults do not meet it (no seccompProfile, no dropped capabilities, no
+# explicit allowPrivilegeEscalation) — pods would be rejected at admission.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 100
+  runAsGroup: 101
+  privileged: false
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
 serviceAccount:
   create: true
   name: headlamp
 
-# Ingress managed via ingress.yaml overlays
+# Routing is a Gateway API HTTPRoute (overlays/<env>/devops/httproutes.yaml)
 ingress:
   enabled: false
 

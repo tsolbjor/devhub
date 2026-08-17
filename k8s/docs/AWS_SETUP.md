@@ -19,21 +19,71 @@ Internet
 DNS (*.yourdomain.com) --> AWS Network LoadBalancer
     |
     v
-nginx-ingress (TLS via cert-manager / Let's Encrypt)
+Envoy Gateway / Gateway API (TLS via cert-manager / Let's Encrypt)
     |
     +---> Keycloak (SSO)
-    +---> GitLab (source control, CI/CD)
+    +---> Forgejo (source control, CI/CD)
     +---> ArgoCD (GitOps)
     +---> Grafana / Prometheus (monitoring)
     +---> Vault (secrets)
     |
     v (private VPC subnets)
-    +---> Amazon RDS PostgreSQL (Keycloak DB, GitLab DB)
-    +---> Amazon ElastiCache Redis (GitLab cache/sessions)
-    +---> Amazon S3 (GitLab artifacts, registry, backups)
+    +---> Amazon RDS PostgreSQL (Keycloak DB, Forgejo DB)
+    +---> Amazon ElastiCache Redis (Forgejo cache/sessions)
+    +---> Amazon S3 (Forgejo artifacts, registry, backups)
 ```
 
+## Guided path
+
+```bash
+./devhub quickstart --env aws-dev
+```
+
+Detects what is already done, shows a checklist, and runs the next step — including
+everything described below. Safe to re-run; use `--status` for just the checklist.
+
+The rest of this guide is the same sequence, step by step, for when you want to
+drive it yourself or need to understand a specific step.
+
 ## Step-by-Step Setup
+
+### Step 0a: External prerequisites
+
+```bash
+./devhub preflight --env aws-dev
+```
+
+Prints what the platform assumes about the outside world, verifies what it can
+(CLI authentication, DNS zone, registrar delegation) and asks about the rest.
+
+The one that catches people: **the DNS zone must exist in the cloud, and the
+registrar must delegate to it.** On AWS and Azure the tofu module looks the zone up
+with a data source, so `tofu apply` fails outright without it. Everywhere else,
+missing delegation means certificates stay pending — cert-manager cannot complete an
+HTTP-01 challenge for a name the internet cannot resolve.
+
+Re-check DNS alone at any time with `./devhub preflight --env aws-dev --dns`.
+
+### Step 0b: Configure the environment (wizard)
+
+```bash
+./devhub setup --env aws-dev
+```
+
+Asks for:
+  - your domain and the ACME contact address
+  - which CIDRs may reach the Kubernetes API (offers your current public IP,
+    specific CIDRs, or no public endpoint at all)
+  - where tofu state lives
+
+Then writes `tofu/aws/dev/backend.hcl` and `terraform.tfvars`, sets
+`domain` / `acmeEmail` / `gitops.repoUrl` in `k8s/overlays/aws-dev/config.yaml`, and offers
+to create the state bucket (tofu cannot create its own backend).
+
+Add `--dry-run` to preview, or drive it non-interactively with
+`--non-interactive --yes --domain ... --acme-email ... --api-cidrs ...`.
+
+Skip this step only if you prefer to copy the `.example` files by hand.
 
 ### Step 1: Provision Infrastructure with OpenTofu
 
@@ -44,22 +94,34 @@ aws configure
 
 # For dev environment:
 cd tofu/aws/dev
-tofu init
+
+# Remote state (partial backend config). State holds database passwords and IdP
+# client secrets, so it lives in the S3 bucket + DynamoDB lock table, never on a laptop.
+cp backend.hcl.example backend.hcl     # fill in your bucket/container names
+tofu init -backend-config=backend.hcl
+
+# Required variable: who may reach the Kubernetes API server. There is no
+# default — an internet-facing control plane should be a deliberate choice.
+cp terraform.tfvars.example terraform.tfvars
+#   api_allowed_cidrs = ["203.0.113.4/32"]   # office egress
+#   api_allowed_cidrs = []                   # private endpoint only
 tofu plan     # Review what will be created
 tofu apply    # Provision (takes 15-20 min)
 
 # For prod environment:
 cd tofu/aws/prod
-tofu init && tofu apply
+cp backend.hcl.example backend.hcl
+cp terraform.tfvars.example terraform.tfvars
+tofu init -backend-config=backend.hcl && tofu apply
 ```
 
 This provisions:
 - VPC with public and private subnets across multiple Availability Zones
 - Managed Kubernetes cluster (EKS) with private worker nodes
-- Amazon RDS PostgreSQL (databases: `keycloak`, `gitlabhq_production`)
+- Amazon RDS PostgreSQL (databases: `keycloak`, `forgejo`)
 - Amazon ElastiCache Redis cluster
-- S3 buckets for GitLab artifacts, registry, uploads, and backups
-- IAM roles for service accounts (IRSA) for GitLab S3 access
+- S3 buckets for Loki log chunks and Velero backups
+- IAM roles for service accounts (IRSA) for Loki, Velero and Vault
 - Cognito User Pool for optional Keycloak federation
 
 Review environment-specific settings in `tofu/aws/dev/main.tf` or `tofu/aws/prod/main.tf`.
@@ -71,10 +133,18 @@ cd k8s/scripts
 ./sync-tofu-outputs.sh --env aws-dev
 ```
 
-This script:
-- Reads tofu outputs (RDS endpoint, Redis endpoint, S3 buckets, etc.)
-- Writes them into `k8s/overlays/aws-dev/config.yaml`
-- Updates kubeconfig via `aws eks update-kubeconfig`
+This script writes four gitignored files under `k8s/scripts/aws-dev/`:
+
+| File | Contents |
+|------|----------|
+| `tofu-outputs.env` | hosts, bucket names, IAM role ARNs, KMS key ids |
+| `secrets.env` | database passwords, cache auth token, IdP client secret |
+| `manual-secrets.env` | values tofu cannot create (created once, never overwritten) |
+| `kubeconfig` | cluster credentials for this environment |
+
+`config.yaml` is **not** modified — it stays human-owned (domain, TLS, GitOps
+repo), so `tofu apply` produces no git diff and Helm templating no longer depends
+on parsing YAML with `sed`.
 
 ### Step 3: Configure Domain and Email
 
@@ -87,11 +157,11 @@ acmeEmail: admin@yourdomain.com
 
 ### Step 4: Configure DNS
 
-After tofu apply and deploying nginx-ingress, the EKS cluster gets a Network LoadBalancer. Find its hostname:
+After tofu apply and deploying Envoy Gateway, the EKS cluster gets a Network LoadBalancer. Find its hostname:
 
 ```bash
 export KUBECONFIG=k8s/scripts/aws-dev/kubeconfig
-kubectl get svc -n ingress-nginx
+kubectl get svc -n envoy-gateway-system   # the Envoy data-plane LoadBalancer
 ```
 
 Create DNS records pointing to the LoadBalancer hostname:
@@ -106,7 +176,7 @@ Create DNS records pointing to the LoadBalancer hostname:
 *.dev.yourdomain.com  ALIAS  <LoadBalancer DNS name>
 ```
 
-Or individual records for each service (keycloak, gitlab, argocd, grafana, etc.)
+Or individual records for each service (keycloak, git, ci, argocd, grafana, etc.)
 
 ### Step 5: Deploy Platform Services
 
@@ -114,18 +184,30 @@ Or individual records for each service (keycloak, gitlab, argocd, grafana, etc.)
 cd k8s/scripts
 export KUBECONFIG=aws-dev/kubeconfig
 
-# Deploy everything
+# Managed PostgreSQL has no Terraform resource for local users; create them once
+# (idempotent — safe to re-run).
+./deploy.sh --env aws-dev db-users
+
+# Deploy the platform
 ./deploy.sh --env aws-dev
 
-# Configure Keycloak SSO
-./setup-keycloak.sh --env aws-dev
-
-# Initialize Vault
+# Initialise Vault (auto-unseals via cloud KMS; root token is revoked at the end)
 ./setup-vault.sh --env aws-dev
 
-# Bootstrap ArgoCD GitOps
+# Realm, groups and OIDC clients
+./setup-keycloak.sh --env aws-dev
+
+# Move platform credentials into Vault; External Secrets delivers them from now on
+./deploy.sh --env aws-dev platform-secrets
+
+# GitOps: app-of-apps, then hand the platform components to ArgoCD
 ./deploy.sh --env aws-dev bootstrap
+./deploy.sh --env aws-dev gitops
 ```
+
+After the handover, change cert-manager, external-dns, external-secrets, the
+monitoring stack, Kyverno, Reloader, Headlamp and Velero **through git** — ArgoCD
+self-heals manual `helm upgrade`s away. See [OPERATIONS.md](OPERATIONS.md).
 
 ### Step 6: Verify
 
@@ -162,39 +244,21 @@ open https://grafana.dev.yourdomain.com
 
 ## Data Service Secrets
 
-After deploying with managed data services, `deploy.sh` checks for required K8s secrets. Create them using tofu outputs:
-
-```bash
-cd tofu/aws/dev
-
-# Get passwords and endpoints
-tofu output rds_keycloak_password
-tofu output rds_gitlab_password
-tofu output redis_auth_token
-tofu output s3_gitlab_artifacts_bucket
-tofu output gitlab_irsa_role_arn
-
-# Create K8s secrets (see deploy.sh configure_managed_data_services for required keys)
-kubectl create secret generic keycloak-db-secret -n keycloak \
-    --from-literal=password="$(tofu output -raw rds_keycloak_password)"
-
-kubectl create secret generic gitlab-postgresql-secret -n gitlab \
-    --from-literal=password="$(tofu output -raw rds_gitlab_password)"
-
-kubectl create secret generic gitlab-redis-secret -n gitlab \
-    --from-literal=password="$(tofu output -raw redis_auth_token)"
-```
+`deploy.sh` creates the K8s secrets the charts expect directly from
+`secrets.env`, so there is no manual `kubectl create secret` step. On AWS, GCP and
+Azure the object-storage secrets carry no credentials at all — access comes from
+IRSA / Workload Identity.
 
 ## IAM Roles for Service Accounts (IRSA)
 
-GitLab uses IRSA to access S3 buckets without storing AWS credentials. The tofu module creates the necessary IAM role and OIDC provider. The role ARN is written to config.yaml by `sync-tofu-outputs.sh` and used in GitLab's Helm values.
+Forgejo uses IRSA to access S3 buckets without storing AWS credentials. The tofu module creates the necessary IAM role and OIDC provider. The role ARN is written to `tofu-outputs.env` by `sync-tofu-outputs.sh` and used in Forgejo's Helm values.
 
 ## TLS Certificates
 
 cert-manager automatically provisions Let's Encrypt certificates. For initial testing, use the staging issuer to avoid rate limits:
 
 ```yaml
-# In config.yaml
+# In tofu-outputs.env (generated)
 tls:
   clusterIssuer: letsencrypt-staging   # Switch to letsencrypt-prod when verified
 ```
@@ -227,7 +291,7 @@ Common causes: DNS not pointing to LoadBalancer, rate limited (use staging)
 
 ### LoadBalancer stuck in Pending
 ```bash
-kubectl get svc -n ingress-nginx -w
+kubectl get svc -n envoy-gateway-system -w   # the Envoy data-plane LoadBalancer
 ```
 AWS may take a few minutes. Check service quotas if it persists.
 
@@ -241,7 +305,7 @@ kubectl run debug --rm -it --image=busybox -- nslookup <rds-endpoint>
 Ensure that the EKS security group has access to the RDS security group on port 5432.
 
 ### S3 access denied
-Verify that the GitLab service account is annotated with the IRSA role ARN and that the IAM role trust policy allows the OIDC provider.
+Verify that the Forgejo service account is annotated with the IRSA role ARN and that the IAM role trust policy allows the OIDC provider.
 
 ### Tofu state issues
 ```bash

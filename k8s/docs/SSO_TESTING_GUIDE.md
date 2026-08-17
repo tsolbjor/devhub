@@ -10,7 +10,7 @@
 
 > **Note**: The password is auto-generated during setup. To reset it manually:
 > ```bash
-> kubectl exec -n keycloak keycloak-keycloakx-0 -- /opt/keycloak/bin/kcadm.sh set-password -r devops --username platform-admin --new-password "YourNewPassword"
+> kubectl exec -n keycloak keycloak-0 -- /opt/keycloak/bin/kcadm.sh set-password -r devops --username platform-admin --new-password "YourNewPassword"
 > ```
 > Avoid special characters like `!` `@` `$` in passwords set via kcadm to prevent shell escaping issues.
 
@@ -42,10 +42,10 @@
 
 ---
 
-### 2. Test GitLab SSO
+### 2. Test Forgejo SSO
 
 **Steps**:
-1. Open https://gitlab.localhost in your browser
+1. Open https://git.localhost in your browser
 2. You'll be redirected to the sign-in page
 3. Look for the "Keycloak" button (OpenID Connect provider)
 4. Click the "Keycloak" button
@@ -54,15 +54,15 @@
    - Username: `platform-admin`
    - Password: value from `PLATFORM_ADMIN_PASSWORD`
 7. Click "Sign In"
-8. You should be redirected back to GitLab
-9. **Expected Result**: You are logged in and a new GitLab account is auto-created
+8. You should be redirected back to Forgejo
+9. **Expected Result**: You are logged in and a new Forgejo account is auto-created
 
 **Verify Access**:
 - Check user avatar in top-right → Should show "platform-admin"
 - You should be able to create projects
 - Go to Admin Area (wrench icon) → Should have admin access
 
-**Note**: On first login, GitLab auto-creates a user account linked to your Keycloak identity.
+**Note**: On first login, Forgejo auto-creates a user account linked to your Keycloak identity.
 
 ---
 
@@ -136,7 +136,7 @@
 4. Should include:
    - Grafana: `https://grafana.localhost/login/generic_oauth`
    - ArgoCD: `https://argocd.localhost/auth/callback`
-   - GitLab: `https://gitlab.localhost/users/auth/openid_connect/callback`
+   - Forgejo: `https://git.localhost/users/auth/openid_connect/callback`
 
 ### Issue: "User not authorized" or "Access Denied"
 
@@ -166,8 +166,8 @@
    # ArgoCD
    kubectl rollout restart deployment argocd-server -n argocd
 
-   # GitLab
-   kubectl rollout restart deployment gitlab-webservice-default -n gitlab
+   # Forgejo
+   kubectl rollout restart deployment forgejo-webservice-default -n forgejo
    ```
 3. Wait 30-60 seconds for pods to restart
 4. Try accessing the service again
@@ -194,7 +194,7 @@ Use this checklist to verify SSO is working correctly:
   - [ ] Realm "devops" exists
   - [ ] Groups exist: devops-admins, developers, viewers
   - [ ] platform-admin user exists and is in devops-admins group
-  - [ ] All client IDs exist: grafana, argocd, gitlab, vault
+  - [ ] All client IDs exist: grafana, argocd, forgejo, vault
 
 - [ ] **Grafana**
   - [ ] "Sign in with Keycloak" button visible
@@ -203,7 +203,7 @@ Use this checklist to verify SSO is working correctly:
   - [ ] User has admin access
   - [ ] Can create/edit dashboards
 
-- [ ] **GitLab**
+- [ ] **Forgejo**
   - [ ] "Keycloak" button visible on sign-in page
   - [ ] Redirects to Keycloak login
   - [ ] Successfully logs in
@@ -226,17 +226,17 @@ Use this checklist to verify SSO is working correctly:
 **devops-admins**:
 - Grafana: Admin role (full access)
 - ArgoCD: Admin role (can create/delete apps, modify settings)
-- GitLab: Admin access (can manage projects and settings)
+- Forgejo: Admin access (can manage projects and settings)
 
 **developers**:
 - Grafana: Editor role (can create/edit dashboards)
 - ArgoCD: Read-only access (can view apps but not modify)
-- GitLab: Developer access (can push code, create merge requests)
+- Forgejo: Developer access (can push code, create merge requests)
 
 **viewers**:
 - Grafana: Viewer role (read-only access to dashboards)
 - ArgoCD: Read-only access
-- GitLab: Reporter access (read-only)
+- Forgejo: Reporter access (read-only)
 
 ### Testing Different Access Levels
 
@@ -245,11 +245,11 @@ To test different access levels:
 1. Create test users in Keycloak:
    ```bash
    # Developer user
-   kubectl exec -n keycloak keycloak-keycloakx-0 -- /opt/keycloak/bin/kcadm.sh create users -r devops \
+   kubectl exec -n keycloak keycloak-0 -- /opt/keycloak/bin/kcadm.sh create users -r devops \
      -s username=dev-test -s email=dev@localhost -s enabled=true -s emailVerified=true
 
    # Set password
-   kubectl exec -n keycloak keycloak-keycloakx-0 -- /opt/keycloak/bin/kcadm.sh set-password -r devops \
+   kubectl exec -n keycloak keycloak-0 -- /opt/keycloak/bin/kcadm.sh set-password -r devops \
      --username dev-test --new-password "Dev123!"
    ```
 
@@ -277,12 +277,12 @@ If SSO is not working:
    ```bash
    kubectl logs -n monitoring deployment/prometheus-grafana
    kubectl logs -n argocd deployment/argocd-server
-   kubectl logs -n gitlab deployment/gitlab-webservice-default
+   kubectl logs -n forgejo deployment/forgejo-webservice-default
    ```
 
 2. Check Keycloak logs:
    ```bash
-   kubectl logs -n keycloak keycloak-keycloakx-0
+   kubectl logs -n keycloak keycloak-0
    ```
 
 3. Verify OIDC endpoints are accessible:

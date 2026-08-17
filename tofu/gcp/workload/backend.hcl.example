@@ -1,0 +1,6 @@
+# Bootstrap once per project:
+#   gcloud storage buckets create gs://devhub-tfstate --location=europe-west4 \
+#     --uniform-bucket-level-access
+#   gcloud storage buckets update gs://devhub-tfstate --versioning
+bucket = "devhub-tfstate"
+prefix = "gcp/workload"

@@ -15,7 +15,12 @@ module "cluster" {
 
   termination_protection = true
 
-  control_plane_ip_filter = ["0.0.0.0/0"] # TODO: restrict to known CIDRs
+  # Kubernetes API exposure — set in terraform.tfvars
+  control_plane_ip_filter = var.api_allowed_cidrs
+
+  # CI node group (tainted workload=ci) so build jobs never land on platform nodes
+  ci_node_count = 2
+  ci_node_plan  = "4xCPU-8GB"
 
   tags = {
     Environment = "prod"

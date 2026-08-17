@@ -35,7 +35,7 @@ metadata:
 spec:
   project: devhub
   source:
-    repoURL: https://gitlab.localhost/devhub/my-service.git
+    repoURL: https://forgejo.localhost/devhub/my-service.git
     targetRevision: HEAD
     path: k8s
   destination:
@@ -97,9 +97,30 @@ spec:
     spec:
       project: devhub
       source:
-        repoURL: https://gitlab.localhost/devhub/my-service.git
+        repoURL: https://forgejo.localhost/devhub/my-service.git
         path: 'k8s/overlays/{{env}}'
       destination:
         server: https://kubernetes.default.svc
         namespace: '{{namespace}}'
 ```
+
+---
+
+## Current topology
+
+| Manifest | What it manages |
+|----------|-----------------|
+| `apps/app-of-apps.yaml` | Everything else in `apps/`. Its `repoURL` is templated from `gitops.repoUrl` in the environment's `config.yaml` — it used to be hardcoded to `https://forgejo.localhost`, which broke every cloud bootstrap. |
+| `platform-appset.yaml` | The platform itself: cert-manager, external-dns, external-secrets, monitoring, loki, tempo, alloy, kyverno, reloader, woodpecker, headlamp, velero. Applied once by `deploy.sh --env <env> gitops`; charts come from upstream repos with values from this repo (`$values`). |
+| `apps/forgejo-appset.yaml` | Developer apps: a **matrix** of Forgejo repositories in the `devhub` organisation × clusters labelled `devhub.io/role=workload`. Apps therefore land on workload clusters, not on the platform cluster. |
+| `projects/*.yaml` | AppProjects (`devhub`, `workloads`): allowed sources, destinations (`name: '*-workload'`), and RBAC bound to the Keycloak groups `devops-admins` / `developers` / `viewers`. |
+
+### Adding a platform component
+
+1. Base values → `k8s/base/devops/<component>/values.yaml`
+2. Per-cloud overrides → `k8s/overlays/<cloud>/devops/<component>/values.yaml`
+3. An entry in `platform-appset.yaml` (chart, repo, version, namespace, value paths)
+4. `./deploy.sh --env <env> gitops`
+
+`k8s/scripts/validate-overlays.sh` checks that every value path referenced by the
+ApplicationSet actually exists.

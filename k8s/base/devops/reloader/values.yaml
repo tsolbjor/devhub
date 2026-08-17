@@ -1,0 +1,51 @@
+# Reloader — restarts workloads when a Secret or ConfigMap they use changes.
+# Chart: stakater/reloader
+#
+# This is the missing half of the secret-rotation story: External Secrets updates
+# a Secret from Vault, but a running pod keeps the copy it mounted at start.
+# Without Reloader, "rotate a credential" means remembering to run
+# `kubectl rollout restart` on every consumer.
+#
+# Opt-in per workload:
+#   metadata.annotations["reloader.stakater.com/auto"] = "true"
+# or, more precisely:
+#   metadata.annotations["secret.reloader.stakater.com/reload"] = "forgejo-db-secret"
+
+reloader:
+  # Only watch objects that ask to be watched — a cluster-wide auto-reload is a
+  # good way to restart something at the worst possible moment.
+  watchGlobally: true
+  autoReloadAll: false
+
+  deployment:
+    priorityClassName: platform-standard
+
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+    pod:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+
+    # The chart sets the pod-level context but leaves the container one empty,
+    # which the reloader namespace's restricted PSS rejects.
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+
+  podMonitor:
+    enabled: true
+    namespace: monitoring
+    labels:
+      release: prometheus
+
+  readOnlyRootFileSystem: true

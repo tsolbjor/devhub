@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars (gitignored) and adjust.
+# [] means the API server has no public endpoint — reach it over VPN/bastion.
+api_allowed_cidrs = ["203.0.113.4/32"]
+
+# Entra ID groups that get cluster-admin. Setting this disables the AKS local
+# admin account (a permanent, unauditable cluster-admin certificate).
+aad_admin_group_object_ids = ["00000000-0000-0000-0000-000000000000"]

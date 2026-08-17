@@ -1,7 +1,14 @@
 # Tempo Helm values (Single Binary)
 # Chart: grafana/tempo
 # Docs: https://grafana.com/docs/tempo/latest/setup/helm-chart/
-# Note: grafana/tempo is the single-binary chart; grafana/tempo-distributed is for microservices mode.
+#
+# Upstream marks this chart deprecated in favour of grafana/tempo-distributed, and
+# `helm upgrade` says so on every run. It is kept deliberately: tempo-distributed
+# runs distributor, ingester, querier, query-frontend and compactor as separate
+# deployments — five to six pods for a platform whose trace volume fits in one.
+# Migration path when the chart stops receiving Tempo releases: switch to
+# tempo-distributed with one replica per component, keep the same S3/Blob/GCS
+# bucket and the same OTLP endpoint, so only this file and the chart name change.
 
 tempo:
   repository: grafana/tempo

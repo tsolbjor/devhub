@@ -1,5 +1,5 @@
 # Shared PostgreSQL for local development
-# Creates databases for Keycloak and GitLab
+# Creates databases for Keycloak and Forgejo
 # NOTE: The postgresql-init ConfigMap is created by deploy.sh with actual passwords
 ---
 apiVersion: apps/v1

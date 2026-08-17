@@ -1,14 +1,24 @@
-# Loki AWS overlay: S3 object storage backend
-# Requires:
-#   - S3 bucket named ${S3_BUCKET_PREFIX}-loki (add to tofu/aws/modules/cluster)
-#   - IAM role with S3 read/write on that bucket (add to tofu/aws/modules/cluster)
-#   - config.yaml: loki.irsaRoleArn — exported from tofu output loki_irsa_role_arn
+# Loki AWS overlay: S3 object storage backend.
+#
+# Provisioned by tofu/aws/modules/cluster/platform.tf:
+#   - S3 bucket (output: loki_bucket) with lifecycle expiry
+#   - IRSA role for serviceaccount monitoring/loki (output: loki_irsa_role_arn)
+# sync-tofu-outputs.sh exports both as LOKI_BUCKET / LOKI_IRSA_ROLE_ARN.
+#
+# deploy.sh applies this overlay only when LOKI_IRSA_ROLE_ARN is set.
 
 loki:
+  # Retention is enforced by the compactor; the delete store must match the
+  # object-storage backend configured below.
+  compactor:
+    working_directory: /var/loki/compactor
+    retention_enabled: true
+    delete_request_store: s3
+
   storage:
     type: s3
     s3:
-      bucketnames: ${S3_BUCKET_PREFIX}-loki
+      bucketnames: ${LOKI_BUCKET}
       region: ${AWS_REGION}
       s3forcepathstyle: false
       insecure: false
@@ -32,3 +42,4 @@ serviceAccount:
 singleBinary:
   persistence:
     enabled: false
+

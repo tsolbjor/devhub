@@ -1,12 +1,13 @@
 # ArgoCD local overlay values
 # Merged with base/devops/argocd/values.yaml
-# Uses ${DOMAIN} and ${TLS_SECRET_NAME} from config.yaml
+# Uses ${DOMAIN} from config.yaml
 
 global:
   domain: argocd.${DOMAIN}
 
 configs:
   params:
+    # TLS terminates at the Gateway.
     server.insecure: true
 
   cm:
@@ -31,7 +32,4 @@ configs:
     extra:
       oidc.keycloak.clientSecret: ""
 
-# Ingress is managed via k8s/overlays/local/devops/ingress.yaml
-server:
-  ingress:
-    enabled: false
+# Routing is a Gateway API HTTPRoute (devops/httproutes.yaml)

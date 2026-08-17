@@ -49,9 +49,9 @@ output "pg_keycloak_password" {
   sensitive   = true
 }
 
-output "pg_gitlab_password" {
-  description = "Pre-generated password for gitlab DB user — create user post-provision"
-  value       = random_password.pg_gitlab.result
+output "pg_forgejo_password" {
+  description = "Pre-generated password for the forgejo DB user — create it post-provision"
+  value       = random_password.pg_forgejo.result
   sensitive   = true
 }
 
@@ -81,7 +81,7 @@ output "storage_account_name" {
 }
 
 output "storage_primary_access_key" {
-  description = "Storage Account primary access key (used for registry; main GitLab storage uses managed identity)"
+  description = "Storage Account primary access key (Loki and Velero use managed identity)"
   value       = azurerm_storage_account.main.primary_access_key
   sensitive   = true
 }
@@ -106,12 +106,59 @@ output "entra_keycloak_client_secret" {
 
 # ─── Workload Identity ────────────────────────────────────────────────
 
-output "gitlab_identity_client_id" {
-  description = "Client ID of the GitLab managed identity — annotate the K8s service account with this value"
-  value       = azurerm_user_assigned_identity.gitlab.client_id
+output "external_dns_identity_client_id" {
+  description = "Client ID of the external-dns managed identity — written to tofu-outputs.env by sync-tofu-outputs.sh"
+  value       = azurerm_user_assigned_identity.external_dns.client_id
 }
 
-output "external_dns_identity_client_id" {
-  description = "Client ID of the external-dns managed identity — written to config.yaml by sync-tofu-outputs.sh"
-  value       = azurerm_user_assigned_identity.external_dns.client_id
+output "loki_identity_client_id" {
+  description = "Client ID of the Loki managed identity (blob chunk storage)"
+  value       = azurerm_user_assigned_identity.loki.client_id
+}
+
+output "loki_container" {
+  description = "Blob container for Loki chunks"
+  value       = azurerm_storage_container.loki.name
+}
+
+output "velero_identity_client_id" {
+  description = "Client ID of the Velero managed identity (cluster backups)"
+  value       = azurerm_user_assigned_identity.velero.client_id
+}
+
+output "velero_container" {
+  description = "Blob container for Velero backups"
+  value       = azurerm_storage_container.velero.name
+}
+
+output "node_resource_group" {
+  description = "AKS-managed node resource group (needed by Velero disk snapshots)"
+  value       = azurerm_kubernetes_cluster.main.node_resource_group
+}
+
+output "subscription_id" {
+  description = "Azure subscription ID"
+  value       = data.azurerm_client_config.current.subscription_id
+}
+
+# ─── Vault auto-unseal ───────────────────────────────────────────────
+
+output "vault_key_vault_name" {
+  description = "Key Vault holding the Vault auto-unseal key"
+  value       = azurerm_key_vault.vault_unseal.name
+}
+
+output "vault_key_name" {
+  description = "Key Vault key name used for Vault auto-unseal"
+  value       = azurerm_key_vault_key.vault_unseal.name
+}
+
+output "vault_identity_client_id" {
+  description = "Client ID of the managed identity allowed to use the unseal key"
+  value       = azurerm_user_assigned_identity.vault.client_id
+}
+
+output "oidc_issuer_url" {
+  description = "AKS OIDC issuer URL (used for Vault JWT auth from workload clusters)"
+  value       = azurerm_kubernetes_cluster.main.oidc_issuer_url
 }

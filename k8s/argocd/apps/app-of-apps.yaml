@@ -1,6 +1,9 @@
-# App-of-Apps: Root ArgoCD Application
-# This application manages all other applications in this directory
-# Deploy this once and it will sync all application manifests automatically
+# App-of-Apps: root ArgoCD Application.
+#
+# Manages every other Application/ApplicationSet in this directory.
+# deploy.sh templates ${GITOPS_REPO_URL} / ${GITOPS_REVISION} from
+# overlays/<env>/config.yaml before applying — a hardcoded local URL would point
+# a cloud environment's ArgoCD at a repository that does not exist.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -12,9 +15,8 @@ spec:
   project: default
 
   source:
-    # Update this to your Git repository URL
-    repoURL: https://gitlab.localhost/devhub/devhub.git
-    targetRevision: HEAD
+    repoURL: ${GITOPS_REPO_URL}
+    targetRevision: ${GITOPS_REVISION}
     path: k8s/argocd/apps
     directory:
       recurse: false

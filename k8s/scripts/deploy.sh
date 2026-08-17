@@ -4,13 +4,21 @@ set -euo pipefail
 # =============================================================================
 # Kubernetes Platform Deploy Script
 # =============================================================================
-# Deploys DevOps platform infrastructure to local or UpCloud environments.
+# Deploys the DevOps platform to a local or managed-cloud environment.
+#
+# Usage: ./deploy.sh --env <env> [component] [action]
+#
+# Components: all, devops, or a single service (keycloak, vault, monitoring, ...)
+# Actions:    deploy (default), status, delete
+#
+# Special components:
+#   db-users         create managed-PostgreSQL users (run once per new database)
+#   platform-secrets move platform credentials into Vault + ExternalSecrets
+#   gitops           hand platform components over to ArgoCD (platform-appset)
+#   bootstrap        deploy the ArgoCD app-of-apps
+#   loki-auth        (re)generate the Loki ingest credentials for workload clusters
+#
 # Applications are managed via ArgoCD GitOps (see k8s/argocd/).
-#
-# Usage: ./deploy.sh --env local|upcloud-dev|upcloud-prod [component] [action]
-#
-# Components: all, devops, or specific services
-# Actions: deploy (default), status, delete
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,17 +26,66 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 # Parse --env and remaining args
 parse_env_arg "$@"
-set -- "${ARGS[@]}"
+# Empty-array expansion is unsafe under `set -u` on older bash.
+if [[ ${#ARGS[@]} -gt 0 ]]; then set -- "${ARGS[@]}"; else set --; fi
 
 COMPONENT="${1:-all}"
 ACTION="${2:-deploy}"
 
-# Set up paths and parse config
+if is_workload_env; then
+    log_error "deploy.sh manages platform clusters. For workload clusters use:"
+    log_error "  ./deploy-workload.sh --env ${ENV}"
+    exit 1
+fi
+
 setup_paths
 parse_config
 
+CLOUD="$(env_cloud)"
+
+# ─── Chart and component versions ─────────────────────────────────────
+# One place to bump, mirrored by k8s/argocd/platform-appset.yaml (which ArgoCD
+# reconciles after the GitOps handover) and grouped for Renovate.
+CHART_CERT_MANAGER="v1.21.1"
+CHART_EXTERNAL_DNS="1.21.1"
+CHART_EXTERNAL_SECRETS="2.9.0"
+CHART_VAULT="0.34.1"
+CHART_PROMETHEUS_STACK="88.3.0"
+CHART_LOKI="7.3.0"
+CHART_TEMPO="1.24.4"
+CHART_ALLOY="1.11.1"
+CHART_ARGOCD="10.3.3"
+CHART_HEADLAMP="0.44.0"
+CHART_VELERO="12.1.0"
+CHART_CLUSTER_AUTOSCALER="9.59.0"
+CHART_FORGEJO="17.1.4"
+CHART_WOODPECKER="3.7.0"
+CHART_ENVOY_GATEWAY="1.9.0"
+CHART_KYVERNO="3.8.2"
+CHART_RELOADER="2.2.16"
+
+# The Keycloak Operator ships as plain manifests, not a chart.
+KEYCLOAK_OPERATOR_VERSION="26.7.1"
+KEYCLOAK_MANIFEST_BASE="https://raw.githubusercontent.com/keycloak/keycloak-k8s-resources/${KEYCLOAK_OPERATOR_VERSION}/kubernetes"
+
+# Point at this environment's cluster rather than whatever context is active.
+use_env_kubeconfig
+
+# Credentials produced by tofu (managed environments).
+SECRETS_FILE="${SCRIPT_ENV_DIR}/secrets.env"
+MANUAL_SECRETS_FILE="${SCRIPT_ENV_DIR}/manual-secrets.env"
+load_secrets() {
+    if [[ -f "$SECRETS_FILE" ]]; then
+        set -a; source "$SECRETS_FILE"; set +a
+    fi
+    if [[ -f "$MANUAL_SECRETS_FILE" ]]; then
+        set -a; source "$MANUAL_SECRETS_FILE"; set +a
+    fi
+}
+load_secrets
+
 # =============================================================================
-# DevOps Platform Deployment
+# Cluster prerequisites
 # =============================================================================
 
 create_devops_namespaces() {
@@ -37,31 +94,43 @@ create_devops_namespaces() {
     log_info "Namespaces created"
 }
 
-copy_tls_secrets() {
-    if [[ "$ENV" != "local" ]]; then return 0; fi
-
-    log_step "Copying TLS secrets to namespaces..."
-
-    local CERT_B64=$(base64 -w 0 "${CERTS_DIR}/domains/local-dev.crt")
-    local KEY_B64=$(base64 -w 0 "${CERTS_DIR}/domains/local-dev.key")
-
-    for ns in data-services keycloak vault gitlab argocd monitoring headlamp; do
-        kubectl create namespace "$ns" 2>/dev/null || true
-        cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Secret
-metadata:
-  name: local-tls-secret
-  namespace: ${ns}
-type: kubernetes.io/tls
-data:
-  tls.crt: ${CERT_B64}
-  tls.key: ${KEY_B64}
-EOF
-    done
-
-    log_info "TLS secrets distributed"
+apply_scheduling_policies() {
+    log_step "Applying priority classes..."
+    kubectl apply -f "${BASE_DIR}/devops/policy/priority-classes.yaml"
+    log_info "Priority classes applied"
 }
+
+apply_network_policies() {
+    log_step "Applying network policies..."
+    kubectl apply -f "${BASE_DIR}/devops/policy/network-policies.yaml"
+    log_info "Network policies applied (default-deny ingress per namespace)"
+}
+
+apply_disruption_budgets() {
+    log_step "Applying pod disruption budgets..."
+    kubectl apply -f "${BASE_DIR}/devops/policy/pod-disruption-budgets.yaml"
+    log_info "PodDisruptionBudgets applied"
+}
+
+install_storage_class() {
+    # EKS has no usable default StorageClass; every other target does.
+    if [[ "$CLOUD" != "aws" ]]; then return 0; fi
+
+    log_step "Applying gp3 default StorageClass..."
+    kubectl apply -f "${BASE_DIR}/devops/storage/storageclass-aws.yaml"
+
+    # gp2 ships as the default on older clusters; two defaults is undefined behaviour.
+    if kubectl get storageclass gp2 &>/dev/null; then
+        kubectl patch storageclass gp2 \
+            -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' \
+            &>/dev/null || true
+    fi
+    log_info "gp3 is the default StorageClass"
+}
+
+# =============================================================================
+# Platform components
+# =============================================================================
 
 install_cert_manager() {
     if [[ "$ENV" == "local" ]]; then
@@ -74,7 +143,7 @@ install_cert_manager() {
     helm upgrade --install cert-manager jetstack/cert-manager \
         --namespace cert-manager \
         --create-namespace \
-        --version v1.20.1 \
+        --version "$CHART_CERT_MANAGER" \
         -f "${BASE_DIR}/devops/cert-manager/values.yaml" \
         --atomic --timeout 5m
 
@@ -102,24 +171,27 @@ install_data_services() {
     if ! kubectl get secret postgresql-credentials -n data-services &>/dev/null; then
         local PG_ADMIN_PASSWORD=$(openssl rand -base64 24)
         local PG_KEYCLOAK_PASSWORD=$(openssl rand -base64 24)
-        local PG_GITLAB_PASSWORD=$(openssl rand -base64 24)
+        local PG_FORGEJO_PASSWORD=$(openssl rand -base64 24)
 
         kubectl create secret generic postgresql-credentials -n data-services \
             --from-literal=postgres-password="$PG_ADMIN_PASSWORD" \
             --from-literal=keycloak-password="$PG_KEYCLOAK_PASSWORD" \
-            --from-literal=gitlab-password="$PG_GITLAB_PASSWORD"
+            --from-literal=forgejo-password="$PG_FORGEJO_PASSWORD"
+
+        # Consumed by install_forgejo when there is no managed database.
+        kubectl create secret generic forgejo-db-credentials -n data-services \
+            --from-literal=password="$PG_FORGEJO_PASSWORD"
 
         # Create corresponding secrets in consuming namespaces
         kubectl create namespace keycloak 2>/dev/null || true
         kubectl create secret generic keycloak-db-secret -n keycloak \
+            --from-literal=username=keycloak \
             --from-literal=password="$PG_KEYCLOAK_PASSWORD" \
-            --from-literal=postgres-password="$PG_ADMIN_PASSWORD" \
             2>/dev/null || true
 
-        kubectl create namespace gitlab 2>/dev/null || true
-        kubectl create secret generic gitlab-postgresql-secret -n gitlab \
-            --from-literal=password="$PG_GITLAB_PASSWORD" \
-            --from-literal=postgres-password="$PG_ADMIN_PASSWORD" \
+        kubectl create namespace forgejo 2>/dev/null || true
+        kubectl create secret generic forgejo-db-secret -n forgejo \
+            --from-literal=password="$PG_FORGEJO_PASSWORD" \
             2>/dev/null || true
 
         # Update init SQL with actual passwords
@@ -136,98 +208,47 @@ CREATE DATABASE keycloak OWNER keycloak;
 
 DO \$\$
 BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'gitlab') THEN
-    CREATE ROLE gitlab WITH LOGIN PASSWORD '${PG_GITLAB_PASSWORD}';
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'forgejo') THEN
+    CREATE ROLE forgejo WITH LOGIN PASSWORD '${PG_FORGEJO_PASSWORD}';
   END IF;
 END \$\$;
-CREATE DATABASE gitlab OWNER gitlab;
-
-\c gitlab
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-CREATE EXTENSION IF NOT EXISTS btree_gist;
+CREATE DATABASE forgejo OWNER forgejo;
 EOSQL
         fi
     else
         log_info "PostgreSQL credentials already exist"
     fi
 
-    # Generate Valkey credentials if not exists
+    # The StatefulSets mount these; Forgejo needs neither, but the services are
+    # deployed for parity with the managed environments (and MinIO gives the local
+    # environment an S3 endpoint to develop against).
     if ! kubectl get secret valkey-credentials -n data-services &>/dev/null; then
-        local VALKEY_PASSWORD=$(openssl rand -base64 24)
-
         kubectl create secret generic valkey-credentials -n data-services \
-            --from-literal=password="$VALKEY_PASSWORD"
-
-        kubectl create namespace gitlab 2>/dev/null || true
-        kubectl create secret generic gitlab-redis-secret -n gitlab \
-            --from-literal=password="$VALKEY_PASSWORD" \
-            2>/dev/null || true
+            --from-literal=password="$(openssl rand -base64 24)"
     else
         log_info "Valkey credentials already exist"
     fi
 
-    # Generate MinIO credentials if not exists
     if ! kubectl get secret minio-credentials -n data-services &>/dev/null; then
-        local MINIO_ACCESS_KEY=$(openssl rand -hex 16)
-        local MINIO_SECRET_KEY=$(openssl rand -base64 32)
-
         kubectl create secret generic minio-credentials -n data-services \
-            --from-literal=access-key="$MINIO_ACCESS_KEY" \
-            --from-literal=secret-key="$MINIO_SECRET_KEY"
-
-        kubectl create namespace gitlab 2>/dev/null || true
-
-        cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Secret
-metadata:
-  name: gitlab-object-storage-secret
-  namespace: gitlab
-type: Opaque
-stringData:
-  connection: |
-    provider: AWS
-    aws_access_key_id: "${MINIO_ACCESS_KEY}"
-    aws_secret_access_key: "${MINIO_SECRET_KEY}"
-    region: us-east-1
-    endpoint: "http://minio.data-services.svc.cluster.local:9000"
-    path_style: true
-EOF
-
-        cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Secret
-metadata:
-  name: gitlab-registry-storage-secret
-  namespace: gitlab
-type: Opaque
-stringData:
-  config: |
-    s3:
-      accesskey: "${MINIO_ACCESS_KEY}"
-      secretkey: "${MINIO_SECRET_KEY}"
-      region: us-east-1
-      regionendpoint: "http://minio.data-services.svc.cluster.local:9000"
-      bucket: gitlab-registry
-      v4auth: true
-EOF
+            --from-literal=access-key="$(openssl rand -hex 16)" \
+            --from-literal=secret-key="$(openssl rand -base64 32)"
     else
         log_info "MinIO credentials already exist"
     fi
 
-    # Deploy PostgreSQL
+    # Deploy PostgreSQL, Valkey, MinIO
     log_info "Deploying PostgreSQL..."
     kubectl apply -f "${DATA_SERVICES_DIR}/postgresql.yaml"
-
-    # Deploy Valkey
     log_info "Deploying Valkey..."
     kubectl apply -f "${DATA_SERVICES_DIR}/valkey.yaml"
-
-    # Deploy MinIO
     log_info "Deploying MinIO..."
+    # A Job's pod template is immutable, so re-applying minio.yaml after editing the
+    # bucket list fails. The job only runs `mc mb --ignore-existing`, so recreating
+    # it on every deploy is both safe and the only way to stay idempotent.
+    kubectl delete job minio-init-buckets -n data-services --ignore-not-found >/dev/null
     kubectl apply -f "${DATA_SERVICES_DIR}/minio.yaml"
 
-    # Wait for data services to be ready
     log_info "Waiting for data services to be ready..."
     kubectl wait --for=condition=ready pod -l app=postgresql -n data-services --timeout=120s || true
     kubectl wait --for=condition=ready pod -l app=valkey -n data-services --timeout=120s || true
@@ -236,74 +257,128 @@ EOF
     log_info "Shared data services installed"
 }
 
+# Managed clouds: create the K8s secrets the charts expect, from the credentials
+# tofu generated. This used to print a list of kubectl commands and leave the
+# operator to run them by hand, which is both error-prone and how half-configured
+# clusters happen.
 configure_managed_data_services() {
     log_step "Configuring managed data services..."
 
-    if [[ -z "${PG_HOST:-}" ]]; then
-        log_warn "PG_HOST not set — update dataServices.postgresql.host in config.yaml"
-    fi
-    if [[ -z "${VALKEY_HOST:-}" ]]; then
-        log_warn "VALKEY_HOST not set — update dataServices.valkey.host in config.yaml"
-    fi
-    if [[ -z "${S3_ENDPOINT:-}" ]]; then
-        log_warn "S3_ENDPOINT not set — update dataServices.s3.endpoint in config.yaml"
+    if [[ ! -f "$SECRETS_FILE" ]]; then
+        log_error "No credentials found at ${SECRETS_FILE}"
+        log_error "Run: ./sync-tofu-outputs.sh --env ${ENV}"
+        exit 1
     fi
 
-    local missing_secrets=()
+    [[ -n "${PG_HOST:-}" ]] || { log_error "PG_HOST missing from tofu outputs"; exit 1; }
 
     kubectl create namespace keycloak 2>/dev/null || true
-    kubectl create namespace gitlab 2>/dev/null || true
+    kubectl create namespace forgejo 2>/dev/null || true
 
-    if ! kubectl get secret keycloak-db-secret -n keycloak &>/dev/null; then
-        missing_secrets+=("keycloak-db-secret -n keycloak (keys: password)")
-    fi
-    if ! kubectl get secret gitlab-postgresql-secret -n gitlab &>/dev/null; then
-        missing_secrets+=("gitlab-postgresql-secret -n gitlab (keys: password, postgres-password)")
-    fi
-    if ! kubectl get secret gitlab-redis-secret -n gitlab &>/dev/null; then
-        missing_secrets+=("gitlab-redis-secret -n gitlab (keys: password)")
-    fi
-    if ! kubectl get secret gitlab-object-storage-secret -n gitlab &>/dev/null; then
-        missing_secrets+=("gitlab-object-storage-secret -n gitlab (keys: connection)")
-    fi
-    if ! kubectl get secret gitlab-registry-storage-secret -n gitlab &>/dev/null; then
-        missing_secrets+=("gitlab-registry-storage-secret -n gitlab (keys: config)")
-    fi
+    log_info "PostgreSQL: ${PG_HOST}:${PG_PORT}"
 
-    if [[ ${#missing_secrets[@]} -gt 0 ]]; then
-        log_warn "The following secrets must be created before deploying:"
-        for s in "${missing_secrets[@]}"; do
-            log_warn "  kubectl create secret generic $s"
-        done
-        log_warn "Services will fail to start without these secrets."
-    fi
+    # The Keycloak Operator reads username and password from this secret.
+    kubectl create secret generic keycloak-db-secret -n keycloak \
+        --from-literal=username=keycloak \
+        --from-literal=password="${PG_KEYCLOAK_PASSWORD}" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-    log_info "Managed data services configured"
+    # Forgejo takes its database password as a config override env var.
+    kubectl create secret generic forgejo-db-secret -n forgejo \
+        --from-literal=password="${PG_FORGEJO_PASSWORD}" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+    log_info "Managed data service secrets created"
 }
 
+# Managed PostgreSQL has no Terraform resource for local users, so create them
+# from a throwaway pod using the admin credentials tofu generated.
+create_db_users() {
+    log_step "Creating managed PostgreSQL users..."
+
+    if [[ "$DATA_SERVICES_TYPE" != "managed" ]]; then
+        log_info "Local data services create their users via the init SQL — nothing to do"
+        return 0
+    fi
+
+    [[ -f "$SECRETS_FILE" ]] || { log_error "No ${SECRETS_FILE}; run sync-tofu-outputs.sh first"; exit 1; }
+    [[ -n "${PG_ADMIN_PASSWORD:-}" ]] || { log_error "PG_ADMIN_PASSWORD missing from ${SECRETS_FILE}"; exit 1; }
+
+    local admin_login="${PG_ADMIN_LOGIN:-pgadmin}"
+
+    # db-users runs before the platform deploy (Keycloak and Forgejo cannot start
+    # without their database users), so the namespace it borrows may not exist yet.
+    kubectl create namespace data-services 2>/dev/null || true
+
+    local sql
+    sql="$(cat <<EOSQL
+DO \$\$ BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'keycloak') THEN
+    CREATE ROLE keycloak WITH LOGIN PASSWORD '${PG_KEYCLOAK_PASSWORD}';
+  ELSE
+    ALTER ROLE keycloak WITH PASSWORD '${PG_KEYCLOAK_PASSWORD}';
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'forgejo') THEN
+    CREATE ROLE forgejo WITH LOGIN PASSWORD '${PG_FORGEJO_PASSWORD}';
+  ELSE
+    ALTER ROLE forgejo WITH PASSWORD '${PG_FORGEJO_PASSWORD}';
+  END IF;
+END \$\$;
+GRANT ALL PRIVILEGES ON DATABASE keycloak TO keycloak;
+GRANT ALL PRIVILEGES ON DATABASE forgejo TO forgejo;
+EOSQL
+)"
+
+    # The pod runs inside the cluster, which is the only network with a route to
+    # the private database endpoint.
+    kubectl run "pg-init-$$" \
+        --rm -i --restart=Never \
+        --image=postgres:16 \
+        --namespace=data-services \
+        --env="PGPASSWORD=${PG_ADMIN_PASSWORD}" \
+        --command -- psql \
+            -h "${PG_HOST}" -p "${PG_PORT}" -U "${admin_login}" -d postgres \
+            -v ON_ERROR_STOP=1 -c "$sql"
+
+    log_info "Database users created"
+}
+
+# Keycloak via the official Operator — the project's recommended way to run on
+# Kubernetes. It owns the StatefulSet, performs database migrations on upgrade and
+# exposes realms as CRDs, replacing the community keycloakx chart.
 install_keycloak() {
-    log_step "Installing Keycloak..."
+    log_step "Installing Keycloak (operator ${KEYCLOAK_OPERATOR_VERSION})..."
 
     kubectl create namespace keycloak 2>/dev/null || true
 
-    # RBAC for JGroups KUBE_PING pod discovery (required for --cache-stack=kubernetes)
-    kubectl apply -f "${BASE_DIR}/devops/keycloak/rbac.yaml"
-
-    # Create admin credentials secret if not exists
+    # Admin bootstrap credentials. The operator reads username/password.
     if ! kubectl get secret keycloak-admin-secret -n keycloak &>/dev/null; then
-        local ADMIN_PASSWORD=$(openssl rand -base64 24)
         kubectl create secret generic keycloak-admin-secret -n keycloak \
-            --from-literal=KEYCLOAK_ADMIN=admin \
-            --from-literal=KEYCLOAK_ADMIN_PASSWORD="$ADMIN_PASSWORD"
+            --from-literal=username=admin \
+            --from-literal=password="$(openssl rand -base64 24)"
     fi
 
-    local values_args=$(get_values_args "keycloak")
+    # All four CRDs, not just Keycloak + KeycloakRealmImport: the operator starts an
+    # informer for every type it owns and exits if one is missing.
+    log_info "Applying Keycloak CRDs..."
+    local crd
+    for crd in keycloaks keycloakrealmimports keycloakoidcclients keycloaksamlclients; do
+        kubectl apply --server-side -f "${KEYCLOAK_MANIFEST_BASE}/${crd}.k8s.keycloak.org-v1.yml"
+    done
 
-    helm upgrade --install keycloak codecentric/keycloakx \
-        --namespace keycloak \
-        --version 7.1.9 \
-        $values_args \
-        --atomic --timeout 10m
+    log_info "Installing the operator..."
+    kubectl apply -n keycloak -f "${KEYCLOAK_MANIFEST_BASE}/kubernetes.yml"
+    kubectl rollout status deploy/keycloak-operator -n keycloak --timeout=180s \
+        || log_warn "Operator not ready yet — check: kubectl logs -n keycloak deploy/keycloak-operator"
+
+    # The Keycloak instance itself.
+    local dir; dir="$(render_dir)"
+    template_values "${BASE_DIR}/devops/keycloak/keycloak-cr.yaml" "${dir}/keycloak-cr.yaml"
+    kubectl apply -f "${dir}/keycloak-cr.yaml"
+
+    log_info "Waiting for Keycloak to become ready (first start runs migrations)..."
+    kubectl wait --for=condition=Ready keycloak/keycloak -n keycloak --timeout=600s \
+        || log_warn "Keycloak not ready yet — check: kubectl describe keycloak keycloak -n keycloak"
 
     log_info "Keycloak installed"
 }
@@ -315,31 +390,36 @@ install_vault() {
 
     local values_args=$(get_values_args "vault")
 
-    # Apply cloud KMS auto-unseal overlay if the required variables are configured.
-    # See overlays/{cloud}/devops/vault/vault-autounseal-values.yaml for setup instructions.
+    # Cloud KMS auto-unseal, when tofu has provisioned the key. Without it Vault
+    # needs manual unsealing after every restart, which is why unseal keys used
+    # to be parked in a cluster secret.
     local autounseal_overlay="${OVERLAY_DIR}/devops/vault/vault-autounseal-values.yaml"
     if [[ -f "$autounseal_overlay" ]]; then
         local apply_autounseal=false
-        case "$ENV" in
-            aws-*)   [[ -n "${VAULT_KMS_KEY_ID:-}" ]]    && apply_autounseal=true ;;
-            azure-*) [[ -n "${VAULT_KEY_VAULT_NAME:-}" ]] && apply_autounseal=true ;;
-            gcp-*)   [[ -n "${VAULT_KMS_KEY_RING:-}" ]]   && apply_autounseal=true ;;
+        case "$CLOUD" in
+            aws)   [[ -n "${VAULT_KMS_KEY_ID:-}" ]]      && apply_autounseal=true ;;
+            azure) [[ -n "${VAULT_KEY_VAULT_NAME:-}" ]]  && apply_autounseal=true ;;
+            gcp)   [[ -n "${VAULT_KMS_KEY_RING:-}" ]]    && apply_autounseal=true ;;
         esac
         if $apply_autounseal; then
-            template_values "$autounseal_overlay" "/tmp/vault-autounseal-values.yaml"
-            values_args="$values_args -f /tmp/vault-autounseal-values.yaml"
+            local dir; dir="$(render_dir)"
+            template_values "$autounseal_overlay" "${dir}/vault-autounseal-values.yaml"
+            values_args="$values_args -f ${dir}/vault-autounseal-values.yaml"
             log_info "Vault auto-unseal (cloud KMS) enabled"
         else
-            log_warn "Vault KMS variables not set — running with manual unseal"
-            log_warn "See ${autounseal_overlay} for setup instructions"
+            log_warn "Vault KMS variables not set — Vault will need manual unsealing"
+            log_warn "Provision the key with tofu, then re-run sync-tofu-outputs.sh"
         fi
     fi
 
     helm upgrade --install vault hashicorp/vault \
         --namespace vault \
-        --version 0.32.0 \
+        --version "$CHART_VAULT" \
         $values_args \
         --atomic --timeout 5m
+
+    # Scheduled raft snapshots (consistent backups Vault can actually restore).
+    kubectl apply -f "${BASE_DIR}/devops/vault/raft-snapshot-cronjob.yaml"
 
     log_info "Vault installed"
 }
@@ -357,7 +437,7 @@ install_external_dns() {
     helm upgrade --install external-dns external-dns/external-dns \
         --namespace external-dns \
         --create-namespace \
-        --version 1.20.0 \
+        --version "$CHART_EXTERNAL_DNS" \
         $values_args \
         --atomic --timeout 5m
 
@@ -370,11 +450,46 @@ install_external_secrets() {
     helm upgrade --install external-secrets external-secrets/external-secrets \
         --namespace external-secrets \
         --create-namespace \
-        --version 2.3.0 \
+        --version "$CHART_EXTERNAL_SECRETS" \
         -f "${BASE_DIR}/devops/external-secrets/values.yaml" \
         --atomic --timeout 10m
 
     log_info "External Secrets installed"
+}
+
+# Generate the Loki ingest credentials used by workload clusters, and expose the
+# push endpoint. Basic auth via nginx, because the endpoint is public.
+setup_loki_auth() {
+    log_step "Configuring Loki ingest authentication..."
+
+    kubectl create namespace monitoring 2>/dev/null || true
+
+    if ! kubectl get secret loki-gateway-auth -n monitoring &>/dev/null; then
+        local password
+        password="$(openssl rand -base64 24 | tr -d '/+=')"
+
+        # Envoy Gateway's BasicAuth reads an htpasswd file from the .htpasswd key.
+        local htpasswd
+        htpasswd="workload:$(openssl passwd -apr1 "$password")"
+
+        kubectl create secret generic loki-gateway-auth -n monitoring \
+            --from-literal=.htpasswd="$htpasswd"
+
+        # Store the plaintext for register-workload-cluster.sh to distribute.
+        kubectl create secret generic loki-ingest-credentials -n monitoring \
+            --from-literal=username=workload \
+            --from-literal=password="$password"
+
+        log_info "Generated Loki ingest credentials (user: workload)"
+    else
+        log_info "Loki ingest credentials already exist"
+    fi
+
+    if [[ "$ENV" != "local" ]]; then
+        # The route itself lives in httproutes.yaml; this attaches basic auth to it.
+        kubectl apply -f "${BASE_DIR}/devops/monitoring/loki-securitypolicy.yaml"
+        log_info "Loki push endpoint published at https://loki.${DOMAIN}/loki/api/v1/push (basic auth)"
+    fi
 }
 
 install_monitoring() {
@@ -394,60 +509,73 @@ install_monitoring() {
             --from-literal=client-secret="placeholder"
     fi
 
+    # Alertmanager mounts this; an empty webhook keeps the config valid while
+    # alerts remain visible in the Alertmanager UI.
+    if ! kubectl get secret alertmanager-slack -n monitoring &>/dev/null; then
+        kubectl create secret generic alertmanager-slack -n monitoring \
+            --from-literal=webhook-url=""
+        log_warn "Alertmanager Slack webhook is empty — alerts fire but are not delivered"
+        log_warn "Set one: vault kv put secret/platform/alertmanager webhook-url=https://hooks.slack.com/..."
+    fi
+
     # Prometheus stack uses monitoring overlay
     local base_values="${BASE_DIR}/devops/monitoring/prometheus-stack-values.yaml"
     local overlay_values="${OVERLAY_DIR}/devops/monitoring/values.yaml"
-    local templated_values="/tmp/monitoring-overlay-values.yaml"
+    local dir; dir="$(render_dir)"
 
     local prom_args="-f $base_values"
     if [[ -f "$overlay_values" ]]; then
-        template_values "$overlay_values" "$templated_values"
-        prom_args="$prom_args -f $templated_values"
+        template_values "$overlay_values" "${dir}/monitoring-overlay-values.yaml"
+        prom_args="$prom_args -f ${dir}/monitoring-overlay-values.yaml"
     fi
 
     helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
         --namespace monitoring \
-        --version 83.4.0 \
+        --version "$CHART_PROMETHEUS_STACK" \
         $prom_args \
         --atomic --timeout 10m
 
-    # Loki: apply cloud object-storage overlay if present (and WI/IRSA vars are set)
+    # Platform-specific alert rules (sealed Vault, stuck syncs, failed backups)
+    kubectl apply -f "${BASE_DIR}/devops/monitoring/platform-alerts.yaml"
+
+    # Loki: object storage overlay when the cloud identity exists, filesystem otherwise
     local loki_args="-f ${BASE_DIR}/devops/monitoring/loki-values.yaml"
     local loki_overlay="${OVERLAY_DIR}/devops/monitoring/loki-values.yaml"
     if [[ -f "$loki_overlay" ]]; then
         local apply_loki_overlay=false
-        case "$ENV" in
-            aws-*)   [[ -n "${LOKI_IRSA_ROLE_ARN:-}" ]]        && apply_loki_overlay=true ;;
-            azure-*) [[ -n "${LOKI_IDENTITY_CLIENT_ID:-}" ]]    && apply_loki_overlay=true ;;
-            gcp-*)   [[ -n "${LOKI_GSA_EMAIL:-}" ]]             && apply_loki_overlay=true ;;
+        case "$CLOUD" in
+            aws)   [[ -n "${LOKI_IRSA_ROLE_ARN:-}" ]]     && apply_loki_overlay=true ;;
+            azure) [[ -n "${LOKI_IDENTITY_CLIENT_ID:-}" ]] && apply_loki_overlay=true ;;
+            gcp)   [[ -n "${LOKI_GSA_EMAIL:-}" ]]          && apply_loki_overlay=true ;;
         esac
         if $apply_loki_overlay; then
-            template_values "$loki_overlay" "/tmp/loki-overlay-values.yaml"
-            loki_args="$loki_args -f /tmp/loki-overlay-values.yaml"
-            log_info "Loki cloud object storage enabled"
+            template_values "$loki_overlay" "${dir}/loki-overlay-values.yaml"
+            loki_args="$loki_args -f ${dir}/loki-overlay-values.yaml"
+            log_info "Loki cloud object storage enabled (${LOKI_BUCKET:-${LOKI_CONTAINER:-}})"
         else
-            log_warn "Loki WI/IRSA variables not set — using filesystem storage"
-            log_warn "See ${loki_overlay} for setup instructions"
+            log_warn "Loki object-storage identity not set — using a local PVC (logs lost on pod recycle)"
         fi
     fi
 
     helm upgrade --install loki grafana/loki \
         --namespace monitoring \
-        --version 6.55.0 \
+        --version "$CHART_LOKI" \
         $loki_args \
         --atomic --timeout 10m
 
     helm upgrade --install tempo grafana/tempo \
         --namespace monitoring \
-        --version 1.24.4 \
+        --version "$CHART_TEMPO" \
         -f "${BASE_DIR}/devops/monitoring/tempo-values.yaml" \
         --atomic --timeout 5m
 
     helm upgrade --install alloy grafana/alloy \
         --namespace monitoring \
-        --version 1.7.0 \
+        --version "$CHART_ALLOY" \
         -f "${BASE_DIR}/devops/monitoring/alloy-values.yaml" \
         --atomic --timeout 5m
+
+    setup_loki_auth
 
     # Remove legacy promtail release if it still exists (replaced by Alloy)
     if helm status promtail -n monitoring &>/dev/null; then
@@ -458,81 +586,200 @@ install_monitoring() {
     log_info "Monitoring stack installed"
 }
 
-install_gitlab() {
-    log_step "Installing GitLab CE..."
-
-    kubectl create namespace gitlab 2>/dev/null || true
-
-    # Runner cache PVC (referenced in gitlab/values.yaml runner config)
-    kubectl apply -f "${BASE_DIR}/devops/gitlab/runner-cache-pvc.yaml"
-
-    # Create placeholder OIDC secret so GitLab pods can mount volumes before Keycloak SSO is configured
-    if ! kubectl get secret gitlab-oidc-secret -n gitlab &>/dev/null; then
-        kubectl create secret generic gitlab-oidc-secret -n gitlab \
-            --from-literal=provider='{"name":"openid_connect","label":"Keycloak","args":{"name":"openid_connect","scope":["openid","profile","email"],"response_type":"code","issuer":"https://keycloak.'"${DOMAIN}"'/realms/devops","discovery":true,"client_auth_method":"query","uid_field":"preferred_username","client_options":{"identifier":"gitlab","secret":"placeholder","redirect_uri":"https://gitlab.'"${DOMAIN}"'/users/auth/openid_connect/callback"}}}'
+install_velero() {
+    if [[ "$ENV" == "local" ]]; then
+        log_info "Skipping Velero (no cloud backup target for local)"
+        return 0
     fi
 
-    local values_args=$(get_values_args "gitlab")
+    local have_target=false
+    case "$CLOUD" in
+        aws)   [[ -n "${VELERO_BUCKET:-}" ]]    && have_target=true ;;
+        gcp)   [[ -n "${VELERO_BUCKET:-}" ]]    && have_target=true ;;
+        azure) [[ -n "${VELERO_CONTAINER:-}" ]] && have_target=true ;;
+    esac
 
-    helm upgrade --install gitlab gitlab/gitlab \
-        --namespace gitlab \
-        --version 9.10.3 \
+    if ! $have_target; then
+        log_warn "Skipping Velero: no backup bucket in the tofu outputs for ${CLOUD}"
+        log_warn "Apply the platform tofu module, then re-run sync-tofu-outputs.sh"
+        return 0
+    fi
+
+    log_step "Installing Velero (cluster backups)..."
+
+    kubectl create namespace velero 2>/dev/null || true
+
+    local values_args=$(get_values_args "velero")
+
+    helm upgrade --install velero vmware-tanzu/velero \
+        --namespace velero \
+        --version "$CHART_VELERO" \
         $values_args \
-        --atomic --timeout 30m
+        --atomic --timeout 10m
 
-    log_info "GitLab installed"
+    log_info "Velero installed — daily full backups at 02:00, platform state hourly"
 }
 
-install_crossplane() {
-    log_step "Installing Crossplane..."
+install_cluster_autoscaler() {
+    # AWS is the only target where the autoscaler is a separate component; AKS and
+    # GKE run theirs inside the managed control plane.
+    if [[ "$CLOUD" != "aws" ]]; then return 0; fi
+    if [[ -z "${CLUSTER_AUTOSCALER_IRSA_ROLE_ARN:-}" ]]; then
+        log_warn "Skipping cluster-autoscaler: CLUSTER_AUTOSCALER_IRSA_ROLE_ARN not set"
+        return 0
+    fi
 
-    kubectl create namespace crossplane-system 2>/dev/null || true
+    log_step "Installing cluster-autoscaler..."
 
-    local values_args=$(get_values_args "crossplane")
-
-    helm upgrade --install crossplane crossplane-stable/crossplane \
-        --namespace crossplane-system \
-        --version 2.2.0 \
-        $values_args \
+    helm upgrade --install cluster-autoscaler autoscaler/cluster-autoscaler \
+        --namespace kube-system \
+        --version "$CHART_CLUSTER_AUTOSCALER" \
+        --set autoDiscovery.clusterName="${CLUSTER_NAME}" \
+        --set awsRegion="${AWS_REGION}" \
+        --set rbac.serviceAccount.name=cluster-autoscaler \
+        --set rbac.serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${CLUSTER_AUTOSCALER_IRSA_ROLE_ARN}" \
+        --set extraArgs.balance-similar-node-groups=true \
+        --set extraArgs.skip-nodes-with-local-storage=false \
+        --set priorityClassName=platform-standard \
         --atomic --timeout 5m
 
-    # Wait for core pods to be ready
-    kubectl wait --for=condition=ready pod -l app=crossplane -n crossplane-system --timeout=120s 2>/dev/null || true
+    log_info "cluster-autoscaler installed"
+}
 
-    # Install UpCloud provider
-    log_info "Applying UpCloud provider..."
-    kubectl apply -f "${BASE_DIR}/crossplane/provider-upcloud.yaml"
+# Forgejo — git hosting, issues, packages and the container registry.
+install_forgejo() {
+    log_step "Installing Forgejo..."
 
-    # Wait for provider to become healthy (up to 5 minutes)
-    log_info "Waiting for UpCloud provider to become healthy..."
-    local attempts=0
-    local max_attempts=30
-    while [[ $attempts -lt $max_attempts ]]; do
-        local healthy=$(kubectl get providers.pkg.crossplane.io provider-upcloud -o jsonpath='{.status.conditions[?(@.type=="Healthy")].status}' 2>/dev/null || echo "")
-        if [[ "$healthy" == "True" ]]; then
-            log_info "UpCloud provider is healthy"
-            break
+    kubectl create namespace forgejo 2>/dev/null || true
+
+    # Admin account for first login (SSO users arrive via Keycloak afterwards).
+    if ! kubectl get secret forgejo-admin-secret -n forgejo &>/dev/null; then
+        kubectl create secret generic forgejo-admin-secret -n forgejo \
+            --from-literal=username=devhub-admin \
+            --from-literal=password="$(openssl rand -base64 24)" \
+            --from-literal=email="${ACME_EMAIL:-admin@${DOMAIN}}"
+    fi
+
+    # Database password, injected as a Forgejo config override.
+    if ! kubectl get secret forgejo-db-secret -n forgejo &>/dev/null; then
+        local pw="${PG_FORGEJO_PASSWORD:-}"
+        if [[ -z "$pw" ]]; then
+            pw="$(kubectl get secret forgejo-db-credentials -n data-services \
+                  -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
         fi
-        attempts=$((attempts + 1))
-        sleep 10
-    done
-
-    if [[ $attempts -ge $max_attempts ]]; then
-        log_warn "UpCloud provider not yet healthy after 5 minutes — it may still be pulling the image"
+        [[ -n "$pw" ]] || { log_error "No Forgejo database password available"; exit 1; }
+        kubectl create secret generic forgejo-db-secret -n forgejo \
+            --from-literal=password="$pw"
     fi
 
-    # Apply ProviderConfig only if the credentials secret exists
-    if kubectl get secret upcloud-api-credentials -n crossplane-system &>/dev/null; then
-        kubectl apply -f "${BASE_DIR}/crossplane/provider-config.yaml"
-        log_info "ProviderConfig applied"
-    else
-        log_warn "Secret 'upcloud-api-credentials' not found in crossplane-system"
-        log_warn "Create it before using Crossplane to provision UpCloud resources:"
-        log_warn "  kubectl create secret generic upcloud-api-credentials -n crossplane-system \\"
-        log_warn "    --from-literal=credentials='{\"username\":\"...\",\"password\":\"...\"}'"
+    # No OIDC secret is needed at install time: setup-keycloak.sh registers the
+    # login source through Forgejo's admin CLI once the realm exists.
+
+    local values_args=$(get_values_args "forgejo")
+
+    helm upgrade --install forgejo oci://code.forgejo.org/forgejo-helm/forgejo \
+        --namespace forgejo \
+        --version "$CHART_FORGEJO" \
+        $values_args \
+        --atomic --timeout 10m
+
+    log_info "Forgejo installed — https://git.${DOMAIN}"
+}
+
+# Woodpecker CI — pipelines for Forgejo repositories, each step an unprivileged pod.
+install_woodpecker() {
+    log_step "Installing Woodpecker CI..."
+
+    kubectl create namespace woodpecker 2>/dev/null || true
+    kubectl create namespace woodpecker-ci 2>/dev/null || true
+
+    # Shared secret between server and agents.
+    # The name is the chart's: its agent StatefulSet mounts
+    # woodpecker-default-agent-secret unconditionally.
+    if ! kubectl get secret woodpecker-default-agent-secret -n woodpecker &>/dev/null; then
+        local agent_secret; agent_secret="$(openssl rand -hex 32)"
+        kubectl create secret generic woodpecker-default-agent-secret -n woodpecker \
+            --from-literal=WOODPECKER_AGENT_SECRET="$agent_secret"
+        # The server needs the same value plus the Forgejo OAuth application.
+        kubectl create secret generic woodpecker-server-secret -n woodpecker \
+            --from-literal=WOODPECKER_AGENT_SECRET="$agent_secret" \
+            --from-literal=WOODPECKER_GITEA_CLIENT=placeholder \
+            --from-literal=WOODPECKER_GITEA_SECRET=placeholder
+        log_warn "Woodpecker's Forgejo OAuth application is a placeholder."
+        log_warn "Create it in Forgejo (Settings → Applications) and update:"
+        log_warn "  kubectl create secret generic woodpecker-server-secret -n woodpecker ..."
     fi
 
-    log_info "Crossplane installed"
+    local values_args=$(get_values_args "woodpecker")
+
+    helm upgrade --install woodpecker woodpecker/woodpecker \
+        --namespace woodpecker \
+        --version "$CHART_WOODPECKER" \
+        $values_args \
+        --atomic --timeout 10m
+
+    log_info "Woodpecker installed — https://ci.${DOMAIN}"
+}
+
+# Woodpecker signs users in through Forgejo, so it needs an OAuth2 application
+# registered there. Forgejo's API can create one; this replaces the placeholder
+# credentials install_woodpecker seeded.
+configure_woodpecker_oauth() {
+    log_step "Registering Woodpecker as an OAuth application in Forgejo..."
+
+    local pod
+    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    if [[ -z "$pod" ]]; then
+        log_warn "Forgejo is not running yet — run this later:"
+        log_warn "  ./deploy.sh --env ${ENV} woodpecker-oauth"
+        return 0
+    fi
+
+    # A short-lived admin token, used only for the two API calls below.
+    local admin_user token
+    admin_user="$(kubectl get secret forgejo-admin-secret -n forgejo \
+        -o jsonpath='{.data.username}' | base64 -d)"
+    token="$(kubectl exec -n forgejo "$pod" -- forgejo admin user generate-access-token \
+        --username "$admin_user" --token-name "woodpecker-setup-$(date +%s)" \
+        --scopes write:user --raw 2>/dev/null | tr -d '\r' | tail -1)"
+
+    if [[ -z "$token" ]]; then
+        log_warn "Could not mint a Forgejo admin token — register the application by hand:"
+        log_warn "  Forgejo → Settings → Applications → Create OAuth2 application"
+        log_warn "  Redirect URI: https://ci.${DOMAIN}/authorize"
+        return 0
+    fi
+
+    local response
+    response="$(kubectl exec -n forgejo "$pod" -- curl -fsS \
+        -X POST "http://localhost:3000/api/v1/user/applications/oauth2" \
+        -H "Authorization: token ${token}" \
+        -H "Content-Type: application/json" \
+        -d "{\"name\":\"Woodpecker CI\",\"redirect_uris\":[\"https://ci.${DOMAIN}/authorize\"],\"confidential_client\":true}" \
+        2>/dev/null || echo "")"
+
+    local client_id client_secret
+    client_id="$(echo "$response" | jq -r '.client_id // empty' 2>/dev/null)"
+    client_secret="$(echo "$response" | jq -r '.client_secret // empty' 2>/dev/null)"
+
+    if [[ -z "$client_id" || -z "$client_secret" ]]; then
+        log_warn "Forgejo did not return OAuth credentials; register the application by hand."
+        return 0
+    fi
+
+    local agent_secret
+    agent_secret="$(kubectl get secret woodpecker-default-agent-secret -n woodpecker \
+        -o jsonpath='{.data.WOODPECKER_AGENT_SECRET}' | base64 -d)"
+
+    kubectl create secret generic woodpecker-server-secret -n woodpecker \
+        --from-literal=WOODPECKER_AGENT_SECRET="$agent_secret" \
+        --from-literal=WOODPECKER_GITEA_CLIENT="$client_id" \
+        --from-literal=WOODPECKER_GITEA_SECRET="$client_secret" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+    kubectl rollout restart statefulset/woodpecker-server -n woodpecker >/dev/null 2>&1 || true
+    log_info "Woodpecker OAuth application registered"
 }
 
 install_argocd() {
@@ -542,113 +789,31 @@ install_argocd() {
 
     local values_args=$(get_values_args "argocd")
 
-    # For local env, add hostAliases so ArgoCD server can reach keycloak.localhost
-    # (glibc resolves *.localhost to 127.0.0.1 before querying DNS)
+    # On the local environment ArgoCD's OIDC discovery call targets
+    # keycloak.localhost, and glibc resolves *.localhost to 127.0.0.1 before DNS.
+    # A hostAlias pointing at the Envoy data-plane service makes the call land on
+    # the gateway instead.
     local extra_args=""
     if [[ "$ENV" == "local" ]]; then
-        local ingress_ip
-        ingress_ip=$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.spec.clusterIP}' 2>/dev/null) || true
-        if [[ -n "$ingress_ip" ]]; then
-            extra_args="--set global.hostAliases[0].ip=${ingress_ip} --set global.hostAliases[0].hostnames[0]=keycloak.${DOMAIN}"
-            log_info "ArgoCD server hostAlias: keycloak.${DOMAIN} -> ${ingress_ip}"
+        local gw_ip
+        gw_ip="$(kubectl get svc -n envoy-gateway-system \
+            -l gateway.envoyproxy.io/owning-gateway-name=devhub \
+            -o jsonpath='{.items[0].spec.clusterIP}' 2>/dev/null || true)"
+        if [[ -n "$gw_ip" ]]; then
+            extra_args="--set global.hostAliases[0].ip=${gw_ip} --set global.hostAliases[0].hostnames[0]=keycloak.${DOMAIN}"
+            log_info "ArgoCD hostAlias: keycloak.${DOMAIN} -> ${gw_ip}"
         else
-            log_warn "Could not resolve ingress-nginx ClusterIP - ArgoCD OIDC may not work"
+            log_warn "Envoy data-plane service not found — ArgoCD SSO may fail to discover Keycloak"
         fi
     fi
 
     helm upgrade --install argocd argo/argo-cd \
         --namespace argocd \
-        --version 9.5.0 \
+        --version "$CHART_ARGOCD" \
         $values_args $extra_args \
         --atomic --timeout 5m
 
     log_info "ArgoCD installed"
-}
-
-bootstrap_argocd_apps() {
-    log_step "Bootstrapping ArgoCD app-of-apps..."
-
-    # Apply all ArgoCD projects
-    for f in "${ARGOCD_DIR}"/projects/*.yaml; do
-        [[ -f "$f" ]] && kubectl apply -f "$f"
-    done
-
-    # Apply app-of-apps (it auto-discovers ApplicationSets and other apps)
-    kubectl apply -f "${ARGOCD_DIR}/apps/app-of-apps.yaml"
-
-    log_info "ArgoCD app-of-apps deployed"
-    log_info "Applications will be managed via GitOps. Add manifests to k8s/argocd/apps/"
-}
-
-apply_devops_ingress() {
-    log_step "Applying DevOps ingress..."
-
-    local ingress_file="${OVERLAY_DIR}/devops/ingress.yaml"
-    local templated_ingress="/tmp/devops-ingress.yaml"
-
-    template_values "$ingress_file" "$templated_ingress"
-    kubectl apply -f "$templated_ingress"
-
-    log_info "DevOps ingress applied"
-}
-
-ensure_nginx_ingress() {
-    if [[ "$ENV" != "local" ]]; then return 0; fi
-
-    # Check if already installed and running
-    if helm list -n ingress-nginx 2>/dev/null | grep -q ingress-nginx; then
-        log_info "nginx-ingress already installed"
-        return 0
-    fi
-
-    log_step "Installing nginx-ingress controller..."
-
-    # Remove Traefik if present (Rancher Desktop default) to free ports 80/443
-    if helm list -n kube-system 2>/dev/null | grep -q traefik; then
-        log_info "Removing Traefik to free ports 80/443..."
-        helm uninstall traefik -n kube-system 2>/dev/null || true
-        helm uninstall traefik-crd -n kube-system 2>/dev/null || true
-        sleep 5
-    fi
-
-    # Ensure devhub namespace and TLS secret exist (needed for default-ssl-certificate)
-    kubectl create namespace devhub 2>/dev/null || true
-    local CERT_B64=$(base64 -w 0 "${CERTS_DIR}/domains/local-dev.crt")
-    local KEY_B64=$(base64 -w 0 "${CERTS_DIR}/domains/local-dev.key")
-    cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Secret
-metadata:
-  name: local-tls-secret
-  namespace: devhub
-type: kubernetes.io/tls
-data:
-  tls.crt: ${CERT_B64}
-  tls.key: ${KEY_B64}
-EOF
-
-    helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-        --namespace ingress-nginx \
-        --create-namespace \
-        --version 4.15.1 \
-        --set controller.service.type=LoadBalancer \
-        --set controller.service.externalTrafficPolicy=Local \
-        --set controller.config.proxy-body-size="100m" \
-        --set controller.config.ssl-redirect="true" \
-        --set controller.config.use-forwarded-headers="true" \
-        --set controller.config.compute-full-forwarded-for="true" \
-        --set controller.config.use-proxy-protocol="false" \
-        --set controller.extraArgs.default-ssl-certificate="devhub/local-tls-secret" \
-        --set controller.admissionWebhooks.enabled=false \
-        --timeout 5m
-
-    # Wait for controller to be ready
-    kubectl wait --namespace ingress-nginx \
-        --for=condition=ready pod \
-        --selector=app.kubernetes.io/component=controller \
-        --timeout=120s
-
-    log_info "nginx-ingress controller installed"
 }
 
 install_headlamp() {
@@ -656,23 +821,21 @@ install_headlamp() {
 
     kubectl create namespace headlamp 2>/dev/null || true
 
-    # Copy local TLS secret when running as a standalone install (deploy_devops copies it for full deploys)
     if [[ "$ENV" == "local" ]] && ! kubectl get secret local-tls-secret -n headlamp &>/dev/null; then
         kubectl create secret tls local-tls-secret -n headlamp \
             --cert="${CERTS_DIR}/domains/local-dev.crt" \
             --key="${CERTS_DIR}/domains/local-dev.key"
     fi
 
-    # Apply RBAC for Headlamp's in-cluster ServiceAccount
     kubectl apply -f "${BASE_DIR}/devops/headlamp/rbac.yaml"
 
-    # Create placeholder OIDC secret so Headlamp can start before Keycloak SSO is configured.
-    # Use internal K8s service URL for issuerURL so the Headlamp backend can reach Keycloak
-    # (glibc resolves *.localhost to 127.0.0.1 before DNS, breaking server-side OIDC calls).
+    # Placeholder OIDC secret so Headlamp can start before Keycloak SSO is configured.
+    # Internal service URL for issuerURL so the backend can reach Keycloak
+    # (glibc resolves *.localhost to 127.0.0.1 before DNS).
     if ! kubectl get secret headlamp-oidc-secret -n headlamp &>/dev/null; then
         local oidc_issuer
         if [[ "$DOMAIN" == "localhost" || "$DOMAIN" == *.localhost ]]; then
-            oidc_issuer="http://keycloak-keycloakx-http.keycloak.svc.cluster.local/realms/devops"
+            oidc_issuer="http://keycloak-service.keycloak.svc.cluster.local:8080/realms/devops"
         else
             oidc_issuer="https://keycloak.${DOMAIN}/realms/devops"
         fi
@@ -687,57 +850,305 @@ install_headlamp() {
 
     helm upgrade --install headlamp headlamp/headlamp \
         --namespace headlamp \
-        --version 0.41.0 \
+        --version "$CHART_HEADLAMP" \
         $values_args \
         --atomic --timeout 5m
 
     log_info "Headlamp installed"
 }
 
+# =============================================================================
+# GitOps handover
+# =============================================================================
+
+bootstrap_argocd_apps() {
+    log_step "Bootstrapping ArgoCD app-of-apps..."
+
+    if [[ -z "${GITOPS_REPO_URL:-}" ]]; then
+        log_error "gitops.repoUrl is not set in ${OVERLAY_DIR}/config.yaml"
+        exit 1
+    fi
+
+    local dir; dir="$(render_dir)"
+
+    for f in "${ARGOCD_DIR}"/projects/*.yaml; do
+        [[ -f "$f" ]] && kubectl apply -f "$f"
+    done
+
+    template_values "${ARGOCD_DIR}/apps/app-of-apps.yaml" "${dir}/app-of-apps.yaml"
+    kubectl apply -f "${dir}/app-of-apps.yaml"
+
+    log_info "ArgoCD app-of-apps deployed (repo: ${GITOPS_REPO_URL})"
+}
+
+# Hand the non-bootstrap platform components over to ArgoCD. From here on their
+# desired state is this repository, and drift is corrected automatically.
+enable_gitops_platform() {
+    log_step "Handing platform components over to ArgoCD..."
+
+    if [[ -z "${GITOPS_REPO_URL:-}" ]]; then
+        log_error "gitops.repoUrl is not set in ${OVERLAY_DIR}/config.yaml"
+        exit 1
+    fi
+
+    if ! kubectl get crd applicationsets.argoproj.io &>/dev/null; then
+        log_error "ArgoCD is not installed yet — run: ./deploy.sh --env ${ENV} argocd"
+        exit 1
+    fi
+
+    local dir; dir="$(render_dir)"
+    template_values "${ARGOCD_DIR}/platform-appset.yaml" "${dir}/platform-appset.yaml"
+    kubectl apply -f "${dir}/platform-appset.yaml"
+
+    log_info "ApplicationSet 'platform-components' applied"
+    log_warn "ArgoCD now owns: cert-manager, external-dns, external-secrets,"
+    log_warn "monitoring, loki, tempo, alloy, headlamp, kyverno, reloader,"
+    log_warn "woodpecker, velero."
+    log_warn "Change them through git from now on — a manual 'helm upgrade' will be reverted."
+    echo ""
+    log_info "The Applications stay 'Unknown' until ${GITOPS_REPO_URL} exists and holds"
+    log_info "this repository. Create it in Forgejo (organisation 'devhub', repo 'devhub'), then:"
+    log_info "  git remote add forgejo ${GITOPS_REPO_URL}"
+    # targetRevision is often HEAD, which is not a branch you can push to.
+    local push_ref="${GITOPS_REVISION}"
+    [[ "$push_ref" == "HEAD" || -z "$push_ref" ]] && push_ref="main"
+    log_info "  git push forgejo ${push_ref}"
+    log_info "Private repo: add the credentials to ArgoCD with 'argocd repo add'."
+}
+
+# Move platform credentials into Vault and let External Secrets deliver them.
+move_platform_secrets_to_vault() {
+    log_step "Switching platform secrets to Vault + External Secrets..."
+
+    if ! kubectl get clustersecretstore vault-backend &>/dev/null; then
+        log_error "ClusterSecretStore 'vault-backend' not found."
+        log_error "Run: ./setup-vault.sh --env ${ENV} configure"
+        exit 1
+    fi
+
+    # Seeding needs Vault admin access. setup-vault.sh already seeds during `all`
+    # and then revokes the root token by design, so a missing token here usually
+    # means the values are in Vault already — not that something is broken.
+    local keys_file="${SCRIPT_ENV_DIR}/vault-init-keys.json"
+    local have_admin=false
+    if [[ -n "${VAULT_TOKEN:-}" ]]; then
+        have_admin=true
+    elif [[ -f "$keys_file" ]] && [[ -n "$(jq -r '.admin_token // .root_token // empty' "$keys_file")" ]]; then
+        have_admin=true
+    fi
+
+    if $have_admin; then
+        log_info "Seeding platform credentials into Vault..."
+        "${SCRIPT_DIR}/setup-vault.sh" --env "$ENV" seed-secrets || {
+            log_error "Could not seed platform secrets into Vault"
+            exit 1
+        }
+    else
+        log_info "No Vault admin token available — assuming secret/platform/* is already seeded."
+        log_info "If an ExternalSecret below stays NotReady, seed with an admin token:"
+        log_info "  VAULT_TOKEN=<token> ./deploy.sh --env ${ENV} platform-secrets"
+    fi
+
+    # ESO takes ownership of these secrets. They already exist (created during
+    # bootstrap), and ESO refuses to adopt a Secret it did not create — so delete
+    # the bootstrap copy now that Vault holds the value. ESO recreates it within
+    # seconds; running pods keep their mounted copy until they restart.
+    local pairs=(
+        "keycloak keycloak-db-secret"
+        "forgejo forgejo-db-secret"
+        "monitoring grafana-admin-secret"
+        "monitoring alertmanager-slack"
+    )
+    local ns name
+    for pair in "${pairs[@]}"; do
+        read -r ns name <<<"$pair"
+        if kubectl get secret "$name" -n "$ns" &>/dev/null; then
+            if [[ -z "$(kubectl get secret "$name" -n "$ns" -o jsonpath='{.metadata.labels.reconcile\.external-secrets\.io/managed}' 2>/dev/null)" ]]; then
+                log_info "Releasing ${ns}/${name} to External Secrets"
+                kubectl delete secret "$name" -n "$ns"
+            fi
+        fi
+    done
+
+    kubectl apply -f "${BASE_DIR}/devops/external-secrets/platform-secrets.yaml"
+
+    log_info "Waiting for External Secrets to materialise..."
+    local ok=true
+    for pair in "${pairs[@]}"; do
+        read -r ns name <<<"$pair"
+        if ! kubectl wait --for=condition=Ready "externalsecret/${name}" -n "$ns" --timeout=90s &>/dev/null; then
+            log_warn "ExternalSecret ${ns}/${name} is not ready yet"
+            ok=false
+        fi
+    done
+
+    if $ok; then
+        log_info "Platform credentials now come from Vault (secret/platform/*)"
+        log_info "Rotate with: vault kv put secret/platform/postgres forgejo-password=..."
+        log_info "Reloader restarts the affected workloads once External Secrets syncs."
+    else
+        log_warn "Some ExternalSecrets are not ready — check: kubectl describe externalsecret -A"
+    fi
+}
+
+# Envoy Gateway: the Gateway API implementation. The chart bundles the Gateway API
+# CRDs, so this is the only install needed before Gateways and HTTPRoutes exist.
+install_gateway() {
+    log_step "Installing Envoy Gateway..."
+
+    local values_args=$(get_values_args "gateway")
+
+    helm upgrade --install envoy-gateway oci://docker.io/envoyproxy/gateway-helm \
+        --namespace envoy-gateway-system \
+        --create-namespace \
+        --version "$CHART_ENVOY_GATEWAY" \
+        $values_args \
+        --atomic --timeout 10m
+
+    kubectl wait --for=condition=Available deploy/envoy-gateway \
+        -n envoy-gateway-system --timeout=300s || true
+
+    log_info "Envoy Gateway installed"
+}
+
+# The Gateway (listeners + TLS) and the HTTPRoutes that attach to it.
+apply_gateway_routes() {
+    log_step "Applying Gateway and HTTPRoutes..."
+
+    kubectl create namespace gateway 2>/dev/null || true
+
+    if [[ "$ENV" == "local" ]]; then
+        # Local CA: every listener shares one wildcard secret, which has to live in
+        # the Gateway's own namespace.
+        kubectl create secret tls local-tls-secret -n gateway \
+            --cert="${CERTS_DIR}/domains/local-dev.crt" \
+            --key="${CERTS_DIR}/domains/local-dev.key" \
+            --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    fi
+
+    local dir; dir="$(render_dir)"
+    template_values "${OVERLAY_DIR}/devops/gateway.yaml" "${dir}/gateway.yaml"
+    kubectl apply -f "${dir}/gateway.yaml"
+
+    template_values "${OVERLAY_DIR}/devops/httproutes.yaml" "${dir}/httproutes.yaml"
+    kubectl apply -f "${dir}/httproutes.yaml"
+
+    log_info "Gateway and routes applied"
+}
+
+# Kyverno turns the platform's guardrails into admission-time policy and generates
+# quotas/limits/NetworkPolicies for application namespaces as they appear.
+install_kyverno() {
+    log_step "Installing Kyverno..."
+
+    local values_args=$(get_values_args "kyverno")
+
+    helm upgrade --install kyverno kyverno/kyverno \
+        --namespace kyverno \
+        --create-namespace \
+        --version "$CHART_KYVERNO" \
+        $values_args \
+        --atomic --timeout 10m
+
+    kubectl wait --for=condition=Available deploy \
+        -l app.kubernetes.io/component=admission-controller \
+        -n kyverno --timeout=300s || true
+
+    local dir; dir="$(render_dir)"
+    template_values "${BASE_DIR}/devops/kyverno/policies.yaml" "${dir}/kyverno-policies.yaml"
+    kubectl apply -f "${dir}/kyverno-policies.yaml"
+
+    log_info "Kyverno installed with platform policies"
+}
+
+# Reloader restarts workloads when a mounted Secret or ConfigMap changes — the
+# other half of credential rotation.
+install_reloader() {
+    log_step "Installing Reloader..."
+
+    local values_args=$(get_values_args "reloader")
+
+    helm upgrade --install reloader stakater/reloader \
+        --namespace reloader \
+        --create-namespace \
+        --version "$CHART_RELOADER" \
+        $values_args \
+        --atomic --timeout 5m
+
+    log_info "Reloader installed"
+}
+
+# =============================================================================
+# Orchestration
+# =============================================================================
+
 deploy_devops() {
     add_helm_repos
-    ensure_nginx_ingress
     create_devops_namespaces
-    [[ "$ENV" == "local" ]] && copy_tls_secrets
+    apply_scheduling_policies
+    install_storage_class
+    # Gateway API first: cert-manager's gateway-shim and external-dns's
+    # gateway-httproute source both need the CRDs to exist.
+    install_gateway
+    # The Gateway object must exist before ArgoCD is installed: on the local
+    # environment ArgoCD's hostAlias points at the Envoy data-plane service, which
+    # only exists once a Gateway has been created. Routes whose backends are not
+    # deployed yet simply report unresolved until they are.
+    apply_gateway_routes
     install_cert_manager
     install_external_dns
+    install_cluster_autoscaler
     install_data_services
+    # Monitoring first: it owns the ServiceMonitor/PrometheusRule CRDs that later
+    # components register against.
     install_monitoring
-    install_keycloak
     install_vault
     install_external_secrets
-    install_gitlab
+    install_keycloak
+    install_forgejo
+    install_woodpecker
+    configure_woodpecker_oauth
     install_argocd
-    install_crossplane
     install_headlamp
-    apply_devops_ingress
+    install_velero
+    install_kyverno
+    install_reloader
+    # Re-apply routes so any listener added later in the graph is attached.
+    apply_gateway_routes
+    # Network policies last: applying default-deny before the pods exist just
+    # makes the rollout look broken while things converge.
+    apply_network_policies
+    apply_disruption_budgets
 }
 
 delete_devops() {
     log_step "Deleting DevOps platform..."
 
-    kubectl delete -f "${BASE_DIR}/crossplane/provider-upcloud.yaml" 2>/dev/null || true
-    kubectl delete -f "${BASE_DIR}/crossplane/provider-config.yaml" 2>/dev/null || true
-    helm uninstall crossplane -n crossplane-system 2>/dev/null || true
+    helm uninstall velero -n velero 2>/dev/null || true
     helm uninstall headlamp -n headlamp 2>/dev/null || true
     kubectl delete -f "${BASE_DIR}/devops/headlamp/rbac.yaml" 2>/dev/null || true
     helm uninstall argocd -n argocd 2>/dev/null || true
     helm uninstall external-dns -n external-dns 2>/dev/null || true
-    helm uninstall gitlab -n gitlab 2>/dev/null || true
+    helm uninstall cluster-autoscaler -n kube-system 2>/dev/null || true
+    helm uninstall woodpecker -n woodpecker 2>/dev/null || true
+    helm uninstall forgejo -n forgejo 2>/dev/null || true
+    helm uninstall kyverno -n kyverno 2>/dev/null || true
+    helm uninstall reloader -n reloader 2>/dev/null || true
     helm uninstall prometheus -n monitoring 2>/dev/null || true
     helm uninstall loki -n monitoring 2>/dev/null || true
     helm uninstall tempo -n monitoring 2>/dev/null || true
     helm uninstall alloy -n monitoring 2>/dev/null || true
+    kubectl delete -f "${BASE_DIR}/devops/vault/raft-snapshot-cronjob.yaml" 2>/dev/null || true
     helm uninstall vault -n vault 2>/dev/null || true
-    helm uninstall keycloak -n keycloak 2>/dev/null || true
-    # Clean up legacy per-service PostgreSQL (if migrating from old layout)
-    kubectl delete statefulset keycloak-postgresql -n keycloak 2>/dev/null || true
-    kubectl delete service keycloak-postgresql -n keycloak 2>/dev/null || true
-    kubectl delete pvc keycloak-postgresql-pvc -n keycloak 2>/dev/null || true
+    kubectl delete keycloak keycloak -n keycloak 2>/dev/null || true
+    kubectl delete -n keycloak -f "${KEYCLOAK_MANIFEST_BASE}/kubernetes.yml" 2>/dev/null || true
+    helm uninstall envoy-gateway -n envoy-gateway-system 2>/dev/null || true
     helm uninstall external-secrets -n external-secrets 2>/dev/null || true
     helm uninstall cert-manager -n cert-manager 2>/dev/null || true
 
-    # Delete shared data services (local only)
+    kubectl delete -f "${BASE_DIR}/devops/policy/network-policies.yaml" 2>/dev/null || true
+    kubectl delete -f "${BASE_DIR}/devops/policy/pod-disruption-budgets.yaml" 2>/dev/null || true
+
     if [[ "$DATA_SERVICES_TYPE" == "local" ]]; then
         local DATA_SERVICES_DIR="${OVERLAY_DIR}/data-services"
         kubectl delete -f "${DATA_SERVICES_DIR}/minio.yaml" 2>/dev/null || true
@@ -745,24 +1156,32 @@ delete_devops() {
         kubectl delete -f "${DATA_SERVICES_DIR}/postgresql.yaml" 2>/dev/null || true
     fi
 
-    kubectl delete -k "${OVERLAY_DIR}/devops" 2>/dev/null || true
-
     log_info "DevOps platform deleted"
 }
 
 status_devops() {
     log_step "DevOps Platform Status:"
     echo ""
-    for ns in data-services keycloak vault gitlab argocd monitoring external-secrets cert-manager crossplane-system external-dns headlamp; do
+    for ns in data-services keycloak vault forgejo woodpecker woodpecker-ci argocd monitoring \
+              external-secrets cert-manager external-dns headlamp velero kyverno envoy-gateway-system; do
         echo "=== ${ns} ==="
         kubectl get pods -n "$ns" 2>/dev/null || echo "  Namespace not found"
         echo ""
     done
-}
 
-# =============================================================================
-# Summary
-# =============================================================================
+    echo "=== Vault seal status ==="
+    kubectl exec -n vault vault-0 -- env VAULT_ADDR=http://127.0.0.1:8200 \
+        vault status 2>/dev/null | grep -E 'Seal Type|Initialized|Sealed' || echo "  Vault not reachable"
+    echo ""
+
+    echo "=== Backups ==="
+    kubectl get schedules.velero.io -n velero 2>/dev/null || echo "  Velero not installed"
+    kubectl get cronjob -n vault 2>/dev/null || true
+    echo ""
+
+    echo "=== GitOps ==="
+    kubectl get applicationset,application -n argocd 2>/dev/null || echo "  ArgoCD not installed"
+}
 
 print_summary() {
     echo ""
@@ -777,32 +1196,47 @@ print_summary() {
     echo "  - Vault:      https://vault.${DOMAIN}"
     echo "  - Grafana:    https://grafana.${DOMAIN}"
     echo "  - Prometheus: https://prometheus.${DOMAIN}"
-    echo "  - GitLab:     https://gitlab.${DOMAIN}"
+    echo "  - Forgejo:    https://git.${DOMAIN}"
+    echo "  - Woodpecker: https://ci.${DOMAIN}"
     echo "  - ArgoCD:     https://argocd.${DOMAIN}"
     echo "  - Headlamp:   https://headlamp.${DOMAIN}"
-    echo "  - Crossplane: kubectl get providers (cluster-scoped)"
     echo ""
     echo "Credentials:"
-    echo "  Keycloak:  kubectl get secret keycloak-admin-secret -n keycloak -o jsonpath='{.data.admin-password}' | base64 -d"
+    echo "  Keycloak:  kubectl get secret keycloak-admin-secret -n keycloak -o jsonpath='{.data.password}' | base64 -d"
     echo "  Grafana:   kubectl get secret grafana-admin-secret -n monitoring -o jsonpath='{.data.admin-password}' | base64 -d"
     echo "  ArgoCD:    kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
-    echo "  GitLab:    kubectl get secret gitlab-gitlab-initial-root-password -n gitlab -o jsonpath='{.data.password}' | base64 -d"
+    echo "  Forgejo:   kubectl get secret forgejo-admin-secret -n forgejo -o jsonpath='{.data.password}' | base64 -d"
     echo ""
-    echo "Applications:"
-    echo "  Apps are managed via ArgoCD GitOps."
-    echo "  Add Application manifests to: k8s/argocd/apps/"
-    echo "  Bootstrap with: ./deploy.sh --env ${ENV} bootstrap"
+    echo "Next steps:"
+    echo "  1. ./setup-vault.sh --env ${ENV}            initialise Vault"
+    echo "  2. ./setup-keycloak.sh --env ${ENV}         realm, groups, OIDC clients"
+    echo "  3. ./deploy.sh --env ${ENV} platform-secrets  move credentials into Vault"
+    echo "  4. ./deploy.sh --env ${ENV} bootstrap       ArgoCD app-of-apps"
+    echo "  5. ./deploy.sh --env ${ENV} gitops         let ArgoCD own the platform"
     echo ""
     if [[ "$ENV" == "local" ]]; then
         echo "For Windows access, run (as Admin):"
         echo "  cd k8s/scripts/windows && .\\setup-all.ps1"
+        echo ""
     fi
-    echo ""
 }
 
-# =============================================================================
-# Main
-# =============================================================================
+usage() {
+    echo "Usage: $0 --env <env> [component] [action]"
+    echo ""
+    echo "Components:"
+    echo "  all | devops       Deploy the entire platform"
+    echo "  data-services, keycloak, vault, monitoring, forgejo, woodpecker, argocd,"
+    echo "  headlamp, external-dns, external-secrets, velero,"
+    echo "  cluster-autoscaler, storage, policies, ingress"
+    echo "  db-users           Create managed-PostgreSQL users (once per database)"
+    echo "  loki-auth          (Re)generate Loki ingest credentials + ingress"
+    echo "  platform-secrets   Move platform credentials into Vault + ExternalSecrets"
+    echo "  bootstrap          Deploy the ArgoCD app-of-apps"
+    echo "  gitops             Hand platform components over to ArgoCD"
+    echo ""
+    echo "Actions: deploy (default), status, delete"
+}
 
 main() {
     echo "=============================================="
@@ -810,49 +1244,39 @@ main() {
     echo "=============================================="
 
     check_requirements
+    require_cluster_match
 
     case "$ACTION" in
         deploy)
             case "$COMPONENT" in
-                all|devops)
-                    deploy_devops
-                    print_summary
-                    ;;
-                bootstrap)
-                    bootstrap_argocd_apps
-                    ;;
-                data-services)
-                    install_data_services
-                    ;;
-                keycloak)
-                    add_helm_repos && install_keycloak
-                    ;;
-                vault)
-                    add_helm_repos && install_vault
-                    ;;
-                monitoring)
-                    add_helm_repos && install_monitoring
-                    ;;
-                gitlab)
-                    add_helm_repos && install_gitlab
-                    ;;
-                argocd)
-                    add_helm_repos && install_argocd
-                    ;;
-                crossplane)
-                    add_helm_repos && install_crossplane
-                    ;;
-                headlamp)
-                    add_helm_repos && install_headlamp
-                    ;;
-                external-dns)
-                    add_helm_repos && install_external_dns
-                    ;;
-                ingress)
-                    apply_devops_ingress
-                    ;;
+                all|devops)          deploy_devops; print_summary ;;
+                bootstrap)           bootstrap_argocd_apps ;;
+                gitops)              enable_gitops_platform ;;
+                platform-secrets)    move_platform_secrets_to_vault ;;
+                db-users)            create_db_users ;;
+                loki-auth)           setup_loki_auth ;;
+                data-services)       install_data_services ;;
+                storage)             install_storage_class ;;
+                policies)            apply_scheduling_policies && apply_network_policies && apply_disruption_budgets ;;
+                keycloak)            add_helm_repos && install_keycloak ;;
+                vault)               add_helm_repos && install_vault ;;
+                monitoring)          add_helm_repos && install_monitoring ;;
+                forgejo)             add_helm_repos && install_forgejo ;;
+                woodpecker)          add_helm_repos && install_woodpecker && configure_woodpecker_oauth ;;
+                woodpecker-oauth)    configure_woodpecker_oauth ;;
+                gateway)             add_helm_repos && install_gateway && apply_gateway_routes ;;
+                kyverno)             add_helm_repos && install_kyverno ;;
+                reloader)            add_helm_repos && install_reloader ;;
+                argocd)              add_helm_repos && install_argocd ;;
+                headlamp)            add_helm_repos && install_headlamp ;;
+                external-dns)        add_helm_repos && install_external_dns ;;
+                external-secrets)    add_helm_repos && install_external_secrets ;;
+                velero)              add_helm_repos && install_velero ;;
+                cluster-autoscaler)  add_helm_repos && install_cluster_autoscaler ;;
+                routes)              apply_gateway_routes ;;
                 *)
                     log_error "Unknown component: $COMPONENT"
+                    usage
                     exit 1
                     ;;
             esac
@@ -862,30 +1286,16 @@ main() {
             ;;
         delete)
             case "$COMPONENT" in
-                all|devops)
-                    delete_devops
-                    ;;
+                all|devops) delete_devops ;;
                 *)
-                    log_error "Unknown component: $COMPONENT"
+                    log_error "Delete is only supported for 'all' / 'devops'"
                     exit 1
                     ;;
             esac
             ;;
         *)
             log_error "Unknown action: $ACTION"
-            echo ""
-            echo "Usage: $0 --env local|upcloud-dev|upcloud-prod [component] [action]"
-            echo ""
-            echo "Components:"
-            echo "  all        - Deploy entire platform (alias for devops)"
-            echo "  devops     - DevOps platform"
-            echo "  data-services, keycloak, vault, monitoring, gitlab, argocd, crossplane, external-dns - Individual components"
-            echo "  bootstrap  - Deploy ArgoCD app-of-apps for GitOps"
-            echo ""
-            echo "Actions:"
-            echo "  deploy     - Deploy (default)"
-            echo "  status     - Show status"
-            echo "  delete     - Delete resources"
+            usage
             exit 1
             ;;
     esac

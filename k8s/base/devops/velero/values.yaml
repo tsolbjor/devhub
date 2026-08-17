@@ -1,0 +1,82 @@
+# Velero — cluster object and volume backups.
+# Chart: vmware-tanzu/velero
+#
+# Covers what nothing else did: Kubernetes objects (namespaces, secrets, CRs,
+# ArgoCD Applications) and PersistentVolume contents. Managed databases keep
+# their own PITR backups; this is for everything living in the cluster itself.
+#
+# Cloud-specific provider/bucket/credentials come from the overlays:
+#   overlays/{aws,azure,gcp}/devops/velero/values.yaml
+
+priorityClassName: platform-standard
+
+# The chart's default is to also install a restic/node-agent DaemonSet; keep it
+# so PVCs backed by CSI drivers without snapshot support are still covered.
+deployNodeAgent: true
+
+nodeAgent:
+  priorityClassName: platform-standard
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# No static cloud credentials — every cloud overlay wires up
+# IRSA / Workload Identity instead.
+credentials:
+  useSecret: false
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    additionalLabels:
+      release: prometheus
+
+configuration:
+  # Do not snapshot volumes by default; the schedules below opt in explicitly.
+  defaultVolumesToFsBackup: false
+
+upgradeCRDs: true
+cleanUpCRDs: false
+
+# Backup schedules. Retention is enforced by Velero (ttl) and again by the
+# bucket lifecycle rule created in tofu.
+schedules:
+  daily-full:
+    disabled: false
+    schedule: "0 2 * * *"
+    useOwnerReferencesInBackup: false
+    template:
+      ttl: 720h # 30d
+      includedNamespaces:
+        - "*"
+      excludedNamespaces:
+        - kube-system
+        - woodpecker-ci # ephemeral CI job pods are not worth backing up
+      snapshotVolumes: true
+      defaultVolumesToFsBackup: false
+
+  hourly-platform-state:
+    disabled: false
+    schedule: "30 * * * *"
+    template:
+      ttl: 168h # 7d
+      includedNamespaces:
+        - vault
+        - keycloak
+        - argocd
+        - external-secrets
+        - forgejo # repositories, packages and registry blobs live on its PVC
+      snapshotVolumes: true

@@ -12,6 +12,13 @@
 txtOwnerId: devhub-cluster
 txtPrefix: externaldns-
 
+# Records come from Gateway API routes now that Ingress objects are gone.
+# gateway-httproute publishes each HTTPRoute's hostnames, pointed at the address
+# the parent Gateway was assigned.
+sources:
+  - gateway-httproute
+  - service
+
 # How often to sync
 interval: 1m
 

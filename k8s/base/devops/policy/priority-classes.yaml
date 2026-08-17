@@ -1,0 +1,39 @@
+# Scheduling priorities.
+#
+# Without these, a burst of developer workloads can evict Vault or Keycloak —
+# the scheduler has no way to know which pods hold the platform together.
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-critical
+value: 100000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Platform control-plane services (Vault, Keycloak, Forgejo, ArgoCD, monitoring, gateway)"
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-standard
+value: 10000
+globalDefault: false
+description: "Supporting platform services (ingress, cert-manager, external-dns, external-secrets)"
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: workload-default
+value: 0
+globalDefault: true
+preemptionPolicy: Never
+description: "Developer application workloads — never preempt platform services"
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: ci-job
+value: -100
+globalDefault: false
+preemptionPolicy: Never
+description: "CI job pods (Woodpecker) — first to be evicted under pressure"

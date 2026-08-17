@@ -37,7 +37,8 @@ $Domains = @(
     # DevOps domains
     "keycloak.localhost",
     "vault.localhost",
-    "gitlab.localhost",
+    "git.localhost",
+    "ci.localhost",
     "registry.localhost",
     "argocd.localhost",
     "grafana.localhost",

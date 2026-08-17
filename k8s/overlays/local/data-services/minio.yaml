@@ -141,12 +141,10 @@ spec:
                 sleep 5
               done
 
-              # Create buckets for GitLab
-              mc mb --ignore-existing local/gitlab-artifacts
-              mc mb --ignore-existing local/gitlab-uploads
-              mc mb --ignore-existing local/gitlab-packages
-              mc mb --ignore-existing local/gitlab-lfs
-              mc mb --ignore-existing local/gitlab-registry
-              mc mb --ignore-existing local/gitlab-backups
+              # Forgejo keeps repositories, packages and the registry on its own
+              # volume, so these are for anything a developer wants to test against
+              # object storage locally — the cloud equivalents come from tofu.
+              mc mb --ignore-existing local/devhub-artifacts
+              mc mb --ignore-existing local/devhub-backups
 
               echo "All buckets created successfully"

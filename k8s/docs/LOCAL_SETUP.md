@@ -12,13 +12,17 @@ This guide sets up trusted HTTPS for local Kubernetes development on Windows wit
 ## Quick Start (Automated)
 
 ```bash
+# Guided, resumable (recommended if anything goes wrong mid-way)
+./devhub quickstart --env local
+
+# Or the one-shot equivalent
 cd k8s/scripts
 ./setup-all.sh --env local
 ```
 
 This command:
 1. Generates local CA and wildcard localhost certs
-2. Installs ingress-nginx and cluster prerequisites
+2. Prepares the cluster (Envoy Gateway is installed with the platform)
 3. Deploys platform services
 4. Initializes and configures Vault
 5. Configures Keycloak realm and OIDC clients
@@ -67,16 +71,44 @@ cd k8s/scripts
 cd k8s/scripts
 ./setup-keycloak.sh --env local all
 ./setup-vault.sh --env local all
+
+# Move platform credentials into Vault; External Secrets delivers them afterwards
+./deploy.sh --env local platform-secrets
+
+# GitOps: app-of-apps, then let ArgoCD own the platform components
 ./deploy.sh --env local bootstrap
+./deploy.sh --env local gitops
 ```
+
+### Give ArgoCD something to read
+
+`gitops` points ArgoCD at `gitops.repoUrl` from
+[overlays/local/config.yaml](../overlays/local/config.yaml) —
+`https://git.localhost/devhub/devhub.git` by default. Until that repository exists,
+every platform Application sits at `Sync=Unknown`; the components keep running,
+because they were installed with Helm first, but nothing reconciles.
+
+Create it once Forgejo is up (log in at https://git.localhost, create the `devhub`
+organisation and a `devhub` repository), then push this checkout:
+
+```bash
+git remote add forgejo https://git.localhost/devhub/devhub.git
+git push forgejo main
+```
+
+For a private repository, register the credentials with ArgoCD as well
+(`argocd repo add https://git.localhost/devhub/devhub.git --username ... --password ...`).
 
 ## Access URLs
 
-- https://keycloak.localhost
-- https://vault.localhost
-- https://gitlab.localhost
-- https://argocd.localhost
-- https://grafana.localhost
+- https://keycloak.localhost — identity (Keycloak, run by its operator)
+- https://vault.localhost — secrets
+- https://git.localhost — Forgejo: repositories, issues, packages, container registry
+- https://ci.localhost — Woodpecker CI
+- https://argocd.localhost — GitOps
+- https://grafana.localhost — dashboards
+- https://prometheus.localhost — metrics
+- https://headlamp.localhost — cluster UI
 
 ## Credentials
 
@@ -90,8 +122,8 @@ kubectl get secret grafana-admin-secret -n monitoring -o jsonpath='{.data.admin-
 # ArgoCD admin
 kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath='{.data.password}' | base64 -d
 
-# GitLab root
-kubectl get secret gitlab-gitlab-initial-root-password -n gitlab -o jsonpath='{.data.password}' | base64 -d
+# Forgejo root
+kubectl get secret forgejo-forgejo-initial-root-password -n forgejo -o jsonpath='{.data.password}' | base64 -d
 ```
 
 Keycloak-generated OIDC secrets are written to `k8s/scripts/local/oidc-secrets.env`.
@@ -112,8 +144,8 @@ Keycloak-generated OIDC secrets are written to `k8s/scripts/local/oidc-secrets.e
 ### Ingress issues
 
 ```bash
-kubectl get pods -n ingress-nginx
-kubectl get svc -n ingress-nginx
+kubectl get pods -n envoy-gateway-system
+kubectl get svc -n envoy-gateway-system   # the Envoy data-plane LoadBalancer
 kubectl get ingress -A
 ```
 
@@ -126,8 +158,24 @@ Ensure `local-ca-certificates` ConfigMap is mounted and app CA env var is set (`
 1. Edit [setup-ca.sh](../scripts/setup-ca.sh) and add entries to `DOMAINS`.
 2. Re-run `./setup-ca.sh --env local`.
 3. Re-run `k8s/scripts/windows/setup-hosts.ps1`.
-4. Update ingress manifests in [overlays/local/devops/ingress.yaml](../overlays/local/devops/ingress.yaml) or app ingress manifests.
+4. Add a listener in [overlays/local/devops/gateway.yaml](../overlays/local/devops/gateway.yaml) and a route in [httproutes.yaml](../overlays/local/devops/httproutes.yaml).
 
 ## Firefox
 
 Firefox uses its own certificate store. Import `k8s/certs/ca/ca.crt` into Firefox Authorities and trust it for websites.
+
+## Validate without a cluster
+
+The same static checks CI runs — YAML, duplicate keys, config keys, and whether
+every `${PLACEHOLDER}` can actually be substituted:
+
+```bash
+cd k8s/scripts
+./validate-overlays.sh
+./validate-overlays.sh --helm local    # also render every chart
+```
+
+## Day-two operations
+
+Backups and restore, secret rotation, GitOps handover, alerting:
+[OPERATIONS.md](OPERATIONS.md).

@@ -52,18 +52,9 @@ server:
     size: 10Gi
     storageClass: null  # Use default
 
-  # Ingress - domain overridden by overlays
+  # Routing is a Gateway API HTTPRoute (overlays/<env>/devops/httproutes.yaml).
   ingress:
-    enabled: true
-    ingressClassName: nginx
-    hosts:
-      - host: vault.example.com
-        paths: []
-    annotations: {}
-    tls:
-      - secretName: vault-tls
-        hosts:
-          - vault.example.com
+    enabled: false
 
   # Audit logging
   auditStorage:

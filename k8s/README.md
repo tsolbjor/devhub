@@ -17,7 +17,7 @@ k8s/
 │       ├── cert-manager/
 │       ├── external-dns/
 │       ├── external-secrets/
-│       ├── gitlab/values.yaml
+│       ├── forgejo/values.yaml
 │       ├── keycloak/values.yaml
 │       ├── monitoring/
 │       ├── namespaces/
@@ -26,7 +26,7 @@ k8s/
 │   ├── local/                       # Local: Rancher Desktop / WSL2
 │   │   ├── config.yaml              #   Domain, TLS, data services config
 │   │   ├── data-services/           #   StatefulSets for PG, Valkey, MinIO
-│   │   └── devops/                  #   Helm value overrides + ingress.yaml
+│   │   └── devops/                  #   Helm value overrides + gateway.yaml/httproutes.yaml
 │   ├── upcloud/
 │   │   └── devops/                  #   Shared UpCloud Helm value overrides
 │   ├── upcloud-dev/                 # UpCloud dev environment
@@ -42,10 +42,10 @@ k8s/
 ├── scripts/
 │   ├── lib/common.sh                # Shared library (logging, config, templating)
 │   ├── deploy.sh                    # Main deployment script
-│   ├── sync-tofu-outputs.sh         # Bridge: tofu outputs → config.yaml
+│   ├── sync-tofu-outputs.sh         # Bridge: tofu outputs → scripts/<env>/*.env
 │   ├── setup-all.sh                 # Full local automated setup
 │   ├── setup-ca.sh                  # Generate local CA and TLS certs
-│   ├── setup-cluster.sh             # nginx-ingress and cluster resources
+│   ├── setup-cluster.sh             # cluster prerequisites and checks
 │   ├── setup-keycloak.sh            # Keycloak realm, groups, OIDC clients
 │   ├── setup-vault.sh               # Vault init, unseal, configure
 │   ├── local/                       # Generated files for local env
@@ -79,7 +79,7 @@ cd k8s/scripts
 ```bash
 cd k8s/scripts
 
-# Sync tofu outputs into config.yaml + fetch kubeconfig
+# Bridge tofu → k8s: writes scripts/upcloud-dev/{tofu-outputs,secrets}.env + kubeconfig
 ./sync-tofu-outputs.sh --env upcloud-dev
 
 # Edit domain and acmeEmail in overlays/upcloud-dev/config.yaml
@@ -105,11 +105,20 @@ export KUBECONFIG=upcloud-dev/kubeconfig
 Supported environments:
 `local`, `upcloud-dev`, `upcloud-prod`, `azure-dev`, `azure-prod`, `gcp-dev`, `gcp-prod`, `aws-dev`, `aws-prod`
 
+Workload clusters use `deploy-workload.sh` with `{upcloud,azure,gcp,aws}-workload`.
+
 **Components:**
 - `all` / `devops` — Deploy entire platform (default)
-- `keycloak`, `vault`, `monitoring`, `gitlab`, `argocd` — Individual services
+- `keycloak`, `vault`, `monitoring`, `forgejo`, `woodpecker`, `gateway`, `kyverno`, `reloader`, `argocd` — Individual services
 - `data-services` — Data services only (local: StatefulSets, managed envs: external service wiring)
+- `velero`, `external-dns`, `external-secrets`, `headlamp`, `cluster-autoscaler` — Individual services
+- `storage` — Default StorageClass (EKS: gp3 via the EBS CSI driver)
+- `policies` — Priority classes, NetworkPolicies, PodDisruptionBudgets
+- `db-users` — Create managed-PostgreSQL users (once per new database)
+- `loki-auth` — (Re)generate Loki ingest credentials + publish the push endpoint
+- `platform-secrets` — Move platform credentials into Vault + ExternalSecrets
 - `bootstrap` — Deploy ArgoCD app-of-apps
+- `gitops` — Hand the platform components over to ArgoCD
 - `ingress` — Apply ingress rules only
 
 **Actions:**
@@ -127,28 +136,42 @@ Supported environments:
 
 ## Configuration
 
-Each environment has a `config.yaml` in its overlay directory:
+Two files per environment, one owner each. Infrastructure values are **not** kept
+in `config.yaml` — `sync-tofu-outputs.sh` writes them to generated, gitignored
+files, so `tofu apply` never produces a git diff.
+
+`overlays/<env>/config.yaml` (human-owned, committed):
 
 ```yaml
 domain: dev.example.com
 tls:
-  type: cert-manager
+  type: cert-manager       # or local-ca
   secretName: ""
   clusterIssuer: letsencrypt-prod
 acmeEmail: admin@example.com
 
 dataServices:
-  type: managed              # "local" for StatefulSets, "managed" for UpCloud
-  postgresql:
-    host: pg-host:11550      # Populated by sync-tofu-outputs.sh
-  valkey:
-    host: valkey-host:11550
-  s3:
-    endpoint: https://xxx.upcloudobjects.com
-    region: europe-1
+  type: managed            # "local" for in-cluster StatefulSets
+
+gitops:
+  repoUrl: https://git.dev.example.com/devhub/devhub.git
+  targetRevision: HEAD
 ```
 
-Helm values use `${DOMAIN}`, `${PG_HOST}`, etc. as placeholders, templated by `deploy.sh` via `envsubst`.
+`scripts/<env>/tofu-outputs.env` + `secrets.env` (generated, mode 600):
+
+```sh
+PG_HOST=devhub-dev-postgresql.xxx.rds.amazonaws.com
+REDIS_HOST=... REDIS_TLS_ENABLED=true
+LOKI_BUCKET=devhub-dev-loki   LOKI_IRSA_ROLE_ARN=arn:aws:iam::...
+VAULT_KMS_KEY_ID=...          VELERO_BUCKET=devhub-dev-velero
+```
+
+Helm values use `${DOMAIN}`, `${PG_HOST}`, `${LOKI_BUCKET}` and friends as
+placeholders, templated by `deploy.sh` via `envsubst` with an explicit allow-list
+(`TEMPLATE_VARS` in `scripts/lib/common.sh`). Adding a new placeholder without
+adding it to that list makes `scripts/validate-overlays.sh` fail — which is what
+CI runs on every push.
 
 ## Services
 
@@ -156,8 +179,8 @@ Helm values use `${DOMAIN}`, `${PG_HOST}`, etc. as placeholders, templated by `d
 |---------|-------------|-----------|
 | Keycloak | `https://keycloak.{domain}` | `keycloak` |
 | Vault | `https://vault.{domain}` | `vault` |
-| GitLab | `https://gitlab.{domain}` | `gitlab` |
-| Registry | `https://registry.{domain}` | `gitlab` |
+| Forgejo (git + registry) | `https://git.{domain}` | `forgejo` |
+| Woodpecker CI | `https://ci.{domain}` | `woodpecker` |
 | ArgoCD | `https://argocd.{domain}` | `argocd` |
 | Grafana | `https://grafana.{domain}` | `monitoring` |
 | Prometheus | `https://prometheus.{domain}` | `monitoring` |
@@ -174,8 +197,8 @@ kubectl get secret grafana-admin-secret -n monitoring -o jsonpath='{.data.admin-
 # ArgoCD admin
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
 
-# GitLab root
-kubectl get secret gitlab-gitlab-initial-root-password -n gitlab -o jsonpath='{.data.password}' | base64 -d
+# Forgejo admin
+kubectl get secret forgejo-admin-secret -n forgejo -o jsonpath='{.data.password}' | base64 -d
 ```
 
 ## Troubleshooting
@@ -188,7 +211,7 @@ kubectl logs <pod-name> -n <namespace>
 
 # Ingress issues
 kubectl get ingress -A
-kubectl logs -n ingress-nginx -l app.kubernetes.io/name=ingress-nginx
+kubectl logs -n envoy-gateway-system -l app.kubernetes.io/name=envoy-gateway
 
 # ArgoCD sync issues
 argocd app list
@@ -201,4 +224,19 @@ kubectl logs -n argocd -l app.kubernetes.io/name=argocd-application-controller
 - [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md) — Detailed local setup guide
 - [docs/UPCLOUD_SETUP.md](docs/UPCLOUD_SETUP.md) — UpCloud deployment guide
 - [docs/KEYCLOAK_SSO.md](docs/KEYCLOAK_SSO.md) — Keycloak SSO configuration
+- [docs/OPERATIONS.md](docs/OPERATIONS.md) — Day two: state, secrets, backups/restore, GitOps, access, alerting
 - [argocd/README.md](argocd/README.md) — ArgoCD app-of-apps patterns
+
+## Entry point
+
+Start with `./devhub quickstart` (guided, resumable). It calls the same scripts
+documented here.
+
+These scripts are usually invoked through `./devhub` at the repository root,
+which maps environments to tofu modules and routes platform vs workload
+deployments. They remain fully usable on their own:
+
+```bash
+./devhub deploy --env local keycloak     # equivalent to:
+k8s/scripts/deploy.sh --env local keycloak
+```

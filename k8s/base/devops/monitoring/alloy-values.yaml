@@ -78,10 +78,12 @@ alloy:
       }
 
       // Push to Loki gateway
+      // Push to Loki. The tenant must match what Grafana queries with
+      // (X-Scope-OrgID: platform) now that Loki runs auth_enabled: true.
       loki.write "loki" {
         endpoint {
           url       = "http://loki-gateway.monitoring.svc.cluster.local:80/loki/api/v1/push"
-          tenant_id = "1"
+          tenant_id = "platform"
         }
       }
 
@@ -92,6 +94,8 @@ alloy:
 # Run as DaemonSet on all nodes
 controller:
   type: daemonset
+
+  priorityClassName: platform-standard
 
   tolerations:
     - key: node-role.kubernetes.io/master

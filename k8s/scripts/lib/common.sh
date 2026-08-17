@@ -5,6 +5,15 @@
 # Source this file from other scripts:
 #   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   source "${SCRIPT_DIR}/lib/common.sh"
+#
+# Configuration model
+# -------------------
+#   overlays/<env>/config.yaml       human-owned, committed: domain, TLS, toggles
+#   scripts/<env>/tofu-outputs.env   machine-owned, gitignored: everything tofu knows
+#
+# sync-tofu-outputs.sh writes the second file; nothing rewrites the first. That
+# keeps infrastructure values out of git diffs and removes the fragile
+# `sed -i` / `grep -A1` round-trip that used to sit between tofu and Helm.
 # =============================================================================
 
 # Colors
@@ -20,6 +29,9 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
 log_phase() { echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; echo -e "${CYAN}  PHASE: $1${NC}"; echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"; }
+
+PLATFORM_ENVS="local upcloud-dev upcloud-prod azure-dev azure-prod gcp-dev gcp-prod aws-dev aws-prod"
+WORKLOAD_ENVS="upcloud-workload azure-workload gcp-workload aws-workload"
 
 # =============================================================================
 # Argument Parsing
@@ -56,29 +68,95 @@ parse_env_arg() {
         exit 1
     fi
 
-    case "$ENV" in
-        local|upcloud|upcloud-dev|upcloud-prod|azure-dev|azure-prod|gcp-dev|gcp-prod|aws-dev|aws-prod) ;;
-        upcloud-workload|azure-workload|gcp-workload|aws-workload) ;;
-        *)
-            log_error "Invalid environment: $ENV"
-            log_error "Valid environments: local, upcloud-dev, upcloud-prod, azure-dev, azure-prod, gcp-dev, gcp-prod, aws-dev, aws-prod"
-            log_error "Workload environments: upcloud-workload, azure-workload, gcp-workload, aws-workload"
-            exit 1
-            ;;
-    esac
+    if [[ " ${PLATFORM_ENVS} ${WORKLOAD_ENVS} " != *" ${ENV} "* ]]; then
+        log_error "Invalid environment: $ENV"
+        log_error "Platform environments: ${PLATFORM_ENVS}"
+        log_error "Workload environments: ${WORKLOAD_ENVS}"
+        exit 1
+    fi
 
     export ENV
 }
 
+# True when $ENV is a workload cluster environment.
+is_workload_env() {
+    [[ " ${WORKLOAD_ENVS} " == *" ${ENV} "* ]]
+}
+
+# Cloud name derived from the environment (local, aws, azure, gcp, upcloud).
+env_cloud() {
+    case "$ENV" in
+        local) echo "local" ;;
+        *) echo "${ENV%%-*}" ;;
+    esac
+}
+
 # =============================================================================
-# Configuration Parsing
+# YAML reading
 # =============================================================================
 
-# Parse config.yaml for the selected environment.
-# Exports: DOMAIN, TLS_SECRET_NAME, TLS_TYPE, CLUSTER_ISSUER, ACME_EMAIL,
-#          DATA_SERVICES_TYPE, and for managed:
-#            UpCloud: PG_HOST, VALKEY_HOST, S3_ENDPOINT, S3_REGION
-#            Azure:   PG_HOST, REDIS_HOST, AZURE_STORAGE_ACCOUNT
+# Read a scalar from a YAML file by dotted path: yaml_get <file> a.b.c
+#
+# Indentation-aware, so it cannot pick up a same-named key from a different
+# parent — the previous `grep -A1 'redis:' | grep host:` approach silently
+# returned the wrong value whenever keys were reordered. Handles scalars only
+# (no sequences), which is all config.yaml holds. Inline comments and
+# surrounding quotes are stripped; a missing path yields an empty string.
+yaml_get() {
+    local file="$1" path="$2"
+    [[ -f "$file" ]] || return 0
+
+    awk -v want="$path" '
+        # strip trailing comments outside quotes (config.yaml has no # in values)
+        {
+            line = $0
+            sub(/[[:space:]]*#.*$/, "", line)
+            if (line ~ /^[[:space:]]*$/) next
+
+            # indentation width
+            match(line, /^[ ]*/)
+            indent = RLENGTH
+
+            # key: value
+            if (line !~ /^[ ]*[A-Za-z0-9_.-]+:/) next
+            key = line
+            sub(/^[ ]*/, "", key)
+            val = key
+            sub(/^[A-Za-z0-9_.-]+:[ ]*/, "", val)
+            sub(/:.*$/, "", key)
+
+            # pop deeper levels off the path stack
+            while (depth > 0 && indents[depth] >= indent) depth--
+            depth++
+            indents[depth] = indent
+            keys[depth] = key
+
+            full = keys[1]
+            for (i = 2; i <= depth; i++) full = full "." keys[i]
+
+            if (full == want) {
+                gsub(/^[ \t]+|[ \t]+$/, "", val)
+                # strip one layer of matching quotes
+                if (val ~ /^".*"$/) { sub(/^"/, "", val); sub(/"$/, "", val) }
+                else if (val ~ /^'"'"'.*'"'"'$/) { sub(/^'"'"'/, "", val); sub(/'"'"'$/, "", val) }
+                print val
+                exit
+            }
+        }
+    ' "$file"
+}
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+# Parse config.yaml (human-owned values) and load tofu-outputs.env (generated).
+#
+# Exports, from config.yaml:
+#   DOMAIN TLS_TYPE TLS_SECRET_NAME CLUSTER_ISSUER ACME_EMAIL DATA_SERVICES_TYPE
+#   PLATFORM_VAULT_URL PLATFORM_LOKI_URL ALERT_SLACK_WEBHOOK_SECRET
+# Exports, from tofu-outputs.env (cloud-dependent):
+#   PG_HOST REDIS_HOST VALKEY_HOST S3_* AZURE_* GCS_* AWS_* LOKI_* VELERO_* VAULT_KMS_* ...
 parse_config() {
     local config_file="${K8S_DIR}/overlays/${ENV}/config.yaml"
     if [[ ! -f "$config_file" ]]; then
@@ -86,116 +164,128 @@ parse_config() {
         exit 1
     fi
 
-    # Helper: strip inline YAML comments, trim whitespace, remove surrounding quotes
-    _yaml_val() { sed 's/[[:space:]]*#.*$//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed 's/^"\(.*\)"$/\1/' | sed "s/^'\(.*\)'$/\1/"; }
-
-    export DOMAIN=$(grep -E '^domain:' "$config_file" | sed 's/domain:[[:space:]]*//' | _yaml_val)
-    export TLS_SECRET_NAME=$(grep -E '^[[:space:]]*secretName:' "$config_file" | head -1 | sed 's/.*secretName:[[:space:]]*//' | _yaml_val)
-    export TLS_TYPE=$(grep -E '^[[:space:]]*type:' "$config_file" | head -1 | sed 's/.*type:[[:space:]]*//' | _yaml_val)
-    export CLUSTER_ISSUER=$(grep -E '^[[:space:]]*clusterIssuer:' "$config_file" | head -1 | sed 's/.*clusterIssuer:[[:space:]]*//' | _yaml_val)
-    export ACME_EMAIL=$(grep -E '^acmeEmail:' "$config_file" | sed 's/acmeEmail:[[:space:]]*//' | _yaml_val)
+    export DOMAIN=$(yaml_get "$config_file" domain)
+    export TLS_TYPE=$(yaml_get "$config_file" tls.type)
+    export TLS_SECRET_NAME=$(yaml_get "$config_file" tls.secretName)
+    export CLUSTER_ISSUER=$(yaml_get "$config_file" tls.clusterIssuer)
+    export ACME_EMAIL=$(yaml_get "$config_file" acmeEmail)
+    export DATA_SERVICES_TYPE=$(yaml_get "$config_file" dataServices.type)
+    export PLATFORM_VAULT_URL=$(yaml_get "$config_file" platformVaultUrl)
+    export PLATFORM_LOKI_URL=$(yaml_get "$config_file" platformLokiUrl)
+    export GITOPS_REPO_URL=$(yaml_get "$config_file" gitops.repoUrl)
+    export GITOPS_REVISION=$(yaml_get "$config_file" gitops.targetRevision)
 
     # Defaults
     TLS_SECRET_NAME="${TLS_SECRET_NAME:-local-tls-secret}"
     ACME_EMAIL="${ACME_EMAIL:-admin@example.com}"
-
-    # Data services type
-    export DATA_SERVICES_TYPE=$(grep -A1 '^dataServices:' "$config_file" | grep 'type:' | sed 's/.*type:[[:space:]]*//' | _yaml_val || echo "local")
     DATA_SERVICES_TYPE="${DATA_SERVICES_TYPE:-local}"
+    GITOPS_REVISION="${GITOPS_REVISION:-HEAD}"
 
-    # Workload clusters: parse externalDns identity only
-    export EXTERNAL_DNS_IRSA_ROLE_ARN="${EXTERNAL_DNS_IRSA_ROLE_ARN:-$(grep -A2 '^externalDns:' "$config_file" | grep 'irsaRoleArn:' | sed 's/.*irsaRoleArn:[[:space:]]*//' | _yaml_val)}"
-    export EXTERNAL_DNS_IDENTITY_CLIENT_ID="${EXTERNAL_DNS_IDENTITY_CLIENT_ID:-$(grep -A2 '^externalDns:' "$config_file" | grep 'identityClientId:' | sed 's/.*identityClientId:[[:space:]]*//' | _yaml_val)}"
-    export EXTERNAL_DNS_GSA_EMAIL="${EXTERNAL_DNS_GSA_EMAIL:-$(grep -A2 '^externalDns:' "$config_file" | grep 'gsaEmail:' | sed 's/.*gsaEmail:[[:space:]]*//' | _yaml_val)}"
-    export PLATFORM_VAULT_URL="${PLATFORM_VAULT_URL:-$(grep -E '^platformVaultUrl:' "$config_file" | sed 's/platformVaultUrl:[[:space:]]*//' | _yaml_val)}"
+    load_tofu_outputs
+    default_infra_vars
+}
 
-    # Managed data service endpoints (if type is managed)
-    if [[ "$DATA_SERVICES_TYPE" == "managed" ]]; then
-        export PG_HOST="${PG_HOST:-$(grep -A1 'postgresql:' "$config_file" | grep 'host:' | sed 's/.*host:[[:space:]]*//' | _yaml_val)}"
-        # UpCloud: valkey
-        export VALKEY_HOST="${VALKEY_HOST:-$(grep -A1 'valkey:' "$config_file" | grep 'host:' | sed 's/.*host:[[:space:]]*//' | _yaml_val)}"
-        export S3_ENDPOINT="${S3_ENDPOINT:-$(grep -A2 's3:' "$config_file" | grep 'endpoint:' | sed 's/.*endpoint:[[:space:]]*//' | _yaml_val)}"
-        export S3_REGION="${S3_REGION:-$(grep -A2 's3:' "$config_file" | grep 'region:' | sed 's/.*region:[[:space:]]*//' | _yaml_val)}"
-        # Azure: redis and blob storage
-        export REDIS_HOST="${REDIS_HOST:-$(grep -A1 'redis:' "$config_file" | grep 'host:' | sed 's/.*host:[[:space:]]*//' | _yaml_val)}"
-        export AZURE_STORAGE_ACCOUNT="${AZURE_STORAGE_ACCOUNT:-$(grep -A2 'azureStorage:' "$config_file" | grep 'accountName:' | sed 's/.*accountName:[[:space:]]*//' | _yaml_val)}"
-        export GITLAB_IDENTITY_CLIENT_ID="${GITLAB_IDENTITY_CLIENT_ID:-$(grep -A3 'azureStorage:' "$config_file" | grep 'identityClientId:' | sed 's/.*identityClientId:[[:space:]]*//' | _yaml_val)}"
-        # Azure: Entra ID IdP (non-sensitive; secret is in entra-idp.env)
-        export ENTRA_TENANT_ID="${ENTRA_TENANT_ID:-$(grep -A1 '^entraId:' "$config_file" | grep 'tenantId:' | sed 's/.*tenantId:[[:space:]]*//' | _yaml_val)}"
-        export ENTRA_KEYCLOAK_CLIENT_ID="${ENTRA_KEYCLOAK_CLIENT_ID:-$(grep -A2 '^entraId:' "$config_file" | grep 'clientId:' | sed 's/.*clientId:[[:space:]]*//' | _yaml_val)}"
-        # GCP: GCS and Workload Identity
-        export GCS_PROJECT_ID="${GCS_PROJECT_ID:-$(grep -A2 'gcs:' "$config_file" | grep 'projectId:' | sed 's/.*projectId:[[:space:]]*//' | _yaml_val)}"
-        export GCS_BUCKET_PREFIX="${GCS_BUCKET_PREFIX:-$(grep -A3 'gcs:' "$config_file" | grep 'bucketPrefix:' | sed 's/.*bucketPrefix:[[:space:]]*//' | _yaml_val)}"
-        export GITLAB_GSA_EMAIL="${GITLAB_GSA_EMAIL:-$(grep -A4 'gcs:' "$config_file" | grep 'gitlabGsaEmail:' | sed 's/.*gitlabGsaEmail:[[:space:]]*//' | _yaml_val)}"
-        # AWS: S3 and IRSA
-        export AWS_REGION="${AWS_REGION:-$(grep -A2 's3:' "$config_file" | grep 'region:' | sed 's/.*region:[[:space:]]*//' | _yaml_val)}"
-        export S3_BUCKET_PREFIX="${S3_BUCKET_PREFIX:-$(grep -A3 's3:' "$config_file" | grep 'bucketPrefix:' | sed 's/.*bucketPrefix:[[:space:]]*//' | _yaml_val)}"
-        export GITLAB_IRSA_ROLE_ARN="${GITLAB_IRSA_ROLE_ARN:-$(grep -A4 's3:' "$config_file" | grep 'gitlabIrsaRoleArn:' | sed 's/.*gitlabIrsaRoleArn:[[:space:]]*//' | _yaml_val)}"
-        # AWS: Cognito IdP (non-sensitive; secret is in aws-idp.env)
-        export COGNITO_ISSUER_URL="${COGNITO_ISSUER_URL:-$(grep -A1 '^cognitoIdp:' "$config_file" | grep 'issuerUrl:' | sed 's/.*issuerUrl:[[:space:]]*//' | _yaml_val)}"
-        export COGNITO_HOSTED_UI_DOMAIN="${COGNITO_HOSTED_UI_DOMAIN:-$(grep -A2 '^cognitoIdp:' "$config_file" | grep 'hostedUiDomain:' | sed 's/.*hostedUiDomain:[[:space:]]*//' | _yaml_val)}"
-        export COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-$(grep -A3 '^cognitoIdp:' "$config_file" | grep 'clientId:' | sed 's/.*clientId:[[:space:]]*//' | _yaml_val)}"
-        # GCP: Google IdP (non-sensitive; secret is in gcp-idp.env)
-        export GOOGLE_IDP_CLIENT_ID="${GOOGLE_IDP_CLIENT_ID:-$(grep -A1 '^googleIdp:' "$config_file" | grep 'clientId:' | sed 's/.*clientId:[[:space:]]*//' | _yaml_val)}"
-        # Loki workload identity (cloud-specific, set after adding loki IAM resources to tofu)
-        export LOKI_IRSA_ROLE_ARN="${LOKI_IRSA_ROLE_ARN:-$(grep -A2 '^loki:' "$config_file" | grep 'irsaRoleArn:' | sed 's/.*irsaRoleArn:[[:space:]]*//' | _yaml_val)}"
-        export LOKI_IDENTITY_CLIENT_ID="${LOKI_IDENTITY_CLIENT_ID:-$(grep -A2 '^loki:' "$config_file" | grep 'identityClientId:' | sed 's/.*identityClientId:[[:space:]]*//' | _yaml_val)}"
-        export LOKI_GSA_EMAIL="${LOKI_GSA_EMAIL:-$(grep -A2 '^loki:' "$config_file" | grep 'gsaEmail:' | sed 's/.*gsaEmail:[[:space:]]*//' | _yaml_val)}"
-        # Vault auto-unseal (cloud KMS, set after adding KMS resources to tofu)
-        export VAULT_KMS_KEY_ID="${VAULT_KMS_KEY_ID:-$(grep -A2 '^vault:' "$config_file" | grep 'kmsKeyId:' | sed 's/.*kmsKeyId:[[:space:]]*//' | _yaml_val)}"
-        export VAULT_KMS_IRSA_ROLE_ARN="${VAULT_KMS_IRSA_ROLE_ARN:-$(grep -A2 '^vault:' "$config_file" | grep 'irsaRoleArn:' | sed 's/.*irsaRoleArn:[[:space:]]*//' | _yaml_val)}"
-        export VAULT_IDENTITY_CLIENT_ID="${VAULT_IDENTITY_CLIENT_ID:-$(grep -A3 '^vault:' "$config_file" | grep 'identityClientId:' | sed 's/.*identityClientId:[[:space:]]*//' | _yaml_val)}"
-        export VAULT_KEY_VAULT_NAME="${VAULT_KEY_VAULT_NAME:-$(grep -A3 '^vault:' "$config_file" | grep 'keyVaultName:' | sed 's/.*keyVaultName:[[:space:]]*//' | _yaml_val)}"
-        export VAULT_KEY_NAME="${VAULT_KEY_NAME:-$(grep -A4 '^vault:' "$config_file" | grep 'keyName:' | sed 's/.*keyName:[[:space:]]*//' | _yaml_val)}"
-        export VAULT_GSA_EMAIL="${VAULT_GSA_EMAIL:-$(grep -A2 '^vault:' "$config_file" | grep 'gsaEmail:' | sed 's/.*gsaEmail:[[:space:]]*//' | _yaml_val)}"
-        export VAULT_KMS_REGION="${VAULT_KMS_REGION:-$(grep -A3 '^vault:' "$config_file" | grep 'kmsRegion:' | sed 's/.*kmsRegion:[[:space:]]*//' | _yaml_val)}"
-        export VAULT_KMS_KEY_RING="${VAULT_KMS_KEY_RING:-$(grep -A4 '^vault:' "$config_file" | grep 'kmsKeyRing:' | sed 's/.*kmsKeyRing:[[:space:]]*//' | _yaml_val)}"
-        export VAULT_KMS_CRYPTO_KEY="${VAULT_KMS_CRYPTO_KEY:-$(grep -A5 '^vault:' "$config_file" | grep 'kmsCryptoKey:' | sed 's/.*kmsCryptoKey:[[:space:]]*//' | _yaml_val)}"
-    else
-        export PG_HOST="${PG_HOST:-}"
-        export VALKEY_HOST="${VALKEY_HOST:-}"
-        export S3_ENDPOINT="${S3_ENDPOINT:-}"
-        export S3_REGION="${S3_REGION:-}"
-        export REDIS_HOST="${REDIS_HOST:-}"
-        export AZURE_STORAGE_ACCOUNT="${AZURE_STORAGE_ACCOUNT:-}"
-        export GITLAB_IDENTITY_CLIENT_ID="${GITLAB_IDENTITY_CLIENT_ID:-}"
-        export ENTRA_TENANT_ID="${ENTRA_TENANT_ID:-}"
-        export ENTRA_KEYCLOAK_CLIENT_ID="${ENTRA_KEYCLOAK_CLIENT_ID:-}"
-        export GCS_PROJECT_ID="${GCS_PROJECT_ID:-}"
-        export GCS_BUCKET_PREFIX="${GCS_BUCKET_PREFIX:-}"
-        export GITLAB_GSA_EMAIL="${GITLAB_GSA_EMAIL:-}"
-        export AWS_REGION="${AWS_REGION:-}"
-        export S3_BUCKET_PREFIX="${S3_BUCKET_PREFIX:-}"
-        export GITLAB_IRSA_ROLE_ARN="${GITLAB_IRSA_ROLE_ARN:-}"
-        export COGNITO_ISSUER_URL="${COGNITO_ISSUER_URL:-}"
-        export COGNITO_HOSTED_UI_DOMAIN="${COGNITO_HOSTED_UI_DOMAIN:-}"
-        export COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-}"
-        export GOOGLE_IDP_CLIENT_ID="${GOOGLE_IDP_CLIENT_ID:-}"
-        export LOKI_IRSA_ROLE_ARN="${LOKI_IRSA_ROLE_ARN:-}"
-        export LOKI_IDENTITY_CLIENT_ID="${LOKI_IDENTITY_CLIENT_ID:-}"
-        export LOKI_GSA_EMAIL="${LOKI_GSA_EMAIL:-}"
-        export VAULT_KMS_KEY_ID="${VAULT_KMS_KEY_ID:-}"
-        export VAULT_KMS_IRSA_ROLE_ARN="${VAULT_KMS_IRSA_ROLE_ARN:-}"
-        export VAULT_IDENTITY_CLIENT_ID="${VAULT_IDENTITY_CLIENT_ID:-}"
-        export VAULT_KEY_VAULT_NAME="${VAULT_KEY_VAULT_NAME:-}"
-        export VAULT_KEY_NAME="${VAULT_KEY_NAME:-}"
-        export VAULT_GSA_EMAIL="${VAULT_GSA_EMAIL:-}"
-        export VAULT_KMS_REGION="${VAULT_KMS_REGION:-}"
-        export VAULT_KMS_KEY_RING="${VAULT_KMS_KEY_RING:-}"
-        export VAULT_KMS_CRYPTO_KEY="${VAULT_KMS_CRYPTO_KEY:-}"
+# Source the generated tofu output file, if present.
+load_tofu_outputs() {
+    local outputs_file="${SCRIPT_ENV_DIR}/tofu-outputs.env"
+
+    if [[ -f "$outputs_file" ]]; then
+        # shellcheck disable=SC1090
+        set -a
+        source "$outputs_file"
+        set +a
+        log_info "Loaded tofu outputs from ${outputs_file}"
+    elif [[ "$DATA_SERVICES_TYPE" == "managed" ]] || is_workload_env; then
+        log_warn "No tofu outputs found at ${outputs_file}"
+        log_warn "Run: ./sync-tofu-outputs.sh --env ${ENV}"
     fi
+}
+
+# Every variable referenced by template_values must exist (possibly empty) or
+# envsubst leaves the literal ${VAR} in rendered Helm values.
+default_infra_vars() {
+    local v
+    for v in \
+        PG_HOST PG_PORT VALKEY_HOST REDIS_HOST REDIS_PORT REDIS_TLS_ENABLED \
+        S3_ENDPOINT S3_REGION AWS_REGION \
+        AZURE_STORAGE_ACCOUNT AZURE_SUBSCRIPTION_ID AZURE_RESOURCE_GROUP AZURE_NODE_RESOURCE_GROUP \
+        GCS_PROJECT_ID \
+        EXTERNAL_DNS_IRSA_ROLE_ARN EXTERNAL_DNS_IDENTITY_CLIENT_ID EXTERNAL_DNS_GSA_EMAIL \
+        LOKI_IRSA_ROLE_ARN LOKI_IDENTITY_CLIENT_ID LOKI_GSA_EMAIL LOKI_BUCKET LOKI_CONTAINER \
+        VELERO_IRSA_ROLE_ARN VELERO_IDENTITY_CLIENT_ID VELERO_GSA_EMAIL VELERO_BUCKET VELERO_CONTAINER \
+        CLUSTER_AUTOSCALER_IRSA_ROLE_ARN CLUSTER_NAME OIDC_ISSUER_URL \
+        VAULT_KMS_KEY_ID VAULT_KMS_IRSA_ROLE_ARN VAULT_IDENTITY_CLIENT_ID \
+        VAULT_KEY_VAULT_NAME VAULT_KEY_NAME VAULT_GSA_EMAIL \
+        VAULT_KMS_REGION VAULT_KMS_KEY_RING VAULT_KMS_CRYPTO_KEY \
+        ENTRA_TENANT_ID ENTRA_KEYCLOAK_CLIENT_ID \
+        COGNITO_ISSUER_URL COGNITO_HOSTED_UI_DOMAIN COGNITO_CLIENT_ID GOOGLE_IDP_CLIENT_ID
+    do
+        export "${v}=${!v:-}"
+    done
+
+    # The local environment runs its own data services at fixed service names.
+    if [[ "${DATA_SERVICES_TYPE:-local}" == "local" ]]; then
+        export PG_HOST="${PG_HOST:-postgresql.data-services.svc.cluster.local}"
+        export VALKEY_HOST="${VALKEY_HOST:-valkey.data-services.svc.cluster.local}"
+        export REDIS_HOST="${REDIS_HOST:-$VALKEY_HOST}"
+        export S3_ENDPOINT="${S3_ENDPOINT:-http://minio.data-services.svc.cluster.local:9000}"
+    fi
+
+    # Convenience defaults derived from other values.
+    export PG_PORT="${PG_PORT:-5432}"
+    export REDIS_PORT="${REDIS_PORT:-6379}"
+    export PLATFORM_LOKI_URL="${PLATFORM_LOKI_URL:-}"
 }
 
 # =============================================================================
 # Templating
 # =============================================================================
 
-# Template overlay values with environment variables.
-# Restricted list to avoid breaking ArgoCD's $oidc.keycloak.clientSecret.
+# Per-run private directory for rendered values. Rendered files can contain
+# hostnames and role ARNs, and predictable /tmp paths are trivially clobbered by
+# other users on a shared machine.
+#
+# Created by setup_paths in the top-level shell — creating it lazily from inside a
+# command substitution (get_values_args) meant the cleanup trap fired when that
+# subshell exited, deleting the files before helm could read them.
+init_render_dir() {
+    [[ -n "${RENDER_DIR:-}" ]] && return 0
+    RENDER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/devhub-render.XXXXXX")"
+    chmod 700 "$RENDER_DIR"
+    export RENDER_DIR
+    trap 'rm -rf "${RENDER_DIR}"' EXIT
+}
+
+render_dir() {
+    if [[ -z "${RENDER_DIR:-}" ]]; then
+        log_error "render_dir called before setup_paths — no scratch directory"
+        exit 1
+    fi
+    echo "$RENDER_DIR"
+}
+
+# Variables envsubst is allowed to substitute. The list is explicit so that
+# ArgoCD's own `$oidc.keycloak.clientSecret` placeholders survive templating.
+TEMPLATE_VARS='${DOMAIN} ${TLS_SECRET_NAME} ${CLUSTER_ISSUER} ${ACME_EMAIL}
+${PG_HOST} ${PG_PORT} ${VALKEY_HOST} ${REDIS_HOST} ${REDIS_PORT} ${REDIS_TLS_ENABLED}
+${S3_ENDPOINT} ${S3_REGION} ${AWS_REGION}
+${AZURE_STORAGE_ACCOUNT} ${AZURE_SUBSCRIPTION_ID} ${AZURE_RESOURCE_GROUP} ${AZURE_NODE_RESOURCE_GROUP}
+${GCS_PROJECT_ID}
+${EXTERNAL_DNS_IRSA_ROLE_ARN} ${EXTERNAL_DNS_IDENTITY_CLIENT_ID} ${EXTERNAL_DNS_GSA_EMAIL}
+${LOKI_IRSA_ROLE_ARN} ${LOKI_IDENTITY_CLIENT_ID} ${LOKI_GSA_EMAIL} ${LOKI_BUCKET} ${LOKI_CONTAINER}
+${VELERO_IRSA_ROLE_ARN} ${VELERO_IDENTITY_CLIENT_ID} ${VELERO_GSA_EMAIL} ${VELERO_BUCKET} ${VELERO_CONTAINER}
+${CLUSTER_AUTOSCALER_IRSA_ROLE_ARN} ${CLUSTER_NAME}
+${VAULT_KMS_KEY_ID} ${VAULT_KMS_IRSA_ROLE_ARN} ${VAULT_IDENTITY_CLIENT_ID}
+${VAULT_KEY_VAULT_NAME} ${VAULT_KEY_NAME} ${VAULT_GSA_EMAIL}
+${VAULT_KMS_REGION} ${VAULT_KMS_KEY_RING} ${VAULT_KMS_CRYPTO_KEY}
+${ENTRA_TENANT_ID} ${PLATFORM_LOKI_URL} ${PLATFORM_VAULT_URL}
+${ENV} ${GITOPS_REPO_URL} ${GITOPS_REVISION}'
+
+# Template a file with the allow-listed environment variables.
 template_values() {
     local input="$1"
     local output="$2"
-    envsubst '${DOMAIN} ${TLS_SECRET_NAME} ${CLUSTER_ISSUER} ${ACME_EMAIL} ${PG_HOST} ${VALKEY_HOST} ${S3_ENDPOINT} ${S3_REGION} ${REDIS_HOST} ${AZURE_STORAGE_ACCOUNT} ${GITLAB_IDENTITY_CLIENT_ID} ${GCS_PROJECT_ID} ${GCS_BUCKET_PREFIX} ${GITLAB_GSA_EMAIL} ${AWS_REGION} ${S3_BUCKET_PREFIX} ${GITLAB_IRSA_ROLE_ARN} ${EXTERNAL_DNS_IRSA_ROLE_ARN} ${EXTERNAL_DNS_IDENTITY_CLIENT_ID} ${EXTERNAL_DNS_GSA_EMAIL} ${LOKI_IRSA_ROLE_ARN} ${LOKI_IDENTITY_CLIENT_ID} ${LOKI_GSA_EMAIL} ${VAULT_KMS_KEY_ID} ${VAULT_KMS_IRSA_ROLE_ARN} ${VAULT_IDENTITY_CLIENT_ID} ${VAULT_KEY_VAULT_NAME} ${VAULT_KEY_NAME} ${ENTRA_TENANT_ID} ${VAULT_GSA_EMAIL} ${VAULT_KMS_REGION} ${VAULT_KMS_KEY_RING} ${VAULT_KMS_CRYPTO_KEY}' < "$input" > "$output"
+    envsubst "$TEMPLATE_VARS" < "$input" > "$output"
 }
 
 # Get Helm values args for a component (base + templated overlay).
@@ -204,22 +294,71 @@ get_values_args() {
     local component="$1"
     local base_values="${BASE_DIR}/devops/${component}/values.yaml"
     local overlay_values="${OVERLAY_DIR}/devops/${component}/values.yaml"
-    local templated_base="/tmp/${component}-base-values.yaml"
-    local templated_overlay="/tmp/${component}-overlay-values.yaml"
+    local dir
+    dir="$(render_dir)"
 
     local args=""
 
     if [[ -f "$base_values" ]]; then
-        template_values "$base_values" "$templated_base"
-        args="-f $templated_base"
+        template_values "$base_values" "${dir}/${component}-base-values.yaml"
+        args="-f ${dir}/${component}-base-values.yaml"
     fi
 
     if [[ -f "$overlay_values" ]]; then
-        template_values "$overlay_values" "$templated_overlay"
-        args="$args -f $templated_overlay"
+        template_values "$overlay_values" "${dir}/${component}-overlay-values.yaml"
+        args="$args -f ${dir}/${component}-overlay-values.yaml"
     fi
 
     echo "$args"
+}
+
+# =============================================================================
+# Cluster safety
+# =============================================================================
+
+# Point kubectl/helm at the kubeconfig generated for $ENV, when one exists.
+#
+# Without this, a script inherits whatever context the shell happens to be on —
+# which is how workload components end up installed on the platform cluster.
+use_env_kubeconfig() {
+    local kubeconfig="${SCRIPT_ENV_DIR}/kubeconfig"
+
+    if [[ -f "$kubeconfig" ]]; then
+        export KUBECONFIG="$kubeconfig"
+        log_info "Using kubeconfig: ${kubeconfig}"
+    elif [[ "$ENV" != "local" ]]; then
+        log_warn "No kubeconfig at ${kubeconfig} — falling back to the current context:"
+        log_warn "  $(kubectl config current-context 2>/dev/null || echo '<none>')"
+        log_warn "Run ./sync-tofu-outputs.sh --env ${ENV} to fetch the right one."
+    fi
+}
+
+# Refuse to continue if the active context does not look like the expected
+# cluster. Matches on the tofu-reported cluster name when available.
+require_cluster_match() {
+    local expected="${1:-${CLUSTER_NAME:-}}"
+    local context
+    context="$(kubectl config current-context 2>/dev/null || echo '')"
+
+    if [[ -z "$context" ]]; then
+        log_error "No active kubectl context — cannot verify the target cluster"
+        exit 1
+    fi
+
+    if [[ -z "$expected" ]]; then
+        log_warn "Cluster name unknown (no tofu outputs); target context is: ${context}"
+        return 0
+    fi
+
+    if [[ "$context" != *"$expected"* ]]; then
+        log_error "Refusing to deploy: active context does not match ${ENV}"
+        log_error "  expected cluster name to contain: ${expected}"
+        log_error "  active context:                   ${context}"
+        log_error "Fix with: export KUBECONFIG=${SCRIPT_ENV_DIR}/kubeconfig"
+        exit 1
+    fi
+
+    log_info "Target cluster verified: ${context}"
 }
 
 # =============================================================================
@@ -231,20 +370,33 @@ add_helm_repos() {
 
     log_step "Adding Helm repositories..."
 
-    helm repo add jetstack https://charts.jetstack.io 2>/dev/null || true
-    helm repo add codecentric https://codecentric.github.io/helm-charts 2>/dev/null || true
-    helm repo add hashicorp https://helm.releases.hashicorp.com 2>/dev/null || true
-    helm repo add external-secrets https://charts.external-secrets.io 2>/dev/null || true
-    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
-    helm repo add grafana https://grafana.github.io/helm-charts 2>/dev/null || true
-    helm repo add gitlab https://charts.gitlab.io 2>/dev/null || true
-    helm repo add argo https://argoproj.github.io/argo-helm 2>/dev/null || true
-    helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>/dev/null || true
-    helm repo add crossplane-stable https://charts.crossplane.io/stable 2>/dev/null || true
-    helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/ 2>/dev/null || true
-    helm repo add headlamp https://kubernetes-sigs.github.io/headlamp/ 2>/dev/null || true
+    local -a repos=(
+        "jetstack https://charts.jetstack.io"
+        "hashicorp https://helm.releases.hashicorp.com"
+        "external-secrets https://charts.external-secrets.io"
+        "prometheus-community https://prometheus-community.github.io/helm-charts"
+        "grafana https://grafana.github.io/helm-charts"
+        "argo https://argoproj.github.io/argo-helm"
+        "external-dns https://kubernetes-sigs.github.io/external-dns/"
+        "headlamp https://kubernetes-sigs.github.io/headlamp/"
+        "woodpecker https://woodpecker-ci.org/"
+        "kyverno https://kyverno.github.io/kyverno"
+        "stakater https://stakater.github.io/stakater-charts"
+        "vmware-tanzu https://vmware-tanzu.github.io/helm-charts"
+        "autoscaler https://kubernetes.github.io/autoscaler"
+    )
 
-    helm repo update
+    local -a names=()
+    local entry
+    for entry in "${repos[@]}"; do
+        helm repo add ${entry} 2>/dev/null || true
+        names+=("${entry%% *}")
+    done
+
+    # Only these repos, not `helm repo update` over everything: an unrelated dead
+    # repo in the user's own helm config would otherwise fail the run.
+    helm repo update "${names[@]}"
+    # Forgejo and Envoy Gateway are OCI charts — no repo to add, pulled by URL.
     log_info "Helm repositories updated"
 }
 
@@ -256,10 +408,17 @@ check_requirements() {
     log_info "Checking requirements..."
     command -v kubectl &>/dev/null || { log_error "kubectl required"; exit 1; }
     command -v envsubst &>/dev/null || { log_error "envsubst required (install gettext)"; exit 1; }
+    command -v jq &>/dev/null || { log_error "jq required"; exit 1; }
     kubectl cluster-info &>/dev/null || { log_error "Cannot connect to cluster"; exit 1; }
 
     if [[ -z "${DOMAIN:-}" ]]; then
         log_error "DOMAIN not set. Check config.yaml in overlay directory."
+        exit 1
+    fi
+
+    if [[ "$DOMAIN" == *example.com ]]; then
+        log_error "DOMAIN is still the placeholder '${DOMAIN}'"
+        log_error "Set a real domain in ${K8S_DIR}/overlays/${ENV}/config.yaml"
         exit 1
     fi
 
@@ -301,7 +460,7 @@ check_all_requirements() {
 # =============================================================================
 
 # Set up standard paths based on SCRIPT_DIR and ENV.
-# Call after parse_env_arg and parse_config.
+# Call after parse_env_arg, before parse_config.
 # Sets: K8S_DIR, BASE_DIR, ARGOCD_DIR, OVERLAY_DIR, CERTS_DIR, SCRIPT_ENV_DIR
 setup_paths() {
     K8S_DIR="${SCRIPT_DIR}/.."
@@ -313,4 +472,8 @@ setup_paths() {
 
     # Ensure generated-files directory exists
     mkdir -p "${SCRIPT_ENV_DIR}"
+    chmod 700 "${SCRIPT_ENV_DIR}"
+
+    # Scratch space for rendered Helm values (removed on exit).
+    init_render_dir
 }

@@ -1,14 +1,7 @@
-# Vault Azure overlay values
+# Vault azure overlay values
 # Merged with base/devops/vault/values.yaml
-
-server:
-  ingress:
-    hosts:
-      - host: vault.${DOMAIN}
-        paths: []
-    annotations:
-      cert-manager.io/cluster-issuer: letsencrypt-prod
-    tls:
-      - secretName: vault-tls
-        hosts:
-          - vault.${DOMAIN}
+#
+# Routing is a Gateway API HTTPRoute (devops/httproutes.yaml) and cloud KMS
+# auto-unseal lives in vault-autounseal-values.yaml, which deploy.sh layers on
+# when tofu has provisioned the key. Nothing else differs per cloud.
+{}

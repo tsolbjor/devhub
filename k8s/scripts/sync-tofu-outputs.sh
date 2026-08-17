@@ -2,10 +2,17 @@
 set -euo pipefail
 
 # =============================================================================
-# Sync OpenTofu Outputs to K8s Overlay Config
+# Sync OpenTofu Outputs to Generated Env Files
 # =============================================================================
-# Reads managed data service outputs from tofu and writes them into the
-# matching k8s overlay config.yaml. Also fetches the cluster kubeconfig.
+# Reads tofu outputs for an environment and writes them to two generated,
+# gitignored files next to the environment's kubeconfig:
+#
+#   scripts/<env>/tofu-outputs.env   non-secret infrastructure values
+#   scripts/<env>/secrets.env        credentials (chmod 600)
+#
+# config.yaml is NOT modified. It stays a human-owned file (domain, TLS,
+# toggles) which means tofu applies no longer produce git diffs, and Helm
+# templating no longer depends on grep/sed round-trips through YAML.
 #
 # Usage: ./sync-tofu-outputs.sh --env <environment>
 #
@@ -22,41 +29,36 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 parse_env_arg "$@"
+setup_paths
 
 # Map k8s env to tofu directory, provider, and cluster type
 REPO_ROOT="${SCRIPT_DIR}/../.."
-case "$ENV" in
-    upcloud-dev)      TOFU_DIR="${REPO_ROOT}/tofu/upcloud/dev";      CLOUD="upcloud"; CLUSTER_TYPE="platform" ;;
-    upcloud-prod)     TOFU_DIR="${REPO_ROOT}/tofu/upcloud/prod";     CLOUD="upcloud"; CLUSTER_TYPE="platform" ;;
-    upcloud-workload) TOFU_DIR="${REPO_ROOT}/tofu/upcloud/workload"; CLOUD="upcloud"; CLUSTER_TYPE="workload" ;;
-    azure-dev)        TOFU_DIR="${REPO_ROOT}/tofu/azure/dev";        CLOUD="azure";   CLUSTER_TYPE="platform" ;;
-    azure-prod)       TOFU_DIR="${REPO_ROOT}/tofu/azure/prod";       CLOUD="azure";   CLUSTER_TYPE="platform" ;;
-    azure-workload)   TOFU_DIR="${REPO_ROOT}/tofu/azure/workload";   CLOUD="azure";   CLUSTER_TYPE="workload" ;;
-    gcp-dev)          TOFU_DIR="${REPO_ROOT}/tofu/gcp/dev";          CLOUD="gcp";     CLUSTER_TYPE="platform" ;;
-    gcp-prod)         TOFU_DIR="${REPO_ROOT}/tofu/gcp/prod";         CLOUD="gcp";     CLUSTER_TYPE="platform" ;;
-    gcp-workload)     TOFU_DIR="${REPO_ROOT}/tofu/gcp/workload";     CLOUD="gcp";     CLUSTER_TYPE="workload" ;;
-    aws-dev)          TOFU_DIR="${REPO_ROOT}/tofu/aws/dev";          CLOUD="aws";     CLUSTER_TYPE="platform" ;;
-    aws-prod)         TOFU_DIR="${REPO_ROOT}/tofu/aws/prod";         CLOUD="aws";     CLUSTER_TYPE="platform" ;;
-    aws-workload)     TOFU_DIR="${REPO_ROOT}/tofu/aws/workload";     CLOUD="aws";     CLUSTER_TYPE="workload" ;;
-    *)
-        log_error "sync-tofu-outputs only works with managed cloud environments"
-        log_error "Platform: upcloud-dev, upcloud-prod, azure-dev, azure-prod, gcp-dev, gcp-prod, aws-dev, aws-prod"
-        log_error "Workload: upcloud-workload, azure-workload, gcp-workload, aws-workload"
-        exit 1
-        ;;
-esac
+CLOUD="$(env_cloud)"
 
-CONFIG_FILE="${SCRIPT_DIR}/../overlays/${ENV}/config.yaml"
-
-if [[ ! -d "$TOFU_DIR" ]]; then
-    log_error "Tofu directory not found: $TOFU_DIR"
-    exit 1
+if is_workload_env; then
+    CLUSTER_TYPE="workload"
+    TOFU_DIR="${REPO_ROOT}/tofu/${CLOUD}/workload"
+else
+    CLUSTER_TYPE="platform"
+    case "$ENV" in
+        *-dev)  TOFU_DIR="${REPO_ROOT}/tofu/${CLOUD}/dev" ;;
+        *-prod) TOFU_DIR="${REPO_ROOT}/tofu/${CLOUD}/prod" ;;
+        *)
+            log_error "sync-tofu-outputs only works with managed cloud environments"
+            log_error "Platform: ${PLATFORM_ENVS// local/}"
+            log_error "Workload: ${WORKLOAD_ENVS}"
+            exit 1
+            ;;
+    esac
 fi
 
-if [[ ! -f "$CONFIG_FILE" ]]; then
-    log_error "Config file not found: $CONFIG_FILE"
-    exit 1
-fi
+CONFIG_FILE="${OVERLAY_DIR}/config.yaml"
+OUTPUTS_FILE="${SCRIPT_ENV_DIR}/tofu-outputs.env"
+SECRETS_FILE="${SCRIPT_ENV_DIR}/secrets.env"
+MANUAL_FILE="${SCRIPT_ENV_DIR}/manual-secrets.env"
+
+[[ -d "$TOFU_DIR" ]] || { log_error "Tofu directory not found: $TOFU_DIR"; exit 1; }
+[[ -f "$CONFIG_FILE" ]] || { log_error "Config file not found: $CONFIG_FILE"; exit 1; }
 
 # ─── Read tofu outputs ──────────────────────────────────────────────
 
@@ -66,367 +68,257 @@ cd "$TOFU_DIR"
 
 if [[ ! -f terraform.tfstate ]] && [[ ! -d .terraform ]]; then
     log_error "Tofu has not been initialized/applied in ${TOFU_DIR}"
-    log_error "Run: cd ${TOFU_DIR} && tofu init && tofu apply"
+    log_error "Run: cd ${TOFU_DIR} && tofu init -backend-config=backend.hcl && tofu apply"
     exit 1
 fi
 
-OUTPUTS=$(tofu output -json)
+OUTPUTS="$(tofu output -json)"
 
-CLUSTER_NAME=$(echo "$OUTPUTS" | jq -r '.cluster_name.value')
+# out <output_name> — value or empty string when the output does not exist.
+out() { echo "$OUTPUTS" | jq -r --arg k "$1" 'if has($k) then .[$k].value | tostring else "" end'; }
 
-# ─── Workload cluster: only need cluster name + external-dns IAM ────
+CLUSTER_NAME="$(out cluster_name)"
+[[ -n "$CLUSTER_NAME" ]] || { log_error "tofu output cluster_name is empty — has apply completed?"; exit 1; }
 
-if [[ "$CLUSTER_TYPE" == "workload" ]]; then
-    log_info "Cluster: ${CLUSTER_NAME}"
+# ─── Compose the generated files ────────────────────────────────────
 
-    if [[ "$CLOUD" == "aws" ]]; then
-        EXTERNAL_DNS_IRSA_ROLE_ARN=$(echo "$OUTPUTS" | jq -r '.external_dns_irsa_role_arn.value')
-        log_info "External-DNS IRSA ARN: ${EXTERNAL_DNS_IRSA_ROLE_ARN}"
-        AWS_REGION=$(echo "$OUTPUTS" | jq -r '.aws_region.value')
+# Values are written as KEY=value pairs, quoted, so the files can be sourced.
+declare -a PUBLIC_VARS=()
+declare -a SECRET_VARS=()
 
-        sed -i "/^externalDns:/,\$ {
-            s|irsaRoleArn: .*|irsaRoleArn: ${EXTERNAL_DNS_IRSA_ROLE_ARN}|
-        }" "$CONFIG_FILE"
+add_public() { [[ -n "${2:-}" ]] && PUBLIC_VARS+=("$1=$2"); return 0; }
+add_secret() { [[ -n "${2:-}" ]] && SECRET_VARS+=("$1=$2"); return 0; }
 
-    elif [[ "$CLOUD" == "azure" ]]; then
-        EXTERNAL_DNS_IDENTITY_CLIENT_ID=$(echo "$OUTPUTS" | jq -r '.external_dns_identity_client_id.value')
-        RESOURCE_GROUP=$(echo "$OUTPUTS" | jq -r '.resource_group_name.value')
-        LOCATION=$(echo "$OUTPUTS" | jq -r '.location.value')
-        log_info "External-DNS Identity: ${EXTERNAL_DNS_IDENTITY_CLIENT_ID}"
+add_public CLUSTER_NAME "$CLUSTER_NAME"
+add_public OIDC_ISSUER_URL "$(out oidc_issuer_url)"
 
-        sed -i "/^externalDns:/,\$ {
-            s|identityClientId: .*|identityClientId: ${EXTERNAL_DNS_IDENTITY_CLIENT_ID}|
-        }" "$CONFIG_FILE"
+case "$CLOUD" in
+    aws)
+        AWS_REGION="$(out aws_region)"
+        add_public AWS_REGION "$AWS_REGION"
+        add_public S3_REGION "$AWS_REGION"
+        add_public EXTERNAL_DNS_IRSA_ROLE_ARN "$(out external_dns_irsa_role_arn)"
+        add_public EBS_CSI_ROLE_ARN "$(out ebs_csi_role_arn)"
 
-    elif [[ "$CLOUD" == "gcp" ]]; then
-        EXTERNAL_DNS_GSA_EMAIL=$(echo "$OUTPUTS" | jq -r '.external_dns_gsa_email.value')
-        GCP_REGION=$(echo "$OUTPUTS" | jq -r '.region.value')
-        GCS_PROJECT_ID=$(echo "$OUTPUTS" | jq -r '.project_id.value')
-        log_info "External-DNS GSA: ${EXTERNAL_DNS_GSA_EMAIL}"
+        if [[ "$CLUSTER_TYPE" == "platform" ]]; then
+            add_public PG_HOST "$(out pg_host)"
+            add_public PG_PORT "$(out pg_port)"
+            add_public REDIS_HOST "$(out redis_host)"
+            add_public REDIS_PORT "$(out redis_port)"
+            add_public REDIS_TLS_ENABLED "$(out redis_tls_enabled)"
+            add_public LOKI_IRSA_ROLE_ARN "$(out loki_irsa_role_arn)"
+            add_public LOKI_BUCKET "$(out loki_bucket)"
+            add_public VELERO_IRSA_ROLE_ARN "$(out velero_irsa_role_arn)"
+            add_public VELERO_BUCKET "$(out velero_bucket)"
+            add_public CLUSTER_AUTOSCALER_IRSA_ROLE_ARN "$(out cluster_autoscaler_irsa_role_arn)"
+            add_public VAULT_KMS_KEY_ID "$(out vault_kms_key_id)"
+            add_public VAULT_KMS_IRSA_ROLE_ARN "$(out vault_kms_irsa_role_arn)"
+            add_public COGNITO_ISSUER_URL "$(out cognito_issuer_url)"
+            add_public COGNITO_HOSTED_UI_DOMAIN "$(out cognito_hosted_ui_domain)"
+            add_public COGNITO_CLIENT_ID "$(out cognito_client_id)"
+            add_public COGNITO_USER_POOL_ID "$(out cognito_user_pool_id)"
 
-        sed -i "/^externalDns:/,\$ {
-            s|gsaEmail: .*|gsaEmail: ${EXTERNAL_DNS_GSA_EMAIL}|
-        }" "$CONFIG_FILE"
-
-    elif [[ "$CLOUD" == "upcloud" ]]; then
-        log_info "UpCloud workload cluster — no external-dns IAM needed"
-    fi
-
-    log_info "Config updated"
-
-    # Fetch kubeconfig for workload cluster
-    log_step "Fetching kubeconfig for workload cluster: ${CLUSTER_NAME}..."
-    KUBECONFIG_DIR="${SCRIPT_DIR}/${ENV}"
-    mkdir -p "$KUBECONFIG_DIR"
-    KUBECONFIG_FILE="${KUBECONFIG_DIR}/kubeconfig"
-
-    if [[ "$CLOUD" == "aws" ]]; then
-        if command -v aws &>/dev/null; then
-            aws eks update-kubeconfig \
-                --region "${AWS_REGION}" \
-                --name "${CLUSTER_NAME}" \
-                --kubeconfig "${KUBECONFIG_FILE}"
-            log_info "Kubeconfig written to: ${KUBECONFIG_FILE}"
-        else
-            log_warn "aws CLI not found — run: aws eks update-kubeconfig --region <region> --name ${CLUSTER_NAME}"
+            add_secret PG_ADMIN_LOGIN "$(out pg_admin_login)"
+            add_secret PG_ADMIN_PASSWORD "$(out pg_admin_password)"
+            add_secret PG_KEYCLOAK_PASSWORD "$(out pg_keycloak_password)"
+            add_secret PG_FORGEJO_PASSWORD "$(out pg_forgejo_password)"
+            add_secret REDIS_PASSWORD "$(out redis_auth_token)"
+            add_secret COGNITO_CLIENT_SECRET "$(out cognito_client_secret)"
         fi
-    elif [[ "$CLOUD" == "azure" ]]; then
-        if command -v az &>/dev/null; then
-            az aks get-credentials \
-                --resource-group "${RESOURCE_GROUP}" \
-                --name "${CLUSTER_NAME}" \
-                --file "${KUBECONFIG_FILE}" \
-                --overwrite-existing
-            log_info "Kubeconfig written to: ${KUBECONFIG_FILE}"
-        else
-            log_warn "az CLI not found — run: az aks get-credentials --resource-group ${RESOURCE_GROUP} --name ${CLUSTER_NAME}"
-        fi
-    elif [[ "$CLOUD" == "gcp" ]]; then
-        if command -v gcloud &>/dev/null; then
-            KUBECONFIG="${KUBECONFIG_FILE}" gcloud container clusters get-credentials "${CLUSTER_NAME}" \
-                --region "${GCP_REGION}" \
-                --project "${GCS_PROJECT_ID}"
-            log_info "Kubeconfig written to: ${KUBECONFIG_FILE}"
-        else
-            log_warn "gcloud not found — run: gcloud container clusters get-credentials ${CLUSTER_NAME} --region <region>"
-        fi
-    elif [[ "$CLOUD" == "upcloud" ]]; then
-        if command -v upctl &>/dev/null; then
-            upctl kubernetes config "${CLUSTER_NAME}" --write "${KUBECONFIG_FILE}"
-            log_info "Kubeconfig written to: ${KUBECONFIG_FILE}"
-        else
-            log_warn "upctl not found — download kubeconfig from UpCloud console"
-        fi
-    fi
+        ;;
 
-    echo ""
-    log_info "Workload sync complete. Next steps:"
-    echo ""
-    echo "  1. Set domain and acmeEmail in: ${CONFIG_FILE}"
-    echo "  2. Set platformVaultUrl in: ${CONFIG_FILE}"
-    echo "  3. export KUBECONFIG=${KUBECONFIG_FILE}"
-    echo "  4. ./deploy-workload.sh --env ${ENV}"
-    echo "  5. ./register-workload-cluster.sh --env ${ENV} (register with platform ArgoCD)"
-    echo ""
-    exit 0
+    azure)
+        add_public AZURE_RESOURCE_GROUP "$(out resource_group_name)"
+        add_public AZURE_LOCATION "$(out location)"
+        add_public EXTERNAL_DNS_IDENTITY_CLIENT_ID "$(out external_dns_identity_client_id)"
+
+        if [[ "$CLUSTER_TYPE" == "platform" ]]; then
+            add_public AZURE_SUBSCRIPTION_ID "$(out subscription_id)"
+            add_public AZURE_NODE_RESOURCE_GROUP "$(out node_resource_group)"
+            add_public PG_HOST "$(out pg_host)"
+            add_public PG_PORT "$(out pg_port)"
+            add_public REDIS_HOST "$(out redis_host)"
+            add_public REDIS_PORT "$(out redis_port)"
+            add_public REDIS_TLS_ENABLED "true"
+            add_public AZURE_STORAGE_ACCOUNT "$(out storage_account_name)"
+            add_public LOKI_IDENTITY_CLIENT_ID "$(out loki_identity_client_id)"
+            add_public LOKI_CONTAINER "$(out loki_container)"
+            add_public VELERO_IDENTITY_CLIENT_ID "$(out velero_identity_client_id)"
+            add_public VELERO_CONTAINER "$(out velero_container)"
+            add_public VAULT_KEY_VAULT_NAME "$(out vault_key_vault_name)"
+            add_public VAULT_KEY_NAME "$(out vault_key_name)"
+            add_public VAULT_IDENTITY_CLIENT_ID "$(out vault_identity_client_id)"
+            add_public ENTRA_TENANT_ID "$(out entra_tenant_id)"
+            add_public ENTRA_KEYCLOAK_CLIENT_ID "$(out entra_keycloak_client_id)"
+
+            add_secret PG_ADMIN_LOGIN "$(out pg_admin_login)"
+            add_secret PG_ADMIN_PASSWORD "$(out pg_admin_password)"
+            add_secret PG_KEYCLOAK_PASSWORD "$(out pg_keycloak_password)"
+            add_secret PG_FORGEJO_PASSWORD "$(out pg_forgejo_password)"
+            add_secret REDIS_PASSWORD "$(out redis_password)"
+            add_secret AZURE_STORAGE_KEY "$(out storage_primary_access_key)"
+            add_secret ENTRA_KEYCLOAK_CLIENT_SECRET "$(out entra_keycloak_client_secret)"
+        fi
+        ;;
+
+    gcp)
+        add_public GCS_PROJECT_ID "$(out project_id)"
+        add_public GCP_REGION "$(out region)"
+        add_public EXTERNAL_DNS_GSA_EMAIL "$(out external_dns_gsa_email)"
+
+        if [[ "$CLUSTER_TYPE" == "platform" ]]; then
+            add_public PG_HOST "$(out pg_host)"
+            add_public PG_PORT "$(out pg_port)"
+            add_public REDIS_HOST "$(out redis_host)"
+            add_public REDIS_PORT "$(out redis_port)"
+            add_public LOKI_GSA_EMAIL "$(out loki_gsa_email)"
+            add_public LOKI_BUCKET "$(out loki_bucket)"
+            add_public VELERO_GSA_EMAIL "$(out velero_gsa_email)"
+            add_public VELERO_BUCKET "$(out velero_bucket)"
+            add_public VAULT_GSA_EMAIL "$(out vault_gsa_email)"
+            add_public VAULT_KMS_REGION "$(out vault_kms_region)"
+            add_public VAULT_KMS_KEY_RING "$(out vault_kms_key_ring)"
+            add_public VAULT_KMS_CRYPTO_KEY "$(out vault_kms_crypto_key)"
+
+            add_secret PG_ADMIN_LOGIN "$(out pg_admin_login)"
+            add_secret PG_ADMIN_PASSWORD "$(out pg_admin_password)"
+            add_secret PG_KEYCLOAK_PASSWORD "$(out pg_keycloak_password)"
+            add_secret PG_FORGEJO_PASSWORD "$(out pg_forgejo_password)"
+            add_secret REDIS_PASSWORD "$(out redis_auth_string)"
+        fi
+        ;;
+
+    upcloud)
+        add_public UPCLOUD_ZONE "$(out zone)"
+
+        if [[ "$CLUSTER_TYPE" == "platform" ]]; then
+            add_public PG_HOST "$(out pg_host)"
+            add_public PG_PORT "$(out pg_port)"
+            add_public VALKEY_HOST "$(out valkey_host)"
+            add_public VALKEY_PORT "$(out valkey_port)"
+            add_public S3_ENDPOINT "$(out s3_endpoint)"
+            add_public S3_REGION "$(out s3_region)"
+
+            add_secret PG_KEYCLOAK_PASSWORD "$(out pg_keycloak_password)"
+            add_secret PG_FORGEJO_PASSWORD "$(out pg_forgejo_password)"
+            add_secret REDIS_PASSWORD "$(out valkey_password)"
+        fi
+        ;;
+esac
+
+# ─── Write generated files ──────────────────────────────────────────
+
+log_step "Writing generated env files..."
+
+{
+    echo "# Generated by sync-tofu-outputs.sh — do not edit, do not commit."
+    echo "# Source: ${TOFU_DIR}"
+    echo "# Environment: ${ENV}"
+    printf '%s\n' "${PUBLIC_VARS[@]}"
+} > "$OUTPUTS_FILE"
+chmod 600 "$OUTPUTS_FILE"
+log_info "Infrastructure values: ${OUTPUTS_FILE} (${#PUBLIC_VARS[@]} values)"
+
+if [[ ${#SECRET_VARS[@]} -gt 0 ]]; then
+    {
+        echo "# Generated by sync-tofu-outputs.sh — CONTAINS CREDENTIALS."
+        echo "# Never commit. deploy.sh reads this to create the platform's K8s secrets."
+        echo "# Environment: ${ENV}"
+        printf '%s\n' "${SECRET_VARS[@]}"
+    } > "$SECRETS_FILE"
+    chmod 600 "$SECRETS_FILE"
+    log_info "Credentials:           ${SECRETS_FILE} (${#SECRET_VARS[@]} values)"
 fi
 
-# ─── Platform cluster: parse all data service outputs ───────────────
-
-PG_HOST=$(echo "$OUTPUTS" | jq -r '.pg_host.value')
-PG_PORT=$(echo "$OUTPUTS" | jq -r '.pg_port.value')
-
-# ─── Cloud-specific output parsing ──────────────────────────────────
-
-if [[ "$CLOUD" == "gcp" ]]; then
-    REDIS_HOST=$(echo "$OUTPUTS" | jq -r '.redis_host.value')
-    REDIS_PORT=$(echo "$OUTPUTS" | jq -r '.redis_port.value')
-    REDIS_AUTH_STRING=$(echo "$OUTPUTS" | jq -r '.redis_auth_string.value')
-    GCS_PROJECT_ID=$(echo "$OUTPUTS" | jq -r '.project_id.value')
-    GCS_BUCKET_PREFIX=$(echo "$OUTPUTS" | jq -r '.gitlab_gcs_bucket_prefix.value')
-    GITLAB_GSA_EMAIL=$(echo "$OUTPUTS" | jq -r '.gitlab_gsa_email.value')
-    EXTERNAL_DNS_GSA_EMAIL=$(echo "$OUTPUTS" | jq -r '.external_dns_gsa_email.value')
-    GCP_REGION=$(echo "$OUTPUTS" | jq -r '.region.value')
-
-    log_info "PostgreSQL:        ${PG_HOST}:${PG_PORT}"
-    log_info "Redis:             ${REDIS_HOST}:${REDIS_PORT}"
-    log_info "GCS Project:       ${GCS_PROJECT_ID}"
-    log_info "GCS Bucket Prefix: ${GCS_BUCKET_PREFIX}"
-    log_info "GitLab GSA:           ${GITLAB_GSA_EMAIL}"
-    log_info "External-DNS GSA:     ${EXTERNAL_DNS_GSA_EMAIL}"
-    log_info "Cluster:           ${CLUSTER_NAME}"
-
-elif [[ "$CLOUD" == "aws" ]]; then
-    REDIS_HOST=$(echo "$OUTPUTS" | jq -r '.redis_host.value')
-    REDIS_PORT=$(echo "$OUTPUTS" | jq -r '.redis_port.value')
-    AWS_REGION=$(echo "$OUTPUTS" | jq -r '.aws_region.value')
-    S3_BUCKET_PREFIX=$(echo "$OUTPUTS" | jq -r '.gitlab_s3_bucket_prefix.value')
-    GITLAB_IRSA_ROLE_ARN=$(echo "$OUTPUTS" | jq -r '.gitlab_irsa_role_arn.value')
-    EXTERNAL_DNS_IRSA_ROLE_ARN=$(echo "$OUTPUTS" | jq -r '.external_dns_irsa_role_arn.value')
-    COGNITO_ISSUER_URL=$(echo "$OUTPUTS" | jq -r '.cognito_issuer_url.value')
-    COGNITO_HOSTED_UI_DOMAIN=$(echo "$OUTPUTS" | jq -r '.cognito_hosted_ui_domain.value')
-    COGNITO_CLIENT_ID=$(echo "$OUTPUTS" | jq -r '.cognito_client_id.value')
-    COGNITO_CLIENT_SECRET=$(echo "$OUTPUTS" | jq -r '.cognito_client_secret.value')
-
-    log_info "PostgreSQL:          ${PG_HOST}:${PG_PORT}"
-    log_info "Redis:               ${REDIS_HOST}:${REDIS_PORT}"
-    log_info "S3 Region:           ${AWS_REGION}"
-    log_info "S3 Bucket Prefix:    ${S3_BUCKET_PREFIX}"
-    log_info "GitLab IRSA ARN:        ${GITLAB_IRSA_ROLE_ARN}"
-    log_info "External-DNS IRSA ARN:  ${EXTERNAL_DNS_IRSA_ROLE_ARN}"
-    log_info "Cognito Issuer:      ${COGNITO_ISSUER_URL}"
-    log_info "Cognito Domain:      ${COGNITO_HOSTED_UI_DOMAIN}"
-    log_info "Cognito Client:      ${COGNITO_CLIENT_ID}"
-    log_info "Cluster:             ${CLUSTER_NAME}"
-
-elif [[ "$CLOUD" == "upcloud" ]]; then
-    VALKEY_HOST=$(echo "$OUTPUTS" | jq -r '.valkey_host.value')
-    VALKEY_PORT=$(echo "$OUTPUTS" | jq -r '.valkey_port.value')
-    S3_ENDPOINT=$(echo "$OUTPUTS" | jq -r '.s3_endpoint.value')
-    S3_REGION=$(echo "$OUTPUTS" | jq -r '.s3_region.value')
-
-    log_info "PostgreSQL: ${PG_HOST}:${PG_PORT}"
-    log_info "Valkey:     ${VALKEY_HOST}:${VALKEY_PORT}"
-    log_info "S3:         ${S3_ENDPOINT} (${S3_REGION})"
-    log_info "Cluster:    ${CLUSTER_NAME}"
-else
-    REDIS_HOST=$(echo "$OUTPUTS" | jq -r '.redis_host.value')
-    REDIS_PORT=$(echo "$OUTPUTS" | jq -r '.redis_port.value')
-    STORAGE_ACCOUNT=$(echo "$OUTPUTS" | jq -r '.storage_account_name.value')
-    GITLAB_IDENTITY_CLIENT_ID=$(echo "$OUTPUTS" | jq -r '.gitlab_identity_client_id.value')
-    EXTERNAL_DNS_IDENTITY_CLIENT_ID=$(echo "$OUTPUTS" | jq -r '.external_dns_identity_client_id.value')
-    RESOURCE_GROUP=$(echo "$OUTPUTS" | jq -r '.resource_group_name.value')
-    ENTRA_TENANT_ID=$(echo "$OUTPUTS" | jq -r '.entra_tenant_id.value')
-    ENTRA_KEYCLOAK_CLIENT_ID=$(echo "$OUTPUTS" | jq -r '.entra_keycloak_client_id.value')
-    ENTRA_KEYCLOAK_CLIENT_SECRET=$(echo "$OUTPUTS" | jq -r '.entra_keycloak_client_secret.value')
-
-    log_info "PostgreSQL:       ${PG_HOST}:${PG_PORT}"
-    log_info "Redis:            ${REDIS_HOST}:${REDIS_PORT}"
-    log_info "Storage Account:  ${STORAGE_ACCOUNT}"
-    log_info "GitLab Identity:      ${GITLAB_IDENTITY_CLIENT_ID}"
-    log_info "External-DNS Identity: ${EXTERNAL_DNS_IDENTITY_CLIENT_ID}"
-    log_info "Entra Tenant:     ${ENTRA_TENANT_ID}"
-    log_info "Entra Client:     ${ENTRA_KEYCLOAK_CLIENT_ID}"
-    log_info "Cluster:          ${CLUSTER_NAME}"
-fi
-
-# ─── Update config.yaml ─────────────────────────────────────────────
-
-log_step "Updating ${CONFIG_FILE}..."
-
-if [[ "$CLOUD" == "gcp" ]]; then
-    sed -i "/^dataServices:/,\$ {
-        /postgresql:/,/host:/ { s|host: .*|host: ${PG_HOST}:${PG_PORT}| }
-        /redis:/,/host:/ { s|host: .*|host: ${REDIS_HOST}| }
-        /gcs:/,/projectId:/ { s|projectId: .*|projectId: ${GCS_PROJECT_ID}| }
-        /gcs:/,/bucketPrefix:/ { s|bucketPrefix: .*|bucketPrefix: ${GCS_BUCKET_PREFIX}| }
-        /gcs:/,/gitlabGsaEmail:/ { s|gitlabGsaEmail: .*|gitlabGsaEmail: ${GITLAB_GSA_EMAIL}| }
-    }" "$CONFIG_FILE"
-
-    sed -i "/^externalDns:/,\$ {
-        s|gsaEmail: .*|gsaEmail: ${EXTERNAL_DNS_GSA_EMAIL}|
-    }" "$CONFIG_FILE"
-
-    # Write Google IdP client secret template (fill in manually after creating OAuth client)
-    google_idp_file="${SCRIPT_DIR}/${ENV}/gcp-idp.env"
-    mkdir -p "${SCRIPT_DIR}/${ENV}"
-    if [[ ! -f "$google_idp_file" ]]; then
-        cat > "$google_idp_file" <<EOF
-# GCP IdP credentials for Keycloak Google social login
-# Create a Web Application OAuth client in Google Cloud Console:
-#   APIs & Services → Credentials → Create OAuth client ID → Web application
-#   Authorized redirect URIs: https://keycloak.<domain>/realms/devops/broker/google/endpoint
-# Then fill in GOOGLE_IDP_CLIENT_ID and GOOGLE_IDP_CLIENT_SECRET below.
+# Secrets that tofu cannot create (no provider resource exists) go in a file we
+# create once and never overwrite, so a manual value is never clobbered.
+if [[ "$CLUSTER_TYPE" == "platform" && ! -f "$MANUAL_FILE" ]]; then
+    case "$CLOUD" in
+        gcp)
+            cat > "$MANUAL_FILE" <<'EOF'
+# Manually-provided secrets (not managed by tofu).
+#
+# Google OAuth client for Keycloak's Google identity provider. There is no
+# Terraform resource for OAuth clients, so create one by hand:
+#   Google Cloud Console → APIs & Services → Credentials
+#   → Create OAuth client ID → Web application
+#   Authorized redirect URI:
+#     https://keycloak.<domain>/realms/devops/broker/google/endpoint
 GOOGLE_IDP_CLIENT_ID=FILL_IN_MANUALLY
 GOOGLE_IDP_CLIENT_SECRET=FILL_IN_MANUALLY
 EOF
-        chmod 600 "$google_idp_file"
-        log_info "Google IdP template written to: ${google_idp_file}"
-        log_info "Fill in the client ID/secret after creating the OAuth app in Google Cloud Console"
-    else
-        log_info "gcp-idp.env already exists — not overwriting"
-    fi
-
-    # Write Memorystore Redis auth string to secrets file
-    redis_secrets_file="${SCRIPT_DIR}/${ENV}/gcp-redis.env"
-    cat > "$redis_secrets_file" <<EOF
-REDIS_AUTH_STRING=${REDIS_AUTH_STRING}
+            ;;
+        *)
+            cat > "$MANUAL_FILE" <<'EOF'
+# Manually-provided secrets (not managed by tofu).
+# Add values here as needed; this file is never overwritten by sync-tofu-outputs.sh.
 EOF
-    chmod 600 "$redis_secrets_file"
-    log_info "Redis auth string written to: ${redis_secrets_file}"
-    log_info "Create K8s secret: kubectl create secret generic gitlab-redis-secret -n gitlab --from-literal=password=${REDIS_AUTH_STRING}"
-
-elif [[ "$CLOUD" == "aws" ]]; then
-    sed -i "/^dataServices:/,\$ {
-        /postgresql:/,/host:/ { s|host: .*|host: ${PG_HOST}:${PG_PORT}| }
-        /redis:/,/host:/ { s|host: .*|host: ${REDIS_HOST}| }
-        /s3:/,/region:/ { s|region: .*|region: ${AWS_REGION}| }
-        /s3:/,/bucketPrefix:/ { s|bucketPrefix: .*|bucketPrefix: ${S3_BUCKET_PREFIX}| }
-        /s3:/,/gitlabIrsaRoleArn:/ { s|gitlabIrsaRoleArn: .*|gitlabIrsaRoleArn: ${GITLAB_IRSA_ROLE_ARN}| }
-    }" "$CONFIG_FILE"
-
-    sed -i "/^externalDns:/,\$ {
-        s|irsaRoleArn: .*|irsaRoleArn: ${EXTERNAL_DNS_IRSA_ROLE_ARN}|
-    }" "$CONFIG_FILE"
-
-    # Write non-sensitive Cognito values into config.yaml
-    sed -i "/^cognitoIdp:/,\$ {
-        s|issuerUrl: .*|issuerUrl: ${COGNITO_ISSUER_URL}|
-        s|hostedUiDomain: .*|hostedUiDomain: ${COGNITO_HOSTED_UI_DOMAIN}|
-        s|clientId: .*|clientId: ${COGNITO_CLIENT_ID}|
-    }" "$CONFIG_FILE"
-
-    # Write Cognito client secret to local env file (gitignored, read by setup-keycloak.sh)
-    aws_idp_file="${SCRIPT_DIR}/${ENV}/aws-idp.env"
-    mkdir -p "${SCRIPT_DIR}/${ENV}"
-    cat > "$aws_idp_file" <<EOF
-COGNITO_ISSUER_URL=${COGNITO_ISSUER_URL}
-COGNITO_HOSTED_UI_DOMAIN=${COGNITO_HOSTED_UI_DOMAIN}
-COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}
-COGNITO_CLIENT_SECRET=${COGNITO_CLIENT_SECRET}
-EOF
-    chmod 600 "$aws_idp_file"
-    log_info "Cognito credentials written to: ${aws_idp_file}"
-
-elif [[ "$CLOUD" == "upcloud" ]]; then
-    # Context-aware replacement within the dataServices section
-    sed -i "/^dataServices:/,\$ {
-        /postgresql:/,/host:/ { s|host: .*|host: ${PG_HOST}:${PG_PORT}| }
-        /valkey:/,/host:/ { s|host: .*|host: ${VALKEY_HOST}:${VALKEY_PORT}| }
-        /s3:/,/endpoint:/ { s|endpoint: .*|endpoint: ${S3_ENDPOINT}| }
-        /s3:/,/region:/ { s|region: .*|region: ${S3_REGION}| }
-    }" "$CONFIG_FILE"
-else
-    sed -i "/^dataServices:/,\$ {
-        /postgresql:/,/host:/ { s|host: .*|host: ${PG_HOST}:${PG_PORT}| }
-        /redis:/,/host:/ { s|host: .*|host: ${REDIS_HOST}:${REDIS_PORT}| }
-        s|accountName: .*|accountName: ${STORAGE_ACCOUNT}|
-        s|identityClientId: .*|identityClientId: ${GITLAB_IDENTITY_CLIENT_ID}|
-    }" "$CONFIG_FILE"
-
-    # Write non-sensitive Entra values into config.yaml
-    sed -i "/^entraId:/,\$ {
-        s|tenantId: .*|tenantId: ${ENTRA_TENANT_ID}|
-        s|clientId: .*|clientId: ${ENTRA_KEYCLOAK_CLIENT_ID}|
-    }" "$CONFIG_FILE"
-
-    sed -i "/^externalDns:/,\$ {
-        s|identityClientId: .*|identityClientId: ${EXTERNAL_DNS_IDENTITY_CLIENT_ID}|
-    }" "$CONFIG_FILE"
-
-    # Write the client secret to a local env file (gitignored, read by setup-keycloak.sh)
-    entra_secrets_file="${SCRIPT_DIR}/${ENV}/entra-idp.env"
-    mkdir -p "${SCRIPT_DIR}/${ENV}"
-    cat > "$entra_secrets_file" <<EOF
-ENTRA_TENANT_ID=${ENTRA_TENANT_ID}
-ENTRA_KEYCLOAK_CLIENT_ID=${ENTRA_KEYCLOAK_CLIENT_ID}
-ENTRA_KEYCLOAK_CLIENT_SECRET=${ENTRA_KEYCLOAK_CLIENT_SECRET}
-EOF
-    chmod 600 "$entra_secrets_file"
-    log_info "Entra ID credentials written to: ${entra_secrets_file}"
+            ;;
+    esac
+    chmod 600 "$MANUAL_FILE"
+    log_info "Manual secrets template: ${MANUAL_FILE}"
 fi
-
-log_info "Config updated"
 
 # ─── Fetch kubeconfig ────────────────────────────────────────────────
 
 log_step "Fetching kubeconfig for cluster: ${CLUSTER_NAME}..."
 
-KUBECONFIG_DIR="${SCRIPT_DIR}/${ENV}"
-mkdir -p "$KUBECONFIG_DIR"
-KUBECONFIG_FILE="${KUBECONFIG_DIR}/kubeconfig"
+KUBECONFIG_FILE="${SCRIPT_ENV_DIR}/kubeconfig"
 
-if [[ "$CLOUD" == "gcp" ]]; then
-    if command -v gcloud &>/dev/null; then
-        KUBECONFIG="${KUBECONFIG_FILE}" gcloud container clusters get-credentials "${CLUSTER_NAME}" \
-            --region "${GCP_REGION}" \
-            --project "${GCS_PROJECT_ID}"
-        log_info "Kubeconfig written to: ${KUBECONFIG_FILE}"
-        log_info "Use with: export KUBECONFIG=${KUBECONFIG_FILE}"
-    else
-        log_warn "gcloud not found — install Google Cloud SDK to fetch kubeconfig automatically"
-        log_warn "  https://cloud.google.com/sdk/docs/install"
-        log_warn "Or run: KUBECONFIG=${KUBECONFIG_FILE} gcloud container clusters get-credentials ${CLUSTER_NAME} --region ${GCP_REGION} --project ${GCS_PROJECT_ID}"
-    fi
+fetch_kubeconfig() {
+    case "$CLOUD" in
+        aws)
+            local region
+            region="$(out aws_region)"
+            if command -v aws &>/dev/null; then
+                aws eks update-kubeconfig --region "$region" --name "$CLUSTER_NAME" \
+                    --kubeconfig "$KUBECONFIG_FILE"
+            else
+                log_warn "aws CLI not found — run:"
+                log_warn "  aws eks update-kubeconfig --region ${region} --name ${CLUSTER_NAME} --kubeconfig ${KUBECONFIG_FILE}"
+                return 1
+            fi
+            ;;
+        azure)
+            local rg
+            rg="$(out resource_group_name)"
+            if command -v az &>/dev/null; then
+                az aks get-credentials --resource-group "$rg" --name "$CLUSTER_NAME" \
+                    --file "$KUBECONFIG_FILE" --overwrite-existing
+            else
+                log_warn "az CLI not found — run:"
+                log_warn "  az aks get-credentials --resource-group ${rg} --name ${CLUSTER_NAME} --file ${KUBECONFIG_FILE}"
+                return 1
+            fi
+            ;;
+        gcp)
+            local region project
+            region="$(out region)"
+            project="$(out project_id)"
+            if command -v gcloud &>/dev/null; then
+                KUBECONFIG="$KUBECONFIG_FILE" gcloud container clusters get-credentials \
+                    "$CLUSTER_NAME" --region "$region" --project "$project"
+            else
+                log_warn "gcloud not found — run:"
+                log_warn "  KUBECONFIG=${KUBECONFIG_FILE} gcloud container clusters get-credentials ${CLUSTER_NAME} --region ${region} --project ${project}"
+                return 1
+            fi
+            ;;
+        upcloud)
+            if command -v upctl &>/dev/null; then
+                upctl kubernetes config "$CLUSTER_NAME" --write "$KUBECONFIG_FILE"
+            else
+                log_warn "upctl not found — download the kubeconfig from the UpCloud console and save it to:"
+                log_warn "  ${KUBECONFIG_FILE}"
+                return 1
+            fi
+            ;;
+    esac
+}
 
-elif [[ "$CLOUD" == "aws" ]]; then
-    if command -v aws &>/dev/null; then
-        aws eks update-kubeconfig \
-            --region "${AWS_REGION}" \
-            --name "${CLUSTER_NAME}" \
-            --kubeconfig "${KUBECONFIG_FILE}"
-        log_info "Kubeconfig written to: ${KUBECONFIG_FILE}"
-        log_info "Use with: export KUBECONFIG=${KUBECONFIG_FILE}"
-    else
-        log_warn "aws CLI not found — install AWS CLI to fetch kubeconfig automatically"
-        log_warn "  https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
-        log_warn "Or run: aws eks update-kubeconfig --region ${AWS_REGION} --name ${CLUSTER_NAME}"
-    fi
-
-elif [[ "$CLOUD" == "upcloud" ]]; then
-    if command -v upctl &>/dev/null; then
-        upctl kubernetes config "${CLUSTER_NAME}" --write "${KUBECONFIG_FILE}"
-        log_info "Kubeconfig written to: ${KUBECONFIG_FILE}"
-        log_info "Use with: export KUBECONFIG=${KUBECONFIG_FILE}"
-    else
-        log_warn "upctl not found — install UpCloud CLI to fetch kubeconfig automatically"
-        log_warn "  https://github.com/UpCloudLtd/upcloud-cli"
-        log_warn "Or download kubeconfig from UpCloud console and save to: ${KUBECONFIG_FILE}"
-    fi
-else
-    if command -v az &>/dev/null; then
-        az aks get-credentials \
-            --resource-group "${RESOURCE_GROUP}" \
-            --name "${CLUSTER_NAME}" \
-            --file "${KUBECONFIG_FILE}" \
-            --overwrite-existing
-        log_info "Kubeconfig written to: ${KUBECONFIG_FILE}"
-        log_info "Use with: export KUBECONFIG=${KUBECONFIG_FILE}"
-    else
-        log_warn "az not found — install Azure CLI to fetch kubeconfig automatically"
-        log_warn "  https://learn.microsoft.com/en-us/cli/azure/install-azure-cli"
-        log_warn "Or run: az aks get-credentials --resource-group ${RESOURCE_GROUP} --name ${CLUSTER_NAME}"
-    fi
+if fetch_kubeconfig; then
+    chmod 600 "$KUBECONFIG_FILE"
+    log_info "Kubeconfig written to: ${KUBECONFIG_FILE}"
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────
@@ -434,19 +326,21 @@ fi
 echo ""
 log_info "Sync complete. Next steps:"
 echo ""
-echo "  1. Set domain and acmeEmail in: ${CONFIG_FILE}"
-if [[ "$CLOUD" == "azure" || "$CLOUD" == "gcp" || "$CLOUD" == "aws" ]]; then
-echo "  2. Create DB users (run once after first apply):"
-echo "       kubectl run pg-init --rm -it --image=postgres:16 -- psql -h <pg_host> -U pgadmin -c \\"
-echo "         \"CREATE USER keycloak WITH PASSWORD '<pg_keycloak_password>';\""
-echo "       (repeat for gitlab user; passwords from: tofu output -json)"
+echo "  1. Confirm domain / acmeEmail in: ${CONFIG_FILE}"
+if [[ "$CLUSTER_TYPE" == "workload" ]]; then
+    echo "  2. Set platformVaultUrl and platformLokiUrl in: ${CONFIG_FILE}"
+    echo "  3. ./deploy-workload.sh --env ${ENV}"
+    echo "  4. ./register-workload-cluster.sh --env ${ENV}"
+else
+    if [[ "$CLOUD" != "upcloud" ]]; then
+        echo "  2. Create the managed-PostgreSQL users (once per new database):"
+        echo "       ./deploy.sh --env ${ENV} db-users"
+    fi
+    if [[ "$CLOUD" == "gcp" ]]; then
+        echo "  3. Fill in the Google OAuth client in: ${MANUAL_FILE}"
+    fi
+    echo "  4. ./deploy.sh --env ${ENV}"
 fi
-if [[ "$CLOUD" == "gcp" ]]; then
-echo "  3. Fill in Google OAuth credentials: ${SCRIPT_DIR}/${ENV}/gcp-idp.env"
-fi
-if [[ "$CLOUD" == "aws" ]]; then
-echo "  3. Cognito IdP credentials written to: ${SCRIPT_DIR}/${ENV}/aws-idp.env"
-fi
-echo "  4. export KUBECONFIG=${KUBECONFIG_FILE}"
-echo "  5. ./deploy.sh --env ${ENV}"
+echo ""
+echo "  Generated files (gitignored): ${SCRIPT_ENV_DIR}/"
 echo ""

@@ -28,7 +28,7 @@ $issues = @()
 Write-Step "Checking hosts file..."
 $hostsContent = Get-Content "$env:SystemRoot\System32\drivers\etc\hosts" -Raw
 
-$domains = @("app.localhost", "api.localhost", "hello.localhost", "keycloak.localhost", "gitlab.localhost", "argocd.localhost", "grafana.localhost")
+$domains = @("app.localhost", "api.localhost", "hello.localhost", "keycloak.localhost", "git.localhost", "ci.localhost", "argocd.localhost", "grafana.localhost")
 foreach ($domain in $domains) {
     if ($hostsContent -match $domain) {
         Write-Check "$domain is configured"
@@ -128,7 +128,7 @@ Write-Host ""
 
 # Check 6: Invoke-WebRequest test (PowerShell HTTP client)
 Write-Step "Testing with Invoke-WebRequest..."
-$testDomains = @("keycloak.localhost", "gitlab.localhost", "argocd.localhost")
+$testDomains = @("keycloak.localhost", "git.localhost", "ci.localhost", "argocd.localhost")
 
 foreach ($domain in $testDomains) {
     try {

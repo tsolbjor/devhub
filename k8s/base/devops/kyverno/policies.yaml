@@ -1,0 +1,297 @@
+# Platform policies.
+#
+# What used to be advisory is now enforced at admission, and what used to be a
+# manual sweep (`deploy-workload.sh namespace-defaults`) is now generated
+# automatically when a namespace appears.
+#
+# Platform namespaces are excluded where a rule would fight a chart that has good
+# reasons for what it does (Vault's IPC_LOCK, node-exporter's host mounts).
+---
+# ─── Application namespaces get their guardrails automatically ────────
+# ArgoCD creates devhub-<app> namespaces on demand. Previously they arrived with
+# no quota, no limits and no network isolation until someone ran a sweep.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: devhub-namespace-defaults
+  annotations:
+    policies.kyverno.io/title: Namespace guardrails
+    policies.kyverno.io/description: >-
+      Generates a ResourceQuota, LimitRange and default-deny NetworkPolicies in
+      every devhub-* namespace, and keeps them in sync if they are edited away.
+spec:
+  admission: true
+  background: true
+  rules:
+    - name: generate-quota
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              names:
+                - "devhub-*"
+      generate:
+        apiVersion: v1
+        kind: ResourceQuota
+        name: devhub-quota
+        namespace: "{{request.object.metadata.name}}"
+        synchronize: true
+        data:
+          spec:
+            hard:
+              requests.cpu: "4"
+              requests.memory: 8Gi
+              limits.cpu: "8"
+              limits.memory: 16Gi
+              requests.storage: 50Gi
+              persistentvolumeclaims: "10"
+              pods: "40"
+              services.loadbalancers: "0"
+
+    - name: generate-limitrange
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              names:
+                - "devhub-*"
+      generate:
+        apiVersion: v1
+        kind: LimitRange
+        name: devhub-limits
+        namespace: "{{request.object.metadata.name}}"
+        synchronize: true
+        data:
+          spec:
+            limits:
+              - type: Container
+                default:
+                  cpu: 500m
+                  memory: 512Mi
+                defaultRequest:
+                  cpu: 100m
+                  memory: 128Mi
+                max:
+                  cpu: "4"
+                  memory: 8Gi
+
+    - name: generate-default-deny
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              names:
+                - "devhub-*"
+      generate:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        name: default-deny-ingress
+        namespace: "{{request.object.metadata.name}}"
+        synchronize: true
+        data:
+          spec:
+            podSelector: {}
+            policyTypes:
+              - Ingress
+
+    - name: generate-allow-gateway
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              names:
+                - "devhub-*"
+      generate:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        name: allow-gateway-and-same-namespace
+        namespace: "{{request.object.metadata.name}}"
+        synchronize: true
+        data:
+          spec:
+            podSelector: {}
+            policyTypes:
+              - Ingress
+            ingress:
+              - from:
+                  - podSelector: {}
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: envoy-gateway-system
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: monitoring
+
+    - name: generate-egress-block-metadata
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              names:
+                - "devhub-*"
+      generate:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        name: app-egress
+        namespace: "{{request.object.metadata.name}}"
+        synchronize: true
+        data:
+          spec:
+            podSelector: {}
+            policyTypes:
+              - Egress
+            egress:
+              - to:
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: kube-system
+                ports:
+                  - protocol: UDP
+                    port: 53
+                  - protocol: TCP
+                    port: 53
+              - to:
+                  - podSelector: {}
+              # Internet, minus the cloud metadata endpoint: an app's cloud access
+              # comes from its own Workload Identity, never the node's.
+              - to:
+                  - ipBlock:
+                      cidr: 0.0.0.0/0
+                      except:
+                        - 169.254.0.0/16
+---
+# ─── Resource requests and limits are mandatory for app workloads ─────
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resources
+  annotations:
+    policies.kyverno.io/title: Require resource requests and limits
+spec:
+  background: true
+  rules:
+    - name: require-requests-limits
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - "devhub-*"
+      validate:
+        failureAction: Enforce
+        message: >-
+          Every container needs CPU and memory requests and limits. Without them
+          the scheduler cannot place the pod sensibly and one app can starve the node.
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    memory: "?*"
+                    cpu: "?*"
+                  limits:
+                    memory: "?*"
+---
+# ─── No privileged escalation in application namespaces ───────────────
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privileged-apps
+  annotations:
+    policies.kyverno.io/title: No privileged containers in app namespaces
+spec:
+  background: true
+  rules:
+    - name: no-privileged
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - "devhub-*"
+      validate:
+        failureAction: Enforce
+        message: "Privileged containers and host namespaces are not allowed for applications."
+        pattern:
+          spec:
+            =(hostPID): "false"
+            =(hostIPC): "false"
+            =(hostNetwork): "false"
+            containers:
+              - =(securityContext):
+                  =(privileged): "false"
+                  =(allowPrivilegeEscalation): "false"
+---
+# ─── Images come from the platform registry or an allow-list ──────────
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-image-registries
+  annotations:
+    policies.kyverno.io/title: Restrict image registries
+    policies.kyverno.io/description: >-
+      Application images must come from the platform's own Forgejo registry or an
+      explicitly allowed public registry. Templated with ${DOMAIN} by deploy.sh.
+spec:
+  background: true
+  rules:
+    - name: allowed-registries
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - "devhub-*"
+      validate:
+        failureAction: Enforce
+        message: >-
+          Images must come from git.${DOMAIN} (the platform registry) or an
+          allow-listed public registry.
+        pattern:
+          spec:
+            containers:
+              - image: "git.${DOMAIN}/* | ghcr.io/* | docker.io/library/* | registry.k8s.io/* | quay.io/*"
+---
+# ─── CI job pods land on the CI node pool ─────────────────────────────
+# Woodpecker's Kubernetes backend has no toleration setting of its own, and CI
+# workloads must not share nodes with Vault, Keycloak or the databases.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: ci-pods-to-ci-pool
+  annotations:
+    policies.kyverno.io/title: Pin CI pods to the tainted CI node pool
+spec:
+  admission: true
+  background: false
+  rules:
+    - name: add-nodeselector-and-toleration
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - woodpecker-ci
+      mutate:
+        patchStrategicMerge:
+          spec:
+            nodeSelector:
+              role: ci
+            tolerations:
+              - key: workload
+                operator: Equal
+                value: ci
+                effect: NoSchedule
+            +(priorityClassName): ci-job
+            # A build step has no business talking to the API server; the agent
+            # that created it already has the permissions it needs.
+            automountServiceAccountToken: false

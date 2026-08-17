@@ -48,16 +48,20 @@ All services in the DevOps platform are configured to use Keycloak for centraliz
 - Secret: `argocd-secret` in `argocd` namespace (key: `oidc.keycloak.clientSecret`)
 - OIDC config in server ConfigMap
 
-### 3. GitLab
-- **URL**: https://gitlab.localhost
-- **OIDC Client**: `gitlab`
+### 3. Forgejo
+- **URL**: https://git.localhost
+- **OIDC Client**: `forgejo`
 - **Login**: Click "Keycloak" button on login page
 - **User Creation**: Users are auto-created on first login
 
 **Configuration**:
-- Values file: `k8s/overlays/local/devops/gitlab/values.yaml`
-- Secret: `gitlab-oidc-secret` in `gitlab` namespace
-- Auth provider: OmniAuth OpenID Connect
+- Registered by `setup-keycloak.sh` (`register_forgejo_oidc`) through Forgejo's
+  admin CLI: `gitea admin auth add-oauth --provider openidConnect`, discovery over
+  the in-cluster Keycloak service URL. It is deliberately *not* in the Helm values —
+  the chart's init container fails the pod if the realm does not exist yet.
+- Secret: `forgejo-oidc-secret` in `forgejo` namespace (record of the credentials;
+  the live configuration lives in Forgejo's database)
+- Group claim `groups`, admin group `devops-admins`
 
 ### 4. Vault
 - **URL**: https://vault.localhost
@@ -118,7 +122,8 @@ Client secrets are stored in two places:
 1. **Kubernetes Secrets**: Used by services for OIDC authentication
    - `grafana-oidc-secret` (monitoring namespace)
    - `argocd-secret` (argocd namespace)
-   - `gitlab-oidc-secret` (gitlab namespace)
+   - `forgejo-oidc-secret` (forgejo namespace — record only; Forgejo stores the
+     login source in its database)
    - `vault-oidc-secret` (vault namespace)
 
 2. **Local File**: `k8s/scripts/local/oidc-secrets.env` (gitignored)
@@ -160,11 +165,11 @@ All services use these Keycloak endpoints:
 2. Restart ArgoCD server: `kubectl rollout restart deployment argocd-server -n argocd`
 3. Check ArgoCD logs: `kubectl logs -n argocd deployment/argocd-server`
 
-### GitLab Keycloak Button Not Visible
+### Forgejo Keycloak Button Not Visible
 
-1. Verify GitLab OmniAuth configuration is applied
-2. Check GitLab webservice logs: `kubectl logs -n gitlab deployment/gitlab-webservice-default`
-3. Restart GitLab webservice: `kubectl rollout restart deployment/gitlab-webservice-default -n gitlab`
+1. Verify the OAuth source exists: `kubectl exec -n forgejo deploy/forgejo -- forgejo admin auth list`
+2. Check the Forgejo logs: `kubectl logs -n forgejo deploy/forgejo`
+3. Restart Forgejo: `kubectl rollout restart deploy/forgejo -n forgejo`
 
 ### User Cannot Access Service After Login
 
@@ -175,7 +180,7 @@ All services use these Keycloak endpoints:
 ### Keycloak Setup Script Fails
 
 1. Ensure Keycloak is fully running: `kubectl get pods -n keycloak`
-2. Check Keycloak logs: `kubectl logs -n keycloak keycloak-keycloakx-0`
+2. Check Keycloak logs: `kubectl logs -n keycloak keycloak-0`
 3. Try running individual steps:
    ```bash
    ./setup-keycloak.sh --env local realm    # Create realm only
@@ -219,5 +224,19 @@ For production deployments, consider:
 - [Keycloak Documentation](https://www.keycloak.org/documentation)
 - [Grafana OAuth Documentation](https://grafana.com/docs/grafana/latest/setup-grafana/configure-security/configure-authentication/generic-oauth/)
 - [ArgoCD SSO Documentation](https://argo-cd.readthedocs.io/en/stable/operator-manual/user-management/)
-- [GitLab OmniAuth Documentation](https://docs.gitlab.com/ee/integration/omniauth.html)
+- [Forgejo OAuth2 authentication](https://forgejo.org/docs/latest/admin/oauth2-provider/)
 - [OpenID Connect Specification](https://openid.net/connect/)
+
+## Woodpecker CI is not a Keycloak client
+
+Woodpecker authenticates users through **Forgejo**, not Keycloak: it uses a Forgejo
+OAuth2 application (`WOODPECKER_GITEA_CLIENT` / `WOODPECKER_GITEA_SECRET`), which
+`deploy.sh` registers automatically. Since Forgejo itself is a Keycloak client, a
+user still signs in once with their Keycloak identity — the chain is
+Keycloak → Forgejo → Woodpecker.
+
+Re-register the application if the secret is lost:
+
+```bash
+./devhub deploy --env <env> woodpecker-oauth
+```

@@ -11,7 +11,7 @@ set -euo pipefail
 #
 # The 'idp' action configures a cloud identity provider:
 #   azure-*: Entra ID federation (via OIDC, App Roles → Keycloak groups)
-#   gcp-*:   Google social login (requires gcp-idp.env filled in manually)
+#   gcp-*:   Google social login (requires manual-secrets.env filled in)
 #   aws-*:   AWS Cognito OIDC federation (Cognito Groups → Keycloak groups)
 # 'all' automatically includes 'idp' for azure/gcp/aws environments.
 # =============================================================================
@@ -20,10 +20,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 parse_env_arg "$@"
-set -- "${ARGS[@]}"
+# Empty-array expansion is unsafe under `set -u` on older bash.
+if [[ ${#ARGS[@]} -gt 0 ]]; then set -- "${ARGS[@]}"; else set --; fi
 
 setup_paths
 parse_config
+use_env_kubeconfig
+
+# Credentials from tofu (secrets.env) and manually-provided ones
+# (manual-secrets.env, e.g. the Google OAuth client). sync-tofu-outputs.sh writes
+# both; they replaced the per-cloud *-idp.env files.
+for f in "${SCRIPT_ENV_DIR}/secrets.env" "${SCRIPT_ENV_DIR}/manual-secrets.env"; do
+    [[ -f "$f" ]] && { set -a; source "$f"; set +a; }
+done
 
 # Configuration
 REALM="devops"
@@ -33,7 +42,7 @@ KCADM="/opt/keycloak/bin/kcadm.sh"
 # *.localhost resolves to 127.0.0.1 inside glibc-based containers (RFC 6761),
 # so we must use internal K8s service URLs for server-side calls.
 if [[ "$DOMAIN" == "localhost" || "$DOMAIN" == *.localhost ]]; then
-    KEYCLOAK_INTERNAL_URL="http://keycloak-keycloakx-http.keycloak.svc.cluster.local"
+    KEYCLOAK_INTERNAL_URL="http://keycloak-service.keycloak.svc.cluster.local:8080"
     USE_DISCOVERY=false
 else
     KEYCLOAK_INTERNAL_URL="https://keycloak.${DOMAIN}"
@@ -42,12 +51,12 @@ fi
 
 # Execute kcadm command in Keycloak pod
 kcadm() {
-    kubectl exec -n keycloak keycloak-keycloakx-0 -- ${KCADM} "$@"
+    kubectl exec -n keycloak keycloak-0 -- ${KCADM} "$@"
 }
 
 # Login to Keycloak admin
 kcadm_login() {
-    local password=$(kubectl get secret keycloak-admin-secret -n keycloak -o jsonpath='{.data.KEYCLOAK_ADMIN_PASSWORD}' | base64 -d)
+    local password=$(kubectl get secret keycloak-admin-secret -n keycloak -o jsonpath='{.data.password}' | base64 -d)
     kcadm config credentials --server http://localhost:8080 --realm master --user admin --password "${password}" >/dev/null
     log_info "Logged in to Keycloak admin CLI"
 }
@@ -148,7 +157,7 @@ configure_groups_scope() {
 
     kcadm update realms/${REALM}/default-default-client-scopes/${scope_id} -r ${REALM} 2>/dev/null || true
 
-    for client_name in "grafana" "argocd" "gitlab" "vault" "headlamp"; do
+    for client_name in "grafana" "argocd" "forgejo" "vault" "headlamp"; do
         local client_id=$(kcadm get clients -r ${REALM} --fields id,clientId 2>/dev/null | grep "\"clientId\" : \"${client_name}\"" -B 1 | grep "\"id\"" | cut -d'"' -f4 || echo "")
         if [[ -n "$client_id" ]]; then
             kcadm update clients/${client_id}/default-client-scopes/${scope_id} -r ${REALM} 2>/dev/null || true
@@ -264,60 +273,18 @@ configure_clients() {
             --dry-run=client -o yaml | kubectl apply -f -
     fi
 
-    # GitLab
-    log_info "Configuring GitLab OIDC client..."
-    local gitlab_secret=$(create_client "gitlab" \
-        "https://gitlab.${DOMAIN}/users/auth/openid_connect/callback")
-    echo "GITLAB_OIDC_SECRET=${gitlab_secret}" >> "${secrets_file}"
+    # Forgejo
+    log_info "Configuring Forgejo OIDC client..."
+    local forgejo_secret=$(create_client "forgejo" \
+        "https://git.${DOMAIN}/user/oauth2/keycloak/callback")
+    echo "FORGEJO_OIDC_SECRET=${forgejo_secret}" >> "${secrets_file}"
 
-    # GitLab OIDC config: use discovery for non-localhost, explicit endpoints for localhost
-    if [[ "$USE_DISCOVERY" == "true" ]]; then
-        kubectl create secret generic gitlab-oidc-secret -n gitlab \
-            --from-literal=provider="$(cat <<EOF
-name: 'openid_connect'
-label: 'Keycloak'
-args:
-  name: 'openid_connect'
-  scope: ['openid', 'profile', 'email', 'groups']
-  response_type: 'code'
-  issuer: 'https://keycloak.${DOMAIN}/realms/devops'
-  discovery: true
-  client_auth_method: 'query'
-  uid_field: 'preferred_username'
-  client_options:
-    identifier: 'gitlab'
-    secret: '${gitlab_secret}'
-    redirect_uri: 'https://gitlab.${DOMAIN}/users/auth/openid_connect/callback'
-EOF
-)" \
-            --dry-run=client -o yaml | kubectl apply -f -
-    else
-        # .localhost domain: use internal URLs for server-side endpoints
-        kubectl create secret generic gitlab-oidc-secret -n gitlab \
-            --from-literal=provider="$(cat <<EOF
-name: 'openid_connect'
-label: 'Keycloak'
-args:
-  name: 'openid_connect'
-  scope: ['openid', 'profile', 'email', 'groups']
-  response_type: 'code'
-  issuer: 'https://keycloak.${DOMAIN}/realms/devops'
-  discovery: false
-  client_auth_method: 'query'
-  uid_field: 'preferred_username'
-  client_options:
-    identifier: 'gitlab'
-    secret: '${gitlab_secret}'
-    redirect_uri: 'https://gitlab.${DOMAIN}/users/auth/openid_connect/callback'
-    authorization_endpoint: 'https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/auth'
-    token_endpoint: '${KEYCLOAK_INTERNAL_URL}/realms/devops/protocol/openid-connect/token'
-    userinfo_endpoint: '${KEYCLOAK_INTERNAL_URL}/realms/devops/protocol/openid-connect/userinfo'
-    jwks_uri: '${KEYCLOAK_INTERNAL_URL}/realms/devops/protocol/openid-connect/certs'
-    end_session_endpoint: 'https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/logout'
-EOF
-)" \
-            --dry-run=client -o yaml | kubectl apply -f -
-    fi
+    kubectl create secret generic forgejo-oidc-secret -n forgejo \
+        --from-literal=key=forgejo \
+        --from-literal=secret="${forgejo_secret}" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+    register_forgejo_oidc "${forgejo_secret}"
 
     # Vault
     log_info "Configuring Vault OIDC client..."
@@ -356,18 +323,68 @@ EOF
     # Restart services that mount OIDC secrets as volumes/env vars
     log_info "Restarting services to pick up real OIDC secrets..."
     kubectl rollout restart deployment/prometheus-grafana -n monitoring 2>/dev/null || true
-    kubectl rollout restart deployment/gitlab-webservice-default -n gitlab 2>/dev/null || true
+    kubectl rollout restart deployment/forgejo -n forgejo 2>/dev/null || true
     kubectl rollout restart deployment/headlamp -n headlamp 2>/dev/null || true
 }
 
+# Register Keycloak as an OAuth2 login source inside Forgejo.
+#
+# This lives here, not in the Helm values, because the chart's init container hard
+# fails when the discovery URL 404s — and the realm only exists once this script has
+# run. Idempotent: an existing 'keycloak' source is updated with the new secret.
+register_forgejo_oidc() {
+    local client_secret="$1"
+    local discovery="${KEYCLOAK_INTERNAL_URL}/realms/${REALM}/.well-known/openid-configuration"
+
+    local pod
+    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    if [[ -z "$pod" ]]; then
+        log_warn "Forgejo is not running — re-run this script once it is to enable SSO there"
+        return 0
+    fi
+
+    # `auth list` prints: ID <tab> Name <tab> Type <tab> Enabled
+    local existing_id
+    existing_id="$(kubectl exec -n forgejo "$pod" -- gitea admin auth list 2>/dev/null |
+        awk -F'\t' '$2 == "keycloak" { print $1; exit }' | tr -d '[:space:]')"
+
+    if [[ -n "$existing_id" ]]; then
+        if kubectl exec -n forgejo "$pod" -- gitea admin auth update-oauth \
+            --id "$existing_id" \
+            --key forgejo --secret "$client_secret" \
+            --auto-discover-url "$discovery" >/dev/null 2>&1; then
+            log_info "Forgejo OAuth source 'keycloak' updated"
+        else
+            log_warn "Could not update Forgejo's 'keycloak' login source — check it in the UI"
+        fi
+        return 0
+    fi
+
+    if kubectl exec -n forgejo "$pod" -- gitea admin auth add-oauth \
+        --name keycloak \
+        --provider openidConnect \
+        --key forgejo --secret "$client_secret" \
+        --auto-discover-url "$discovery" \
+        --scopes "openid email profile groups" \
+        --group-claim-name groups \
+        --admin-group devops-admins >/dev/null 2>&1; then
+        log_info "Forgejo OAuth source 'keycloak' registered"
+    else
+        log_warn "Could not register Keycloak in Forgejo. Add it by hand:"
+        log_warn "  Site Administration → Authentication Sources → OAuth2, discovery URL:"
+        log_warn "  ${discovery}"
+    fi
+}
+
 # Configure Entra ID as a federated identity provider in Keycloak
-# Requires: ENTRA_TENANT_ID, ENTRA_KEYCLOAK_CLIENT_ID (from config.yaml via parse_config)
-#           ENTRA_KEYCLOAK_CLIENT_SECRET (from ${SCRIPT_ENV_DIR}/entra-idp.env)
+# Requires: ENTRA_TENANT_ID, ENTRA_KEYCLOAK_CLIENT_ID (from tofu-outputs.env via parse_config)
+#           ENTRA_KEYCLOAK_CLIENT_SECRET (from ${SCRIPT_ENV_DIR}/secrets.env)
 configure_entra_idp() {
     log_step "Configuring Entra ID identity provider..."
 
     # Load client secret from local secrets file written by sync-tofu-outputs.sh
-    local secrets_file="${SCRIPT_ENV_DIR}/entra-idp.env"
+    local secrets_file="${SCRIPT_ENV_DIR}/secrets.env"
     if [[ ! -f "$secrets_file" ]]; then
         log_error "Entra ID secrets not found: ${secrets_file}"
         log_error "Run: ./sync-tofu-outputs.sh --env ${ENV}"
@@ -375,9 +392,9 @@ configure_entra_idp() {
     fi
     source "$secrets_file"
 
-    : "${ENTRA_TENANT_ID:?ENTRA_TENANT_ID not set — check config.yaml entraId.tenantId}"
-    : "${ENTRA_KEYCLOAK_CLIENT_ID:?ENTRA_KEYCLOAK_CLIENT_ID not set — check config.yaml entraId.clientId}"
-    : "${ENTRA_KEYCLOAK_CLIENT_SECRET:?ENTRA_KEYCLOAK_CLIENT_SECRET not set — check entra-idp.env}"
+    : "${ENTRA_TENANT_ID:?ENTRA_TENANT_ID not set — run sync-tofu-outputs.sh}"
+    : "${ENTRA_KEYCLOAK_CLIENT_ID:?ENTRA_KEYCLOAK_CLIENT_ID not set — run sync-tofu-outputs.sh}"
+    : "${ENTRA_KEYCLOAK_CLIENT_SECRET:?ENTRA_KEYCLOAK_CLIENT_SECRET not set — check secrets.env}"
 
     # Update the Entra ID App Registration redirect URI to the real Keycloak domain.
     # The tofu module registers a placeholder URI; this fixes it once the domain is known.
@@ -447,14 +464,14 @@ configure_entra_idp() {
 }
 
 # Configure Google as a social identity provider in Keycloak
-# Requires: GOOGLE_IDP_CLIENT_ID (from config.yaml via parse_config)
-#           GOOGLE_IDP_CLIENT_SECRET (from ${SCRIPT_ENV_DIR}/gcp-idp.env)
+# Requires: GOOGLE_IDP_CLIENT_ID (from tofu-outputs.env via parse_config)
+#           GOOGLE_IDP_CLIENT_SECRET (from ${SCRIPT_ENV_DIR}/manual-secrets.env)
 configure_google_idp() {
     log_step "Configuring Google identity provider..."
 
     # Load client secret from local secrets file written by the user after creating
     # the OAuth client in Google Cloud Console (sync-tofu-outputs.sh creates the template)
-    local secrets_file="${SCRIPT_ENV_DIR}/gcp-idp.env"
+    local secrets_file="${SCRIPT_ENV_DIR}/manual-secrets.env"
     if [[ ! -f "$secrets_file" ]]; then
         log_error "Google IdP secrets not found: ${secrets_file}"
         log_error "Run: ./sync-tofu-outputs.sh --env ${ENV}"
@@ -508,12 +525,12 @@ configure_google_idp() {
 
 # Configure AWS Cognito as a federated OIDC identity provider in Keycloak
 # Requires: COGNITO_ISSUER_URL, COGNITO_HOSTED_UI_DOMAIN, COGNITO_CLIENT_ID (from config.yaml)
-#           COGNITO_CLIENT_SECRET (from ${SCRIPT_ENV_DIR}/aws-idp.env)
+#           COGNITO_CLIENT_SECRET (from ${SCRIPT_ENV_DIR}/secrets.env)
 configure_cognito_idp() {
     log_step "Configuring AWS Cognito identity provider..."
 
     # Load client secret from local secrets file written by sync-tofu-outputs.sh
-    local secrets_file="${SCRIPT_ENV_DIR}/aws-idp.env"
+    local secrets_file="${SCRIPT_ENV_DIR}/secrets.env"
     if [[ ! -f "$secrets_file" ]]; then
         log_error "Cognito secrets not found: ${secrets_file}"
         log_error "Run: ./sync-tofu-outputs.sh --env ${ENV}"
@@ -524,7 +541,7 @@ configure_cognito_idp() {
     : "${COGNITO_ISSUER_URL:?COGNITO_ISSUER_URL not set — check config.yaml cognitoIdp.issuerUrl}"
     : "${COGNITO_HOSTED_UI_DOMAIN:?COGNITO_HOSTED_UI_DOMAIN not set — check config.yaml cognitoIdp.hostedUiDomain}"
     : "${COGNITO_CLIENT_ID:?COGNITO_CLIENT_ID not set — check config.yaml cognitoIdp.clientId}"
-    : "${COGNITO_CLIENT_SECRET:?COGNITO_CLIENT_SECRET not set — check aws-idp.env}"
+    : "${COGNITO_CLIENT_SECRET:?COGNITO_CLIENT_SECRET not set — check secrets.env}"
 
     # Update the Cognito app client callback URL to the real Keycloak domain.
     # The tofu module registers a placeholder; this fixes it once the domain is known.
@@ -628,7 +645,7 @@ print_summary() {
     echo "Services configured with SSO:"
     echo "  - Grafana: https://grafana.${DOMAIN}"
     echo "  - ArgoCD: https://argocd.${DOMAIN}"
-    echo "  - GitLab: https://gitlab.${DOMAIN}"
+    echo "  - Forgejo:    https://git.${DOMAIN}"
     echo "  - Vault: https://vault.${DOMAIN}"
     echo ""
 }
@@ -643,7 +660,7 @@ main() {
     echo "=============================================="
 
     log_info "Waiting for Keycloak to be ready..."
-    kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=keycloakx -n keycloak --timeout=300s
+    kubectl wait --for=condition=ready pod -l app=keycloak -n keycloak --timeout=300s
 
     kcadm_login
 

@@ -1,0 +1,22 @@
+# Default StorageClass for EKS.
+#
+# EKS ships no default StorageClass with a working provisioner, so every PVC on
+# the platform (Prometheus, Vault, Gitaly, Loki, Grafana, Alertmanager) would sit
+# Pending forever. The EBS CSI driver itself is installed as an EKS add-on by
+# tofu (tofu/aws/modules/cluster/addons.tf).
+#
+# gp3 is both cheaper and faster than gp2, and volumes are encrypted at rest.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  encrypted: "true"
+  fsType: ext4
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete

@@ -23,8 +23,77 @@ variable "node_machine_type" {
 }
 
 variable "node_count" {
-  description = "Number of nodes per zone (regional cluster spawns nodes in each zone)"
+  description = "Initial number of nodes per zone (regional cluster spawns nodes in each zone)"
   type        = number
+}
+
+variable "node_min_count" {
+  description = "Minimum nodes per zone (autoscaler lower bound)"
+  type        = number
+  default     = 1
+}
+
+variable "node_max_count" {
+  description = "Maximum nodes per zone (autoscaler upper bound)"
+  type        = number
+  default     = 4
+}
+
+# ─── API server exposure ──────────────────────────────────────────────
+
+variable "api_allowed_cidrs" {
+  description = <<-EOT
+    CIDR blocks allowed to reach the GKE control plane.
+    Empty list = private endpoint only (reach it from inside the VPC / via a
+    bastion or Connect gateway). No default on purpose.
+  EOT
+  type        = list(string)
+}
+
+variable "master_ipv4_cidr_block" {
+  description = "/28 CIDR for the GKE control plane peering range (must not overlap the VPC)"
+  type        = string
+  default     = "172.16.0.0/28"
+}
+
+# ─── CI node pool (Woodpecker agents) ─────────────────────────────────
+
+variable "ci_node_machine_type" {
+  description = "Machine type for the tainted CI node pool"
+  type        = string
+  default     = "e2-standard-4"
+}
+
+variable "ci_node_min_count" {
+  description = "Minimum CI nodes per zone (0 = scale to zero when idle)"
+  type        = number
+  default     = 0
+}
+
+variable "ci_node_max_count" {
+  description = "Maximum CI nodes per zone (0 disables the CI node pool)"
+  type        = number
+  default     = 2
+}
+
+variable "ci_node_spot" {
+  description = "Run CI nodes as Spot VMs"
+  type        = bool
+  default     = true
+}
+
+# ─── Backups / retention ──────────────────────────────────────────────
+
+variable "backup_retention_days" {
+  description = "Retention for Velero backup object versions"
+  type        = number
+  default     = 30
+}
+
+variable "log_retention_days" {
+  description = "Retention for Loki log chunks in GCS"
+  type        = number
+  default     = 30
 }
 
 variable "kubernetes_version" {

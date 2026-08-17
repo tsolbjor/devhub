@@ -2,13 +2,17 @@
 set -euo pipefail
 
 # =============================================================================
-# Kubernetes Cluster Setup Script
+# Cluster Preparation
 # =============================================================================
-# Configures a Kubernetes cluster with nginx-ingress and required resources.
-# Local: Uses local CA certs + removes Traefik
-# UpCloud: Uses cert-manager + cloud LoadBalancer
+# The few things that must happen to a cluster before deploy.sh runs, and which
+# deploy.sh cannot do for itself.
 #
-# Usage: ./setup-cluster.sh --env local|upcloud
+# Everything this script used to do — installing an ingress controller,
+# cert-manager, namespaces and TLS secrets — now lives in deploy.sh, which owns
+# the whole component graph. Keeping a second copy here meant two places to fix
+# whenever a component changed.
+#
+# Usage: ./setup-cluster.sh --env <environment>
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,290 +21,89 @@ source "${SCRIPT_DIR}/lib/common.sh"
 parse_env_arg "$@"
 setup_paths
 parse_config
-
-# =============================================================================
-# Shared Functions
-# =============================================================================
+use_env_kubeconfig
 
 check_cluster_requirements() {
-    log_info "Checking requirements..."
+    log_step "Checking cluster access..."
 
-    if ! command -v kubectl &>/dev/null; then
-        log_error "kubectl is required but not installed."
-        exit 1
-    fi
-
-    if ! command -v helm &>/dev/null; then
-        log_error "helm is required but not installed."
-        exit 1
-    fi
+    command -v kubectl &>/dev/null || { log_error "kubectl is required"; exit 1; }
+    command -v helm &>/dev/null || { log_error "helm is required"; exit 1; }
 
     if ! kubectl cluster-info &>/dev/null; then
-        log_error "Cannot connect to Kubernetes cluster."
+        log_error "Cannot connect to the Kubernetes cluster."
         if [[ "$ENV" == "local" ]]; then
-            log_error "Make sure Rancher Desktop is running and Kubernetes is enabled."
+            log_error "Start Rancher Desktop (or your local Kubernetes) and try again."
         else
-            log_error "Make sure you have configured kubectl to connect to your UpCloud cluster."
-            log_info "Download kubeconfig from UpCloud control panel."
+            log_error "Fetch credentials first: ./devhub sync --env ${ENV}"
         fi
         exit 1
     fi
 
-    log_info "All requirements satisfied."
+    log_info "Connected to: $(kubectl config current-context)"
 }
 
-install_nginx_ingress_local() {
-    log_step "Installing nginx-ingress controller (local)..."
-
-    helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>/dev/null || true
-    helm repo update ingress-nginx
-
-    if helm list -n ingress-nginx | grep -q ingress-nginx; then
-        log_warn "nginx-ingress already installed. Upgrading..."
-    fi
-
-    helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-        --namespace ingress-nginx \
-        --create-namespace \
-        --set controller.service.type=LoadBalancer \
-        --set controller.service.externalTrafficPolicy=Local \
-        --set controller.config.proxy-body-size="100m" \
-        --set controller.config.ssl-redirect="true" \
-        --set controller.config.use-forwarded-headers="true" \
-        --set controller.config.compute-full-forwarded-for="true" \
-        --set controller.config.use-proxy-protocol="false" \
-        --set controller.extraArgs.default-ssl-certificate="devhub/local-tls-secret" \
-        --set controller.admissionWebhooks.enabled=false \
-        --timeout 5m
-
-    log_info "nginx-ingress controller installed successfully."
-}
-
-install_nginx_ingress_upcloud() {
-    log_step "Installing nginx-ingress controller (UpCloud)..."
-
-    helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>/dev/null || true
-    helm repo update ingress-nginx
-
-    if helm list -n ingress-nginx | grep -q ingress-nginx; then
-        log_warn "nginx-ingress already installed. Upgrading..."
-    fi
-
-    helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-        --namespace ingress-nginx \
-        --create-namespace \
-        --set controller.service.type=LoadBalancer \
-        --set controller.config.proxy-body-size="100m" \
-        --set controller.config.ssl-redirect="true" \
-        --set controller.config.use-forwarded-headers="true" \
-        --set controller.config.compute-full-forwarded-for="true" \
-        --set controller.resources.requests.cpu="100m" \
-        --set controller.resources.requests.memory="128Mi" \
-        --set controller.resources.limits.cpu="500m" \
-        --set controller.resources.limits.memory="512Mi" \
-        --wait \
-        --timeout 5m
-
-    log_info "nginx-ingress controller installed successfully."
-}
-
-wait_for_ingress() {
-    log_step "Waiting for ingress controller to be ready..."
-
-    kubectl wait --namespace ingress-nginx \
-        --for=condition=ready pod \
-        --selector=app.kubernetes.io/component=controller \
-        --timeout=120s
-
-    local EXTERNAL_IP=""
-    local attempts=0
-    local max_attempts=30
-
-    while [[ -z "${EXTERNAL_IP}" && ${attempts} -lt ${max_attempts} ]]; do
-        EXTERNAL_IP=$(kubectl get svc ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-        if [[ -z "${EXTERNAL_IP}" ]]; then
-            EXTERNAL_IP=$(kubectl get svc ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-        fi
-
-        if [[ -z "${EXTERNAL_IP}" ]]; then
-            ((attempts++))
-            sleep 2
-        fi
-    done
-
-    if [[ -z "${EXTERNAL_IP}" ]]; then
-        log_warn "Could not get external IP. Using NodePort instead."
-        EXTERNAL_IP="localhost"
-    fi
-
-    log_info "Ingress controller ready at: ${EXTERNAL_IP}"
-
-    if [[ "$ENV" == "upcloud" && "${EXTERNAL_IP}" != "localhost" ]]; then
-        echo ""
-        echo "=============================================="
-        echo "IMPORTANT: Update your DNS records!"
-        echo "=============================================="
-        echo "Point your domains to: ${EXTERNAL_IP}"
-        echo ""
-    fi
-}
-
-# =============================================================================
-# Local-specific Functions
-# =============================================================================
-
-check_certificates() {
-    log_info "Checking for certificates..."
-
-    if [[ ! -f "${CERTS_DIR}/ca/ca.crt" ]]; then
-        log_error "CA certificate not found. Run setup-ca.sh --env local first."
-        exit 1
-    fi
-
-    if [[ ! -f "${CERTS_DIR}/domains/local-dev.crt" ]]; then
-        log_error "Domain certificate not found. Run setup-ca.sh --env local first."
-        exit 1
-    fi
-
-    log_info "Certificates found."
-}
-
+# Rancher Desktop ships Traefik on ports 80/443. Envoy Gateway needs them.
 remove_traefik() {
+    [[ "$ENV" == "local" ]] || return 0
+
     if helm list -n kube-system 2>/dev/null | grep -q traefik; then
-        log_step "Removing Traefik (Rancher Desktop default) to free ports 80/443 for nginx-ingress..."
+        log_step "Removing Traefik to free ports 80/443..."
         helm uninstall traefik -n kube-system 2>/dev/null || true
         helm uninstall traefik-crd -n kube-system 2>/dev/null || true
         sleep 5
         log_info "Traefik removed"
-    fi
-}
-
-create_namespace() {
-    log_step "Creating namespace..."
-    kubectl create namespace devhub 2>/dev/null || true
-    log_info "Namespace created."
-}
-
-apply_secrets() {
-    log_step "Applying TLS secrets and CA certificates..."
-
-    kubectl create namespace devhub 2>/dev/null || true
-
-    if [[ -f "${OVERLAY_DIR}/tls-secret.yaml" ]]; then
-        kubectl apply -f "${OVERLAY_DIR}/tls-secret.yaml"
-        log_info "TLS secret applied."
     else
-        log_warn "TLS secret not found. Run setup-ca.sh --env local first."
-    fi
-
-    if [[ -f "${OVERLAY_DIR}/ca-configmap.yaml" ]]; then
-        kubectl apply -f "${OVERLAY_DIR}/ca-configmap.yaml"
-        log_info "CA ConfigMap applied."
-    else
-        log_warn "CA ConfigMap not found. Run setup-ca.sh --env local first."
+        log_info "Traefik not present"
     fi
 }
 
-# =============================================================================
-# UpCloud-specific Functions
-# =============================================================================
+# On the clouds the CI pool carries role=ci and the workload=ci taint, and Kyverno
+# pins pipeline pods to it. Locally there is one node and no pool, so it gets the
+# label — otherwise every CI pod sits Pending on a nodeSelector nothing satisfies.
+label_local_ci_node() {
+    [[ "$ENV" == "local" ]] || return 0
 
-install_cert_manager_upcloud() {
-    log_step "Installing cert-manager..."
-
-    helm repo add jetstack https://charts.jetstack.io 2>/dev/null || true
-    helm repo update jetstack
-
-    if helm list -n cert-manager | grep -q cert-manager; then
-        log_warn "cert-manager already installed. Upgrading..."
-    fi
-
-    helm upgrade --install cert-manager jetstack/cert-manager \
-        --namespace cert-manager \
-        --create-namespace \
-        --set installCRDs=true \
-        --set prometheus.enabled=false \
-        --wait \
-        --timeout 5m
-
-    log_info "cert-manager installed successfully."
-
-    log_info "Waiting for cert-manager to be ready..."
-    kubectl wait --for=condition=ready pod \
-        --all \
-        --namespace cert-manager \
-        --timeout=120s
+    log_step "Labelling the local node as a CI node..."
+    kubectl label nodes --all role=ci --overwrite >/dev/null
+    log_info "role=ci applied (single-node cluster runs CI alongside the platform)"
 }
 
-apply_cluster_issuers() {
-    log_step "Applying cert-manager ClusterIssuers..."
+check_certificates() {
+    [[ "$ENV" == "local" ]] || return 0
 
-    local issuer_file="${OVERLAY_DIR}/cert-manager/cluster-issuer.yaml"
-    if [[ -f "$issuer_file" ]]; then
-        if grep -q "your-email@example.com" "$issuer_file"; then
-            log_error "Please update the email address in cert-manager/cluster-issuer.yaml"
-            exit 1
-        fi
-        kubectl apply -f "$issuer_file"
-        log_info "ClusterIssuers applied."
-    else
-        log_warn "ClusterIssuer file not found: $issuer_file"
+    if [[ ! -f "${CERTS_DIR}/domains/local-dev.crt" ]]; then
+        log_error "Local certificates are missing."
+        log_error "Run: ./devhub ca --env local"
+        exit 1
     fi
+    log_info "Local CA certificates present"
 }
 
-# =============================================================================
-# Main
-# =============================================================================
+check_storage_class() {
+    local default_sc
+    default_sc="$(kubectl get storageclass -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | head -1)"
 
-print_summary() {
-    echo ""
-    echo "=============================================="
-    echo "Cluster Setup Complete! (env: ${ENV})"
-    echo "=============================================="
-    echo ""
-    echo "Ingress Controller: nginx-ingress"
-    echo ""
-    echo "Next steps:"
-    if [[ "$ENV" == "local" ]]; then
-        echo "1. Make sure Windows hosts file is configured:"
-        echo "   powershell -ExecutionPolicy Bypass -File scripts/windows/setup-hosts.ps1"
-        echo ""
-        echo "2. Deploy your services:"
-        echo "   ./deploy.sh --env local"
+    if [[ -n "$default_sc" ]]; then
+        log_info "Default StorageClass: ${default_sc}"
+    elif [[ "$(env_cloud)" == "aws" ]]; then
+        log_info "No default StorageClass yet — deploy.sh installs gp3 for EKS"
     else
-        echo "1. Update DNS records to point to the LoadBalancer IP"
-        echo "2. Deploy your services:"
-        echo "   ./deploy.sh --env upcloud"
+        log_warn "No default StorageClass. Vault, Forgejo, Prometheus and Loki all need one."
     fi
-    echo ""
 }
 
 main() {
-    echo "=============================================="
-    echo "Kubernetes Cluster Setup (${ENV})"
-    echo "=============================================="
+    log_phase "Preparing cluster for ${ENV}"
 
     check_cluster_requirements
+    check_certificates
+    remove_traefik
+    label_local_ci_node
+    check_storage_class
 
-    case "$ENV" in
-        local)
-            check_certificates
-            create_namespace
-            apply_secrets
-            remove_traefik
-            install_nginx_ingress_local
-            wait_for_ingress
-            ;;
-        upcloud)
-            install_cert_manager_upcloud
-            install_nginx_ingress_upcloud
-            wait_for_ingress
-            create_namespace
-            apply_cluster_issuers
-            ;;
-    esac
-
-    print_summary
+    echo ""
+    log_info "Cluster ready. Next: ./devhub deploy --env ${ENV}"
+    echo ""
 }
 
 main

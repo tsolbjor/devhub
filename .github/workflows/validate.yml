@@ -1,0 +1,153 @@
+name: validate
+
+# Static validation for the platform repo. Everything here runs without cloud
+# credentials and without a cluster, so it can gate every push and pull request.
+#
+# This repo previously had no pipeline at all, which is how invalid HCL
+# (semicolon-separated outputs, single-line nested blocks, non-UUID app role ids)
+# and a chart-layout mistake in the ArgoCD values survived on main.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tofu:
+    name: OpenTofu fmt + validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.9.0
+
+      - name: tofu fmt
+        run: tofu fmt -recursive -check -diff tofu/
+
+      - name: tofu validate (every root module)
+        run: |
+          set -euo pipefail
+          failed=0
+          for dir in tofu/*/dev tofu/*/prod tofu/*/workload; do
+            [[ -d "$dir" ]] || continue
+            echo "::group::$dir"
+            # -backend=false: no state access, no credentials needed.
+            if ! (cd "$dir" && tofu init -backend=false -input=false >/dev/null && tofu validate); then
+              echo "::error file=$dir::tofu validate failed"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $failed
+
+  tflint:
+    name: tflint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+      - name: tflint
+        run: |
+          set -euo pipefail
+          tflint --init
+          failed=0
+          for dir in tofu/*/modules/cluster tofu/*/dev tofu/*/prod tofu/*/workload; do
+            [[ -d "$dir" ]] || continue
+            echo "::group::$dir"
+            tflint --chdir="$dir" --minimum-failure-severity=error || failed=1
+            echo "::endgroup::"
+          done
+          exit $failed
+
+  checkov:
+    name: checkov (IaC security)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bridgecrewio/checkov-action@master
+        with:
+          directory: tofu
+          framework: terraform
+          quiet: true
+          soft_fail: true # advisory for now; tighten once the backlog is triaged
+          output_format: cli
+
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          # SC1090/SC1091: sourced paths are computed at runtime (env-specific files).
+          shellcheck --severity=warning --exclude=SC1090,SC1091 \
+            devhub k8s/scripts/*.sh k8s/scripts/lib/*.sh tofu/scripts/*.sh
+
+  manifests:
+    name: manifests + overlays
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gettext-base python3-yaml
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Validate overlays (YAML, config keys, placeholders)
+        run: ./devhub validate
+
+      - name: Render Helm charts for the local overlay
+        run: |
+          helm repo add jetstack https://charts.jetstack.io
+          helm repo add hashicorp https://helm.releases.hashicorp.com
+          helm repo add external-secrets https://charts.external-secrets.io
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm repo add argo https://argoproj.github.io/argo-helm
+          helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/
+          helm repo add headlamp https://kubernetes-sigs.github.io/headlamp/
+          helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+          helm repo add woodpecker https://woodpecker-ci.org/
+          helm repo add kyverno https://kyverno.github.io/kyverno
+          helm repo add stakater https://stakater.github.io/stakater-charts
+          helm repo update
+          # Forgejo and Envoy Gateway are OCI charts, pulled by URL — no repo needed.
+          ./devhub validate --helm local
+
+  kubeconform:
+    name: kubeconform (schema)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL -o kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz
+          tar xf kubeconform.tar.gz kubeconform
+          sudo mv kubeconform /usr/local/bin/
+
+      - name: Validate plain manifests against the Kubernetes schema
+        run: |
+          set -euo pipefail
+          # Helm values files are not Kubernetes objects; check the manifests.
+          # -ignore-missing-schemas covers CRDs (Gateway API, Kyverno, Keycloak,
+          # External Secrets, Velero) whose schemas are not in the default catalogue.
+          find k8s/base k8s/argocd k8s/templates -name '*.yaml' \
+            -not -name '*values*.yaml' -print0 |
+            xargs -0 kubeconform \
+              -strict \
+              -ignore-missing-schemas \
+              -kubernetes-version 1.31.0 \
+              -summary

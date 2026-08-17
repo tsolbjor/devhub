@@ -44,12 +44,6 @@ variable "network_cidr" {
   default     = "10.110.0.0/24"
 }
 
-variable "control_plane_ip_filter" {
-  description = "CIDRs allowed to access the K8s API"
-  type        = list(string)
-  default     = ["0.0.0.0/0"]
-}
-
 variable "tags" {
   description = "Labels to apply to resources"
   type        = map(string)
@@ -96,7 +90,7 @@ resource "upcloud_kubernetes_cluster" "main" {
   name                    = "${var.prefix}-workload"
   zone                    = var.zone
   network                 = upcloud_network.kubernetes.id
-  control_plane_ip_filter = var.control_plane_ip_filter
+  control_plane_ip_filter = var.api_allowed_cidrs
 
   private_node_groups = true
 }

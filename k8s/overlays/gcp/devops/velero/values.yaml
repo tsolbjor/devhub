@@ -1,0 +1,29 @@
+# Velero GCP overlay — GCS backup location + PD snapshots via Workload Identity.
+#
+# Bucket and service account come from tofu/gcp/modules/cluster/platform.tf
+# (outputs: velero_bucket, velero_gsa_email).
+
+# Plugin version tracks the Velero app version in the pinned chart (1.18.x).
+initContainers:
+  - name: velero-plugin-for-gcp
+    image: velero/velero-plugin-for-gcp:v1.14.2
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+serviceAccount:
+  server:
+    annotations:
+      iam.gke.io/gcp-service-account: "${VELERO_GSA_EMAIL}"
+
+configuration:
+  backupStorageLocation:
+    - name: default
+      provider: gcp
+      bucket: ${VELERO_BUCKET}
+      default: true
+  volumeSnapshotLocation:
+    - name: default
+      provider: gcp
+      config:
+        project: ${GCS_PROJECT_ID}

@@ -33,9 +33,26 @@ variable "network_cidr" {
 }
 
 variable "control_plane_ip_filter" {
-  description = "CIDRs allowed to access the K8s API"
+  description = <<-EOT
+    CIDRs allowed to reach the UCS control plane.
+    No default on purpose — ["0.0.0.0/0"] exposes the API server to the whole
+    internet and should be a written-down decision, e.g. ["203.0.113.4/32"].
+  EOT
   type        = list(string)
-  default     = ["0.0.0.0/0"]
+}
+
+# ─── CI node group (Woodpecker agents) ────────────────────────────────
+
+variable "ci_node_count" {
+  description = "Nodes in the tainted CI node group (0 disables it)"
+  type        = number
+  default     = 1
+}
+
+variable "ci_node_plan" {
+  description = "UpCloud server plan for CI nodes"
+  type        = string
+  default     = "4xCPU-8GB"
 }
 
 variable "termination_protection" {

@@ -44,9 +44,9 @@ output "pg_keycloak_password" {
   sensitive   = true
 }
 
-output "pg_gitlab_password" {
-  description = "Pre-generated password for gitlab DB user — create user post-provision"
-  value       = random_password.pg_gitlab.result
+output "pg_forgejo_password" {
+  description = "Pre-generated password for the forgejo DB user — create it post-provision"
+  value       = random_password.pg_forgejo.result
   sensitive   = true
 }
 
@@ -63,26 +63,63 @@ output "redis_port" {
 }
 
 output "redis_auth_string" {
-  description = "Memorystore Redis AUTH string — store in gitlab-redis-secret K8s secret"
+  description = "Memorystore Redis AUTH string — store in the forgejo-redis-secret K8s secret"
   value       = google_redis_instance.main.auth_string
   sensitive   = true
 }
 
 # ─── GCS ─────────────────────────────────────────────────────────────
 
-output "gitlab_gcs_bucket_prefix" {
-  description = "GCS bucket name prefix — buckets are {prefix}-artifacts, {prefix}-uploads, etc."
-  value       = local.gcs_bucket_prefix
-}
-
 # ─── Workload Identity ────────────────────────────────────────────────
 
-output "gitlab_gsa_email" {
-  description = "GitLab Google Service Account email — annotate the K8s service account with this value"
-  value       = google_service_account.gitlab.email
+output "external_dns_gsa_email" {
+  description = "External-DNS Google Service Account email — written to tofu-outputs.env by sync-tofu-outputs.sh"
+  value       = google_service_account.external_dns.email
 }
 
-output "external_dns_gsa_email" {
-  description = "External-DNS Google Service Account email — written to config.yaml by sync-tofu-outputs.sh"
-  value       = google_service_account.external_dns.email
+output "loki_gsa_email" {
+  description = "Loki Google Service Account email (GCS chunk storage)"
+  value       = google_service_account.loki.email
+}
+
+output "loki_bucket" {
+  description = "GCS bucket for Loki chunks"
+  value       = google_storage_bucket.loki.name
+}
+
+output "velero_gsa_email" {
+  description = "Velero Google Service Account email (cluster backups)"
+  value       = google_service_account.velero.email
+}
+
+output "velero_bucket" {
+  description = "GCS bucket for Velero backups"
+  value       = google_storage_bucket.velero.name
+}
+
+# ─── Vault auto-unseal ───────────────────────────────────────────────
+
+output "vault_gsa_email" {
+  description = "Vault Google Service Account email (KMS auto-unseal)"
+  value       = google_service_account.vault.email
+}
+
+output "vault_kms_region" {
+  description = "Cloud KMS location of the Vault key ring"
+  value       = google_kms_key_ring.vault.location
+}
+
+output "vault_kms_key_ring" {
+  description = "Cloud KMS key ring holding the Vault unseal key"
+  value       = google_kms_key_ring.vault.name
+}
+
+output "vault_kms_crypto_key" {
+  description = "Cloud KMS crypto key used for Vault auto-unseal"
+  value       = google_kms_crypto_key.vault_unseal.name
+}
+
+output "oidc_issuer_url" {
+  description = "GKE OIDC issuer URL (used for Vault JWT auth from workload clusters)"
+  value       = "https://container.googleapis.com/v1/projects/${var.project_id}/locations/${var.region}/clusters/${google_container_cluster.main.name}"
 }

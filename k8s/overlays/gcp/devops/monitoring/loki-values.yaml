@@ -1,15 +1,23 @@
-# Loki GCP overlay: GCS object storage backend
-# Requires:
-#   - GCS bucket named ${GCS_BUCKET_PREFIX}-loki (add to tofu/gcp/modules/cluster)
-#   - GCP service account with Storage Object Admin on that bucket
-#   - GKE Workload Identity binding to the loki K8s SA
-#   - config.yaml: loki.gsaEmail — exported from tofu output loki_gsa_email
+# Loki GCP overlay: GCS object storage backend.
+#
+# Provisioned by tofu/gcp/modules/cluster/platform.tf:
+#   - GCS bucket (output: loki_bucket) with a lifecycle expiry rule
+#   - service account + Workload Identity binding for monitoring/loki
+#     (output: loki_gsa_email)
+# sync-tofu-outputs.sh exports both as LOKI_BUCKET / LOKI_GSA_EMAIL.
 
 loki:
+  # Retention is enforced by the compactor; the delete store must match the
+  # object-storage backend configured below.
+  compactor:
+    working_directory: /var/loki/compactor
+    retention_enabled: true
+    delete_request_store: gcs
+
   storage:
     type: gcs
     gcs:
-      bucketname: ${GCS_BUCKET_PREFIX}-loki
+      bucketname: ${LOKI_BUCKET}
       chunkBufferSize: 0
       requestTimeout: 0s
 
@@ -27,6 +35,7 @@ loki:
 serviceAccount:
   annotations:
     iam.gke.io/gcp-service-account: "${LOKI_GSA_EMAIL}"
+
 
 singleBinary:
   persistence:

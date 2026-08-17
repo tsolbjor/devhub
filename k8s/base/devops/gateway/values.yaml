@@ -1,0 +1,49 @@
+# Envoy Gateway — the Gateway API implementation for this platform.
+# Chart: oci://docker.io/envoyproxy/gateway-helm
+#
+# Replaces ingress-nginx. Gateway API is the successor API to Ingress: routing
+# lives in HTTPRoute objects owned by each service's namespace, while the
+# listener/TLS configuration is a single Gateway owned by the platform. That
+# split is what Ingress never had — app teams can add routes without touching
+# platform-level TLS or annotations.
+#
+# The chart bundles the Gateway API CRDs (v1.6.1), so no separate CRD install.
+
+deployment:
+  replicas: 2
+
+  pod:
+    labels:
+      app.kubernetes.io/part-of: devhub
+
+  envoyGateway:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+config:
+  envoyGateway:
+    logging:
+      level:
+        default: info
+    provider:
+      type: Kubernetes
+      kubernetes:
+        # Data-plane proxies are platform infrastructure, not workloads.
+        envoyDeployment:
+          replicas: 2
+          pod:
+            labels:
+              app.kubernetes.io/part-of: devhub
+          container:
+            resources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: "1"
+                memory: 512Mi

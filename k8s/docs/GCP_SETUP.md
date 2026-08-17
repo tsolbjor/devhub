@@ -19,21 +19,72 @@ Internet
 DNS (*.yourdomain.com) --> GCP LoadBalancer
     |
     v
-nginx-ingress (TLS via cert-manager / Let's Encrypt)
+Envoy Gateway / Gateway API (TLS via cert-manager / Let's Encrypt)
     |
     +---> Keycloak (SSO)
-    +---> GitLab (source control, CI/CD)
+    +---> Forgejo (source control, CI/CD)
     +---> ArgoCD (GitOps)
     +---> Grafana / Prometheus (monitoring)
     +---> Vault (secrets)
     |
     v (private VPC network)
-    +---> Cloud SQL PostgreSQL (Keycloak DB, GitLab DB)
-    +---> Memorystore Redis (GitLab cache/sessions)
-    +---> Google Cloud Storage (GitLab artifacts, registry, backups)
+    +---> Cloud SQL PostgreSQL (Keycloak DB, Forgejo DB)
+    +---> Memorystore Redis (Forgejo cache/sessions)
+    +---> Google Cloud Storage (Forgejo artifacts, registry, backups)
 ```
 
+## Guided path
+
+```bash
+./devhub quickstart --env gcp-dev
+```
+
+Detects what is already done, shows a checklist, and runs the next step — including
+everything described below. Safe to re-run; use `--status` for just the checklist.
+
+The rest of this guide is the same sequence, step by step, for when you want to
+drive it yourself or need to understand a specific step.
+
 ## Step-by-Step Setup
+
+### Step 0a: External prerequisites
+
+```bash
+./devhub preflight --env gcp-dev
+```
+
+Prints what the platform assumes about the outside world, verifies what it can
+(CLI authentication, DNS zone, registrar delegation) and asks about the rest.
+
+The one that catches people: **the DNS zone must exist in the cloud, and the
+registrar must delegate to it.** On AWS and Azure the tofu module looks the zone up
+with a data source, so `tofu apply` fails outright without it. Everywhere else,
+missing delegation means certificates stay pending — cert-manager cannot complete an
+HTTP-01 challenge for a name the internet cannot resolve.
+
+Re-check DNS alone at any time with `./devhub preflight --env gcp-dev --dns`.
+
+### Step 0b: Configure the environment (wizard)
+
+```bash
+./devhub setup --env gcp-dev
+```
+
+Asks for:
+  - your domain and the ACME contact address
+  - which CIDRs may reach the Kubernetes API (offers your current public IP,
+    specific CIDRs, or no public endpoint at all)
+#   - the GCP project id
+  - where tofu state lives
+
+Then writes `tofu/gcp/dev/backend.hcl` and `terraform.tfvars`, sets
+`domain` / `acmeEmail` / `gitops.repoUrl` in `k8s/overlays/gcp-dev/config.yaml`, and offers
+to create the state bucket (tofu cannot create its own backend).
+
+Add `--dry-run` to preview, or drive it non-interactively with
+`--non-interactive --yes --domain ... --acme-email ... --api-cidrs ...`.
+
+Skip this step only if you prefer to copy the `.example` files by hand.
 
 ### Step 1: Provision Infrastructure with OpenTofu
 
@@ -47,22 +98,34 @@ export TF_VAR_region=us-central1  # or your preferred region
 
 # For dev environment:
 cd tofu/gcp/dev
-tofu init
+
+# Remote state (partial backend config). State holds database passwords and IdP
+# client secrets, so it lives in the GCS bucket, never on a laptop.
+cp backend.hcl.example backend.hcl     # fill in your bucket/container names
+tofu init -backend-config=backend.hcl
+
+# Required variable: who may reach the Kubernetes API server. There is no
+# default — an internet-facing control plane should be a deliberate choice.
+cp terraform.tfvars.example terraform.tfvars
+#   api_allowed_cidrs = ["203.0.113.4/32"]   # office egress
+#   api_allowed_cidrs = []                   # private endpoint only
 tofu plan     # Review what will be created
 tofu apply    # Provision (takes 15-20 min)
 
 # For prod environment:
 cd tofu/gcp/prod
-tofu init && tofu apply
+cp backend.hcl.example backend.hcl
+cp terraform.tfvars.example terraform.tfvars
+tofu init -backend-config=backend.hcl && tofu apply
 ```
 
 This provisions:
 - VPC network with subnet for GKE cluster
 - Managed Kubernetes cluster (GKE) with private worker nodes
-- Cloud SQL PostgreSQL instance (databases: `keycloak`, `gitlabhq_production`)
+- Cloud SQL PostgreSQL instance (databases: `keycloak`, `forgejo`)
 - Memorystore for Redis instance
-- Google Cloud Storage buckets for GitLab artifacts, registry, uploads, and backups
-- Google Service Account for GitLab to access GCS via Workload Identity
+- Google Cloud Storage buckets for Loki log chunks and Velero backups
+- Google Service Account for Forgejo to access GCS via Workload Identity
 - Private Service Connection for Cloud SQL and Memorystore
 
 Review environment-specific settings in `tofu/gcp/dev/main.tf` or `tofu/gcp/prod/main.tf`.
@@ -90,11 +153,11 @@ acmeEmail: admin@yourdomain.com
 
 ### Step 4: Configure DNS
 
-After tofu apply and deploying nginx-ingress, the GKE cluster gets a LoadBalancer IP. Find it:
+After tofu apply and deploying Envoy Gateway, the GKE cluster gets a LoadBalancer IP. Find it:
 
 ```bash
 export KUBECONFIG=k8s/scripts/gcp-dev/kubeconfig
-kubectl get svc -n ingress-nginx
+kubectl get svc -n envoy-gateway-system   # the Envoy data-plane LoadBalancer
 ```
 
 Create wildcard DNS A record:
@@ -102,7 +165,7 @@ Create wildcard DNS A record:
 *.dev.yourdomain.com  A  <LoadBalancer IP>
 ```
 
-Or individual records for each service (keycloak, gitlab, argocd, grafana, etc.)
+Or individual records for each service (keycloak, git, ci, argocd, grafana, etc.)
 
 **Using Cloud DNS (optional):**
 ```bash
@@ -125,18 +188,30 @@ gcloud dns record-sets create "*.dev.yourdomain.com." \
 cd k8s/scripts
 export KUBECONFIG=gcp-dev/kubeconfig
 
-# Deploy everything
+# Managed PostgreSQL has no Terraform resource for local users; create them once
+# (idempotent — safe to re-run).
+./deploy.sh --env gcp-dev db-users
+
+# Deploy the platform
 ./deploy.sh --env gcp-dev
 
-# Configure Keycloak SSO
-./setup-keycloak.sh --env gcp-dev
-
-# Initialize Vault
+# Initialise Vault (auto-unseals via cloud KMS; root token is revoked at the end)
 ./setup-vault.sh --env gcp-dev
 
-# Bootstrap ArgoCD GitOps
+# Realm, groups and OIDC clients
+./setup-keycloak.sh --env gcp-dev
+
+# Move platform credentials into Vault; External Secrets delivers them from now on
+./deploy.sh --env gcp-dev platform-secrets
+
+# GitOps: app-of-apps, then hand the platform components to ArgoCD
 ./deploy.sh --env gcp-dev bootstrap
+./deploy.sh --env gcp-dev gitops
 ```
+
+After the handover, change cert-manager, external-dns, external-secrets, the
+monitoring stack, Kyverno, Reloader, Headlamp and Velero **through git** — ArgoCD
+self-heals manual `helm upgrade`s away. See [OPERATIONS.md](OPERATIONS.md).
 
 ### Step 6: Verify
 
@@ -173,42 +248,25 @@ open https://grafana.dev.yourdomain.com
 
 ## Data Service Secrets
 
-After deploying with managed data services, `deploy.sh` checks for required K8s secrets. Create them using tofu outputs:
+`deploy.sh` creates the K8s secrets the charts expect directly from
+`secrets.env`, so there is no manual `kubectl create secret` step. On AWS, GCP and
+Azure the object-storage secrets carry no credentials at all — access comes from
+IRSA / Workload Identity.
 
-```bash
-cd tofu/gcp/dev
+## Workload Identity for Forgejo GCS Access
 
-# Get passwords and connection info
-tofu output pg_keycloak_password
-tofu output pg_gitlab_password
-tofu output redis_auth_string
-tofu output gcs_gitlab_artifacts_bucket
-
-# Create K8s secrets (see deploy.sh configure_managed_data_services for required keys)
-kubectl create secret generic keycloak-db-secret -n keycloak \
-    --from-literal=password="$(tofu output -raw pg_keycloak_password)"
-
-kubectl create secret generic gitlab-postgresql-secret -n gitlab \
-    --from-literal=password="$(tofu output -raw pg_gitlab_password)"
-
-kubectl create secret generic gitlab-redis-secret -n gitlab \
-    --from-literal=password="$(tofu output -raw redis_auth_string)"
-```
-
-## Workload Identity for GitLab GCS Access
-
-GitLab uses GCP Workload Identity to access GCS buckets without storing service account keys. The tofu module:
+Forgejo uses GCP Workload Identity to access GCS buckets without storing service account keys. The tofu module:
 1. Creates a Google Service Account (GSA) with GCS permissions
-2. Binds it to the GitLab Kubernetes Service Account (KSA) via IAM policy
+2. Binds it to the Forgejo Kubernetes Service Account (KSA) via IAM policy
 
-The GSA email is written to config.yaml by `sync-tofu-outputs.sh` and used to annotate the GitLab KSA.
+The GSA email is written to config.yaml by `sync-tofu-outputs.sh` and used to annotate the Forgejo KSA.
 
 ## TLS Certificates
 
 cert-manager automatically provisions Let's Encrypt certificates. For initial testing, use the staging issuer to avoid rate limits:
 
 ```yaml
-# In config.yaml
+# In tofu-outputs.env (generated)
 tls:
   clusterIssuer: letsencrypt-staging   # Switch to letsencrypt-prod when verified
 ```
@@ -242,7 +300,7 @@ Common causes: DNS not pointing to LoadBalancer, rate limited (use staging)
 
 ### LoadBalancer stuck in Pending
 ```bash
-kubectl get svc -n ingress-nginx -w
+kubectl get svc -n envoy-gateway-system -w   # the Envoy data-plane LoadBalancer
 ```
 GCP may take a few minutes. Check project quotas if it persists.
 
@@ -256,7 +314,7 @@ kubectl run debug --rm -it --image=busybox -- nslookup <cloudsql-host>
 Ensure that the GKE cluster VPC has access to Cloud SQL via Private Service Connection and that firewall rules allow traffic.
 
 ### GCS access denied
-Verify that the GitLab service account is annotated with the GSA email and that Workload Identity is enabled on the GKE cluster.
+Verify that the Forgejo service account is annotated with the GSA email and that Workload Identity is enabled on the GKE cluster.
 
 ### Tofu state issues
 ```bash

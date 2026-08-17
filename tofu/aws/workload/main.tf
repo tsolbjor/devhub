@@ -100,9 +100,9 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
 
   tags = merge(var.tags, {
-    Name                                        = "${var.prefix}-public-${count.index + 1}"
-    "kubernetes.io/cluster/${var.prefix}-eks"   = "shared"
-    "kubernetes.io/role/elb"                    = "1"
+    Name                                      = "${var.prefix}-public-${count.index + 1}"
+    "kubernetes.io/cluster/${var.prefix}-eks" = "shared"
+    "kubernetes.io/role/elb"                  = "1"
   })
 }
 
@@ -113,9 +113,9 @@ resource "aws_subnet" "private" {
   availability_zone = var.availability_zones[count.index]
 
   tags = merge(var.tags, {
-    Name                                        = "${var.prefix}-private-${count.index + 1}"
-    "kubernetes.io/cluster/${var.prefix}-eks"   = "shared"
-    "kubernetes.io/role/internal-elb"           = "1"
+    Name                                      = "${var.prefix}-private-${count.index + 1}"
+    "kubernetes.io/cluster/${var.prefix}-eks" = "shared"
+    "kubernetes.io/role/internal-elb"         = "1"
   })
 }
 
@@ -196,8 +196,13 @@ resource "aws_eks_cluster" "main" {
   vpc_config {
     subnet_ids              = concat(aws_subnet.private[*].id, aws_subnet.public[*].id)
     endpoint_private_access = true
-    endpoint_public_access  = true
+
+    # Public endpoint only for explicitly allow-listed CIDRs; [] = VPC-only.
+    endpoint_public_access = length(var.api_allowed_cidrs) > 0
+    public_access_cidrs    = length(var.api_allowed_cidrs) > 0 ? var.api_allowed_cidrs : null
   }
+
+  enabled_cluster_log_types = ["api", "audit", "authenticator"]
 
   access_config {
     authentication_mode = "API_AND_CONFIG_MAP"
@@ -206,6 +211,82 @@ resource "aws_eks_cluster" "main" {
   tags = var.tags
 
   depends_on = [aws_iam_role_policy_attachment.eks_cluster_policy]
+}
+
+# ─── Add-ons ──────────────────────────────────────────────────────────
+# Without the EBS CSI driver, app PVCs on this cluster never bind.
+
+data "aws_iam_policy_document" "ebs_csi_assume_role" {
+  statement {
+    effect = "Allow"
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.eks.arn]
+    }
+
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:sub"
+      values   = ["system:serviceaccount:kube-system:ebs-csi-controller-sa"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "ebs_csi" {
+  name_prefix        = "${var.prefix}-ebs-csi-"
+  assume_role_policy = data.aws_iam_policy_document.ebs_csi_assume_role.json
+  tags               = var.tags
+}
+
+resource "aws_iam_role_policy_attachment" "ebs_csi" {
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+  role       = aws_iam_role.ebs_csi.name
+}
+
+resource "aws_eks_addon" "ebs_csi" {
+  cluster_name                = aws_eks_cluster.main.name
+  addon_name                  = "aws-ebs-csi-driver"
+  service_account_role_arn    = aws_iam_role.ebs_csi.arn
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+  tags                        = var.tags
+
+  depends_on = [aws_eks_node_group.main]
+}
+
+resource "aws_eks_addon" "vpc_cni" {
+  cluster_name                = aws_eks_cluster.main.name
+  addon_name                  = "vpc-cni"
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+  tags                        = var.tags
+}
+
+resource "aws_eks_addon" "kube_proxy" {
+  cluster_name                = aws_eks_cluster.main.name
+  addon_name                  = "kube-proxy"
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+  tags                        = var.tags
+}
+
+resource "aws_eks_addon" "coredns" {
+  cluster_name                = aws_eks_cluster.main.name
+  addon_name                  = "coredns"
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+  tags                        = var.tags
+
+  depends_on = [aws_eks_node_group.main]
 }
 
 # OIDC provider — required for IRSA
@@ -326,8 +407,8 @@ data "aws_iam_policy_document" "external_dns_route53" {
   }
 
   statement {
-    effect  = "Allow"
-    actions = ["route53:ListHostedZones", "route53:ListResourceRecordSets", "route53:ListTagsForResource"]
+    effect    = "Allow"
+    actions   = ["route53:ListHostedZones", "route53:ListResourceRecordSets", "route53:ListTagsForResource"]
     resources = ["*"]
   }
 }

@@ -1,0 +1,83 @@
+# Kyverno — admission-time policy.
+# Chart: kyverno/kyverno
+#
+# The platform documents guardrails (resource limits, no privileged pods, quotas
+# per app namespace). Documented is not enforced: before Kyverno those were a
+# sweep script that anyone could delete from, and ArgoCD would happily re-apply a
+# Deployment that violated every one of them.
+#
+# Policies live in base/devops/kyverno/policies.yaml.
+
+# Three replicas is the chart's HA layout; the admission controller is in the
+# request path for every pod creation, so it should not be a single point.
+admissionController:
+  replicas: 2
+  priorityClassName: platform-critical
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 768Mi
+
+  serviceMonitor:
+    enabled: true
+    additionalLabels:
+      release: prometheus
+
+backgroundController:
+  replicas: 1
+  priorityClassName: platform-standard
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  serviceMonitor:
+    enabled: true
+    additionalLabels:
+      release: prometheus
+
+cleanupController:
+  replicas: 1
+  priorityClassName: platform-standard
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+reportsController:
+  replicas: 1
+  priorityClassName: platform-standard
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  serviceMonitor:
+    enabled: true
+    additionalLabels:
+      release: prometheus
+
+# Never let a policy failure take down the platform's own namespaces: Kyverno
+# excludes them from admission webhooks by default, and these are the ones that
+# must keep working even if Kyverno is degraded.
+config:
+  # A map, not a list: chart 3.x merges this over its own default, and a list here
+  # is silently dropped ("cannot overwrite table with non table").
+  webhooks:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - kyverno
+            - envoy-gateway-system
+            - cert-manager

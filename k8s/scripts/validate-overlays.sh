@@ -1,312 +1,314 @@
 #!/bin/bash
-set -euo pipefail
+set -uo pipefail
 
 # =============================================================================
-# Kustomize Overlay Validation Script
+# Configuration and Manifest Validation
 # =============================================================================
-# Performs dry-run validation of all overlays and exports rendered manifests
-# to a temporary folder for inspection.
+# Static checks that need no cluster and no cloud credentials, so CI can run
+# them on every push:
 #
-# Usage: ./validate-overlays.sh [environment] [--output-dir <path>]
+#   1. YAML parses, and has no duplicate keys (silent-override bugs)
+#   2. Every overlay's config.yaml has the keys the scripts read
+#   3. Every ${PLACEHOLDER} in a values/manifest file is in the envsubst
+#      allow-list — an unlisted variable is silently left as literal text in the
+#      rendered Helm values, which is how "${LOKI_BUCKET}" ends up as a bucket name
+#   4. Base/overlay pairs referenced by the platform ApplicationSet exist
+#   5. Optional (--helm): `helm template` every component (needs network)
 #
-# Environments: all (default), local, upcloud
+# Usage: ./validate-overlays.sh [--helm] [env ...]
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
 K8S_DIR="${SCRIPT_DIR}/.."
-OVERLAYS_DIR="${K8S_DIR}/overlays"
 BASE_DIR="${K8S_DIR}/base"
+OVERLAYS_DIR="${K8S_DIR}/overlays"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+RUN_HELM=false
+ENVS=()
 
-log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-log_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
-log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
-
-# Default values
-ENV="${1:-all}"
-OUTPUT_DIR=""
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-
-# Parse arguments
 while [[ $# -gt 0 ]]; do
-    case $1 in
-        --output-dir)
-            OUTPUT_DIR="$2"
-            shift 2
-            ;;
-        local|upcloud|upcloud-dev|upcloud-prod|all)
-            ENV="$1"
-            shift
-            ;;
+    case "$1" in
+        --helm) RUN_HELM=true; shift ;;
         -h|--help)
-            echo "Usage: $0 [environment] [--output-dir <path>]"
+            echo "Usage: $0 [--helm] [env ...]"
             echo ""
-            echo "Environments:"
-            echo "  all     - Validate all overlays (default)"
-            echo "  local   - Validate local overlay only"
-            echo "  upcloud - Validate upcloud overlay only"
-            echo ""
-            echo "Options:"
-            echo "  --output-dir <path>  - Custom output directory (default: /tmp/k8s-dryrun-<timestamp>)"
-            echo "  -h, --help           - Show this help message"
+            echo "  --helm   also run 'helm template' for each component (needs network)"
+            echo "  env      one or more environments (default: all)"
             exit 0
             ;;
-        *)
-            shift
-            ;;
+        *) ENVS+=("$1"); shift ;;
     esac
 done
 
-# Set default output directory if not specified
-if [[ -z "$OUTPUT_DIR" ]]; then
-    OUTPUT_DIR="/tmp/k8s-dryrun-${TIMESTAMP}"
+if [[ ${#ENVS[@]} -eq 0 ]]; then
+    # Every directory under overlays/ that has a config.yaml is an environment.
+    while read -r dir; do
+        ENVS+=("$(basename "$dir")")
+    done < <(find "$OVERLAYS_DIR" -mindepth 2 -maxdepth 2 -name config.yaml -printf '%h\n' | sort)
 fi
 
-# =============================================================================
-# Prerequisites Check
-# =============================================================================
-check_prerequisites() {
-    log_step "Checking prerequisites..."
-    
-    local missing=()
-    
-    if ! command -v kubectl &> /dev/null; then
-        # Check for kustomize standalone
-        if ! command -v kustomize &> /dev/null; then
-            missing+=("kubectl or kustomize")
-        fi
-    fi
-    
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        log_error "Missing required tools: ${missing[*]}"
-        log_info "Install kubectl: https://kubernetes.io/docs/tasks/tools/"
-        log_info "Or install kustomize: https://kubectl.docs.kubernetes.io/installation/kustomize/"
-        exit 1
-    fi
-    
-    log_info "Prerequisites check passed"
-}
+FAILURES=0
+fail() { log_error "$1"; FAILURES=$((FAILURES + 1)); }
 
 # =============================================================================
-# Kustomize Build Function
+# 1. YAML parses and has no duplicate keys
 # =============================================================================
-run_kustomize() {
-    local path="$1"
-    # Prefer kustomize if available, otherwise use kubectl kustomize
-    if command -v kustomize &> /dev/null; then
-        kustomize build "$path"
-    else
-        kubectl kustomize "$path"
-    fi
-}
 
-# =============================================================================
-# Validate Single Overlay
-# =============================================================================
-validate_overlay() {
-    local env_name="$1"
-    local overlay_path="${OVERLAYS_DIR}/${env_name}"
-    local env_output_dir="${OUTPUT_DIR}/${env_name}"
-    
-    log_step "Validating overlay: ${env_name}"
-    
-    if [[ ! -d "$overlay_path" ]]; then
-        log_warn "Overlay directory not found: ${overlay_path}"
-        return 1
-    fi
-    
-    mkdir -p "$env_output_dir"
-    
-    local has_errors=false
-    local validated_count=0
-    local error_count=0
-    
-    # Find all kustomization.yaml files in the overlay
-    while IFS= read -r -d '' kustomization_file; do
-        local kustomize_dir=$(dirname "$kustomization_file")
-        local relative_path="${kustomize_dir#${overlay_path}/}"
-        
-        # Handle root kustomization
-        if [[ "$relative_path" == "$kustomize_dir" ]]; then
-            relative_path="root"
-        fi
-        
-        local output_file="${env_output_dir}/${relative_path//\//_}.yaml"
-        
-        echo -e "  ${CYAN}→${NC} Building: ${relative_path}"
-        
-        if run_kustomize "$kustomize_dir" > "$output_file" 2>&1; then
-            local resource_count=$(grep -c '^kind:' "$output_file" 2>/dev/null || echo "0")
-            echo -e "    ${GREEN}✓${NC} Success - ${resource_count} resources generated"
-            ((validated_count++))
-            
-            # Validate the generated YAML with kubectl dry-run if cluster is available
-            if kubectl cluster-info &>/dev/null 2>&1; then
-                if kubectl apply --dry-run=server -f "$output_file" &>/dev/null 2>&1; then
-                    echo -e "    ${GREEN}✓${NC} Server-side dry-run passed"
-                else
-                    # Try client-side dry-run as fallback
-                    if kubectl apply --dry-run=client -f "$output_file" &>/dev/null 2>&1; then
-                        echo -e "    ${YELLOW}⚠${NC} Client-side dry-run passed (server validation skipped)"
-                    else
-                        echo -e "    ${YELLOW}⚠${NC} Dry-run validation had warnings (check output file)"
-                    fi
-                fi
-            fi
-        else
-            echo -e "    ${RED}✗${NC} Failed - see ${output_file} for errors"
-            has_errors=true
-            ((error_count++))
-        fi
-        
-    done < <(find "$overlay_path" -name "kustomization.yaml" -print0 2>/dev/null)
-    
-    # Also validate base if it exists and has a kustomization
-    if [[ -f "${BASE_DIR}/kustomization.yaml" ]]; then
-        local base_output_file="${env_output_dir}/base.yaml"
-        echo -e "  ${CYAN}→${NC} Building: base"
-        
-        if run_kustomize "$BASE_DIR" > "$base_output_file" 2>&1; then
-            local resource_count=$(grep -c '^kind:' "$base_output_file" 2>/dev/null || echo "0")
-            echo -e "    ${GREEN}✓${NC} Success - ${resource_count} resources generated"
-            ((validated_count++))
-        else
-            echo -e "    ${RED}✗${NC} Failed - see ${base_output_file} for errors"
-            has_errors=true
-            ((error_count++))
-        fi
-    fi
-    
-    echo ""
-    if [[ "$has_errors" == "true" ]]; then
-        log_warn "${env_name}: ${validated_count} passed, ${error_count} failed"
-        return 1
-    else
-        log_success "${env_name}: All ${validated_count} kustomizations validated successfully"
+check_yaml_syntax() {
+    log_step "Checking YAML syntax and duplicate keys..."
+
+    if ! command -v python3 &>/dev/null; then
+        log_warn "python3 not found — skipping YAML parse checks"
         return 0
     fi
+
+    local bad
+    bad="$(python3 - "$K8S_DIR" <<'PY'
+import re, sys, pathlib
+
+try:
+    import yaml
+except ImportError:
+    print("SKIP: pyyaml not installed")
+    sys.exit(0)
+
+
+class DupCheckLoader(yaml.SafeLoader):
+    """Rejects duplicate mapping keys instead of silently keeping the last one."""
+
+
+def _no_duplicates(loader, node, deep=False):
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise yaml.YAMLError(f"duplicate key {key!r} at line {key_node.start_mark.line + 1}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+DupCheckLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicates)
+
+root = pathlib.Path(sys.argv[1])
+problems = 0
+for path in sorted(root.rglob("*.yaml")):
+    if any(part in {"certs", ".terraform"} for part in path.parts):
+        continue
+    text = path.read_text()
+    # ArgoCD/Helm templating ({{ .x }}) and Alertmanager's Go templates are not
+    # valid YAML on their own; replace each expression with a plain token so the
+    # surrounding structure can still be checked.
+    text = re.sub(r"\{\{[^{}]*\}\}", "TEMPLATE_EXPR", text)
+    try:
+        list(yaml.load_all(text, Loader=DupCheckLoader))
+    except yaml.YAMLError as exc:
+        rel = path.relative_to(root)
+        first = str(exc).splitlines()[0]
+        print(f"{rel}: {first}")
+        problems += 1
+sys.exit(1 if problems else 0)
+PY
+)" || true
+
+    if [[ -n "$bad" ]]; then
+        if [[ "$bad" == SKIP:* ]]; then
+            log_warn "${bad#SKIP: } — skipping YAML parse checks"
+        else
+            while read -r line; do
+                [[ -n "$line" ]] && fail "YAML: $line"
+            done <<< "$bad"
+        fi
+    else
+        log_info "YAML parses cleanly, no duplicate keys"
+    fi
 }
 
 # =============================================================================
-# Generate Summary Report
+# 2. Required config.yaml keys per environment
 # =============================================================================
-generate_summary() {
-    local summary_file="${OUTPUT_DIR}/SUMMARY.md"
-    
-    cat > "$summary_file" << EOF
-# Kustomize Dry-Run Validation Report
 
-Generated: $(date -Iseconds)
-Output Directory: ${OUTPUT_DIR}
+check_config_keys() {
+    local env="$1"
+    local config="${OVERLAYS_DIR}/${env}/config.yaml"
 
-## Validated Overlays
+    [[ -f "$config" ]] || { fail "${env}: missing config.yaml"; return; }
 
-EOF
-    
-    for env_dir in "${OUTPUT_DIR}"/*/; do
-        if [[ -d "$env_dir" ]]; then
-            local env_name=$(basename "$env_dir")
-            echo "### ${env_name}" >> "$summary_file"
-            echo "" >> "$summary_file"
-            echo "| File | Resources |" >> "$summary_file"
-            echo "|------|-----------|" >> "$summary_file"
-            
-            for yaml_file in "${env_dir}"*.yaml; do
-                if [[ -f "$yaml_file" ]]; then
-                    local filename=$(basename "$yaml_file")
-                    local count=$(grep -c '^kind:' "$yaml_file" 2>/dev/null || echo "0")
-                    echo "| ${filename} | ${count} |" >> "$summary_file"
-                fi
-            done
-            echo "" >> "$summary_file"
+    local required=(domain tls.type acmeEmail)
+    if [[ " ${WORKLOAD_ENVS} " == *" ${env} "* ]]; then
+        required+=(platformVaultUrl platformLokiUrl)
+    else
+        required+=(dataServices.type gitops.repoUrl)
+    fi
+
+    local key value
+    for key in "${required[@]}"; do
+        value="$(yaml_get "$config" "$key")"
+        # acmeEmail is legitimately empty for the local CA setup.
+        if [[ -z "$value" && ! ( "$env" == "local" && "$key" == "acmeEmail" ) ]]; then
+            fail "${env}: config.yaml is missing '${key}'"
         fi
     done
-    
-    echo "" >> "$summary_file"
-    echo "## Usage" >> "$summary_file"
-    echo "" >> "$summary_file"
-    echo "To inspect a specific manifest:" >> "$summary_file"
-    echo '```bash' >> "$summary_file"
-    echo "cat ${OUTPUT_DIR}/<environment>/<component>.yaml" >> "$summary_file"
-    echo '```' >> "$summary_file"
-    echo "" >> "$summary_file"
-    echo "To apply with dry-run:" >> "$summary_file"
-    echo '```bash' >> "$summary_file"
-    echo "kubectl apply --dry-run=client -f ${OUTPUT_DIR}/<environment>/<component>.yaml" >> "$summary_file"
-    echo '```' >> "$summary_file"
-    
-    log_info "Summary report generated: ${summary_file}"
+
+    # A placeholder domain in a cloud environment means someone forgot to edit it.
+    local domain
+    domain="$(yaml_get "$config" domain)"
+    if [[ "$env" != "local" && "$domain" == *example.com ]]; then
+        log_warn "${env}: domain is still the placeholder '${domain}'"
+    fi
+}
+
+# =============================================================================
+# 3. Placeholders must be in the envsubst allow-list
+# =============================================================================
+
+check_placeholders() {
+    log_step "Checking \${...} placeholders against the envsubst allow-list..."
+
+    # Allow-list from common.sh, plus NAMESPACE (deploy-workload.sh substitutes that
+    # one with its own envsubst call, per namespace). Adding anything else here
+    # hides a real bug: a placeholder outside TEMPLATE_VARS is never substituted,
+    # which is how ${GITOPS_REPO_URL} once reached ArgoCD as a literal string.
+    local allowed=" $(echo "$TEMPLATE_VARS" | tr -d '${}' | tr '\n' ' ') NAMESPACE "
+
+    local files unknown=0
+    files="$(find "$BASE_DIR" "$OVERLAYS_DIR" "${K8S_DIR}/argocd" -name '*.yaml' -type f 2>/dev/null | sort)"
+
+    local file var
+    while read -r file; do
+        [[ -n "$file" ]] || continue
+        # Match ${VAR}; ignore ArgoCD's own $oidc.* style references.
+        while read -r var; do
+            [[ -n "$var" ]] || continue
+            if [[ " $allowed " != *" $var "* ]]; then
+                fail "${file#"${K8S_DIR}/"}: \${${var}} is not in the envsubst allow-list (it will not be substituted)"
+                unknown=$((unknown + 1))
+            fi
+        done < <(grep -oE '\$\{[A-Z_][A-Z0-9_]*\}' "$file" 2>/dev/null | tr -d '${}' | sort -u)
+    done <<< "$files"
+
+    [[ $unknown -eq 0 ]] && log_info "All placeholders are substitutable"
+}
+
+# =============================================================================
+# 4. Values files referenced by the platform ApplicationSet exist
+# =============================================================================
+
+check_appset_values() {
+    local appset="${K8S_DIR}/argocd/platform-appset.yaml"
+    [[ -f "$appset" ]] || return 0
+
+    log_step "Checking platform ApplicationSet value paths..."
+
+    local repo_root="${K8S_DIR}/.."
+    local path
+    while read -r path; do
+        [[ -n "$path" ]] || continue
+        if [[ ! -f "${repo_root}/${path}" ]]; then
+            fail "platform-appset.yaml references a missing base values file: ${path}"
+        fi
+    done < <(grep -oE 'baseValues: [^ ]+' "$appset" | awk '{print $2}')
+
+    log_info "ApplicationSet base values resolved"
+}
+
+# =============================================================================
+# 5. Optional: helm template
+# =============================================================================
+
+# Charts legitimately require values that only exist after `tofu apply` (database
+# hosts, bucket names, role ARNs). CI has none of those, so stub anything empty —
+# the point of this check is that the templates render, not that the values are real.
+stub_infra_vars() {
+    local v
+    for v in PG_HOST VALKEY_HOST REDIS_HOST S3_ENDPOINT S3_REGION \
+             AWS_REGION AZURE_STORAGE_ACCOUNT AZURE_SUBSCRIPTION_ID AZURE_RESOURCE_GROUP \
+             AZURE_NODE_RESOURCE_GROUP GCS_PROJECT_ID \
+             LOKI_BUCKET LOKI_CONTAINER VELERO_BUCKET VELERO_CONTAINER CLUSTER_NAME \
+             VAULT_KEY_VAULT_NAME VAULT_KEY_NAME VAULT_KMS_KEY_ID VAULT_KMS_REGION \
+             VAULT_KMS_KEY_RING VAULT_KMS_CRYPTO_KEY ENTRA_TENANT_ID
+    do
+        [[ -n "${!v:-}" ]] || export "${v}=validation-placeholder"
+    done
+    export PG_PORT="${PG_PORT:-5432}" REDIS_PORT="${REDIS_PORT:-6379}"
+}
+
+check_helm_template() {
+    local env="$1"
+
+    command -v helm &>/dev/null || { log_warn "helm not found — skipping template checks"; return 0; }
+
+    log_step "${env}: rendering Helm charts..."
+
+    ENV="$env" setup_paths
+    parse_config
+    stub_infra_vars
+
+    # Chart coordinates mirror the pins in deploy.sh. OCI charts are referenced by
+    # URL; there is no repo to add.
+    local -A charts=(
+        [vault]="hashicorp/vault:0.34.1"
+        [argocd]="argo/argo-cd:10.3.3"
+        [external-dns]="external-dns/external-dns:1.21.1"
+        [external-secrets]="external-secrets/external-secrets:2.9.0"
+        [headlamp]="headlamp/headlamp:0.44.0"
+        [velero]="vmware-tanzu/velero:12.1.0"
+        [kyverno]="kyverno/kyverno:3.8.2"
+        [reloader]="stakater/reloader:2.2.16"
+        [woodpecker]="woodpecker/woodpecker:3.7.0"
+        [forgejo]="oci://code.forgejo.org/forgejo-helm/forgejo:17.1.4"
+        [gateway]="oci://docker.io/envoyproxy/gateway-helm:1.9.0"
+        [monitoring]="prometheus-community/kube-prometheus-stack:88.3.0"
+    )
+
+    local component spec chart version args
+    for component in "${!charts[@]}"; do
+        spec="${charts[$component]}"
+        # OCI references contain a colon in the scheme, so split on the last one.
+        chart="${spec%:*}"
+        version="${spec##*:}"
+
+        # Skip components this environment does not configure.
+        if [[ "$component" == "monitoring" ]]; then
+            [[ -f "${BASE_DIR}/devops/monitoring/prometheus-stack-values.yaml" ]] || continue
+        else
+            [[ -f "${BASE_DIR}/devops/${component}/values.yaml" ]] || continue
+        fi
+
+        args="$(get_values_args "$component")"
+        if ! helm template "$component" "$chart" --version "$version" $args >/dev/null 2>"${RENDER_DIR}/helm-${component}.err"; then
+            fail "${env}: helm template failed for ${component} — $(head -3 "${RENDER_DIR}/helm-${component}.err" | tr '\n' ' ')"
+        fi
+    done
 }
 
 # =============================================================================
 # Main
 # =============================================================================
-main() {
-    echo ""
-    echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║${NC}        Kustomize Overlay Validation (Dry Run)             ${BLUE}║${NC}"
-    echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-    
-    check_prerequisites
-    
-    log_info "Output directory: ${OUTPUT_DIR}"
-    mkdir -p "$OUTPUT_DIR"
-    
-    local all_passed=true
-    local environments=()
-    
-    case "$ENV" in
-        all)
-            # Find all overlay directories
-            for overlay in "${OVERLAYS_DIR}"/*/; do
-                if [[ -d "$overlay" ]]; then
-                    environments+=("$(basename "$overlay")")
-                fi
-            done
-            ;;
-        *)
-            environments+=("$ENV")
-            ;;
-    esac
-    
-    echo ""
-    log_info "Environments to validate: ${environments[*]}"
-    echo ""
-    
-    for env_name in "${environments[@]}"; do
-        if ! validate_overlay "$env_name"; then
-            all_passed=false
-        fi
-        echo ""
-    done
-    
-    generate_summary
-    
-    echo ""
-    echo -e "${BLUE}════════════════════════════════════════════════════════════${NC}"
-    
-    if [[ "$all_passed" == "true" ]]; then
-        log_success "All validations passed!"
-        echo ""
-        log_info "Rendered manifests exported to: ${OUTPUT_DIR}"
-        log_info "View summary: cat ${OUTPUT_DIR}/SUMMARY.md"
-        exit 0
-    else
-        log_error "Some validations failed. Check output files for details."
-        echo ""
-        log_info "Rendered manifests exported to: ${OUTPUT_DIR}"
-        exit 1
-    fi
-}
 
-main "$@"
+echo "=============================================="
+echo "Validating: ${ENVS[*]}"
+echo "=============================================="
+
+check_yaml_syntax
+check_placeholders
+check_appset_values
+
+for env in "${ENVS[@]}"; do
+    log_step "Checking environment: ${env}"
+    check_config_keys "$env"
+    if $RUN_HELM; then
+        ENV="$env"
+        check_helm_template "$env"
+    fi
+done
+
+echo ""
+if [[ $FAILURES -eq 0 ]]; then
+    log_info "All checks passed"
+    exit 0
+fi
+
+log_error "${FAILURES} check(s) failed"
+exit 1

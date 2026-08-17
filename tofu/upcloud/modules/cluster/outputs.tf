@@ -48,9 +48,9 @@ output "pg_keycloak_password" {
   sensitive   = true
 }
 
-output "pg_gitlab_password" {
-  description = "PostgreSQL password for gitlab user"
-  value       = upcloud_managed_database_user.gitlab.password
+output "pg_forgejo_password" {
+  description = "PostgreSQL password for forgejo user"
+  value       = upcloud_managed_database_user.forgejo.password
   sensitive   = true
 }
 
@@ -87,13 +87,3 @@ output "s3_region" {
   value       = var.objstore_region
 }
 
-output "s3_access_key" {
-  description = "S3 access key ID"
-  value       = upcloud_managed_object_storage_user_access_key.gitlab.access_key_id
-}
-
-output "s3_secret_key" {
-  description = "S3 secret access key"
-  value       = upcloud_managed_object_storage_user_access_key.gitlab.secret_access_key
-  sensitive   = true
-}

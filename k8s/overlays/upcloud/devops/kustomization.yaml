@@ -2,10 +2,11 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 # DevOps platform production (UpCloud) overlay
-# Ingress configurations with cert-manager TLS
+# Gateway API: listeners + TLS in gateway.yaml, routes in httproutes.yaml
 
 resources:
-  - ingress.yaml
+  - gateway.yaml
+  - httproutes.yaml
 
 labels:
   - pairs:

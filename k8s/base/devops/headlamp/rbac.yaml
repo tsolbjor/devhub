@@ -1,23 +1,89 @@
-# ClusterRole for Headlamp's in-cluster ServiceAccount.
-# Grants read-only view of all resources plus pod exec/log access for debugging.
+# RBAC for Headlamp's in-cluster ServiceAccount.
+#
+# Headlamp is a browser-facing UI. The previous ClusterRole granted
+# get/list/watch on `*` in every API group, which includes every Secret in every
+# namespace (Vault unseal material, database passwords, OIDC client secrets) plus
+# cluster-wide pod/exec — effectively cluster-admin behind a web login.
+#
+# This role deliberately:
+#   - enumerates readable resources instead of using "*"
+#   - omits secrets entirely (read them with kubectl, under your own identity)
+#   - omits pods/exec (a browser shell into any pod is not an operator convenience,
+#     it is a privilege-escalation path around every audit trail)
+#
+# Preferred setup: enable OIDC in the Headlamp values so the UI acts as the
+# logged-in user via their own token, and this ServiceAccount is only the
+# fallback for cluster discovery.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: headlamp-view
 rules:
-  # Full read access to all core and extension resources
-  - apiGroups: ["*"]
-    resources: ["*"]
-    verbs: ["get", "list", "watch"]
-  # Non-resource URLs (healthz, metrics, etc.)
-  - nonResourceURLs: ["*"]
-    verbs: ["get"]
-  # Pod exec and log streaming for operational debugging
+  # Core workload and networking objects
   - apiGroups: [""]
-    resources: ["pods/exec", "pods/log"]
-    verbs: ["get", "create"]
-  # Node and pod metrics
+    resources:
+      - pods
+      - pods/log
+      - services
+      - endpoints
+      - namespaces
+      - nodes
+      - events
+      - configmaps
+      - persistentvolumes
+      - persistentvolumeclaims
+      - replicationcontrollers
+      - serviceaccounts
+      - resourcequotas
+      - limitranges
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets", "controllerrevisions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingressclasses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "volumeattachments", "csidrivers", "csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch"]
+  # RBAC is readable so operators can see who can do what — but not secrets.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "watch"]
+  # Platform CRs people actually need to inspect in a UI
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "applicationsets", "appprojects"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["cert-manager.io", "acme.cert-manager.io"]
+    resources: ["certificates", "certificaterequests", "issuers", "clusterissuers", "orders", "challenges"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["prometheuses", "prometheusrules", "servicemonitors", "podmonitors", "alertmanagers"]
+    verbs: ["get", "list", "watch"]
+  # ExternalSecret status is useful; the synced Secret contents are not exposed.
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets", "secretstores", "clustersecretstores"]
+    verbs: ["get", "list", "watch"]
+  # Health endpoints
+  - nonResourceURLs: ["/healthz", "/livez", "/readyz", "/version", "/metrics"]
+    verbs: ["get"]
+  # Node and pod metrics for the dashboard graphs
   - apiGroups: ["metrics.k8s.io"]
     resources: ["nodes", "pods"]
     verbs: ["get", "list"]

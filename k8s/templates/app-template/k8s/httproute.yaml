@@ -1,0 +1,21 @@
+# Public route for this application.
+#
+# Gateway API replaces Ingress: this HTTPRoute attaches to the platform Gateway,
+# which owns TLS. Ask a platform admin to add an "APP_NAME" listener for
+# APP_NAME.DOMAIN, or use the shared apps listener if one exists.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: APP_NAME
+  namespace: devhub-APP_NAME
+spec:
+  parentRefs:
+    - name: devhub
+      namespace: gateway
+      sectionName: apps
+  hostnames:
+    - "APP_NAME.DOMAIN"
+  rules:
+    - backendRefs:
+        - name: APP_NAME
+          port: 80

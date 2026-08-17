@@ -18,8 +18,10 @@ spec:
   destinations:
     - namespace: devhub
       server: https://kubernetes.default.svc
-    - namespace: devhub-*
+    - namespace: 'devhub-*'
       server: https://kubernetes.default.svc
+    - namespace: 'devhub-*'
+      name: '*-workload'
 
   # Allowed cluster-scoped resources
   clusterResourceWhitelist:
@@ -53,4 +55,6 @@ spec:
       policies:
         - p, proj:devhub:admin, applications, *, devhub/*, allow
       groups:
-        - admins
+        # Must match the Keycloak realm group; "admins" does not exist, so this
+        # role previously bound to nobody.
+        - devops-admins

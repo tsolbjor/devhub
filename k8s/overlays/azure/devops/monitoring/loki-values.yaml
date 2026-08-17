@@ -1,15 +1,24 @@
-# Loki Azure overlay: Azure Blob Storage backend
-# Requires:
-#   - Azure Blob container named "loki" in the existing storage account
-#   - Managed identity with Storage Blob Data Contributor on that container
-#   - config.yaml: loki.identityClientId — exported from tofu output loki_identity_client_id
+# Loki Azure overlay: Azure Blob Storage backend.
+#
+# Provisioned by tofu/azure/modules/cluster/platform.tf:
+#   - blob container (output: loki_container) with a lifecycle expiry rule
+#   - user-assigned identity + federated credential for monitoring/loki
+#     (output: loki_identity_client_id)
+# sync-tofu-outputs.sh exports both as LOKI_CONTAINER / LOKI_IDENTITY_CLIENT_ID.
 
 loki:
+  # Retention is enforced by the compactor; the delete store must match the
+  # object-storage backend configured below.
+  compactor:
+    working_directory: /var/loki/compactor
+    retention_enabled: true
+    delete_request_store: azure
+
   storage:
     type: azure
     azure:
       accountName: ${AZURE_STORAGE_ACCOUNT}
-      containerName: loki
+      containerName: ${LOKI_CONTAINER}
       useFederatedToken: true
 
   schemaConfig:
@@ -26,6 +35,7 @@ loki:
 serviceAccount:
   annotations:
     azure.workload.identity/client-id: "${LOKI_IDENTITY_CLIENT_ID}"
+
 
 singleBinary:
   # Pod label required for Azure Workload Identity webhook to inject credentials

@@ -1,0 +1,22 @@
+# Authentication for the Loki push endpoint.
+#
+# Workload clusters ship logs to the platform Loki across the public internet, so
+# the endpoint must not be open: an unauthenticated /loki/api/v1/push is a
+# log-injection and denial-of-wallet endpoint for anyone who finds it.
+#
+# Gateway API has no built-in auth, so this uses Envoy Gateway's SecurityPolicy
+# extension, attached to the Loki HTTPRoute only. Credentials come from the
+# loki-gateway-auth secret that deploy.sh generates (htpasswd format).
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: loki-basic-auth
+  namespace: monitoring
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: loki
+  basicAuth:
+    users:
+      name: loki-gateway-auth

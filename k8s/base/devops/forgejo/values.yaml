@@ -1,0 +1,189 @@
+# Forgejo — git hosting, issues, project boards, packages and container registry.
+# Chart: oci://code.forgejo.org/forgejo-helm/forgejo
+#
+# Replaces GitLab CE: same four jobs (repos, CI via Woodpecker, OCI registry,
+# issue tracking) in one pod instead of fifteen, and ~1 GiB instead of ~8.
+#
+# The container registry is part of Forgejo itself, served from the same host:
+#   git.<domain>/<owner>/<image>:<tag>
+#
+# Domain, database and object storage come from the overlays.
+
+strategy:
+  # RWO volume: never run two pods against the same repository storage.
+  type: Recreate
+
+# Bundled dependencies stay off — the platform provides these.
+postgresql:
+  enabled: false
+postgresql-ha:
+  enabled: false
+redis:
+  enabled: false
+redis-cluster:
+  enabled: false
+
+replicaCount: 1
+
+persistence:
+  enabled: true
+  size: 20Gi
+  accessModes:
+    - ReadWriteOnce
+
+priorityClassName: platform-critical
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+# The forgejo namespace enforces the restricted Pod Security Standard.
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  runAsUser: 1000
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# Ingress is Gateway API (HTTPRoute) — see overlays/<env>/devops/httproutes.yaml
+ingress:
+  enabled: false
+
+service:
+  http:
+    type: ClusterIP
+    port: 3000
+  ssh:
+    type: ClusterIP
+    port: 22
+
+serviceAccount:
+  create: true
+  name: forgejo
+  # Cloud overlays add the IRSA / Workload Identity annotations here.
+
+# Repository initialisation: create the devhub organisation that ArgoCD's
+# ApplicationSet scans for application repositories.
+extraVolumeMounts: []
+
+gitea:
+  admin:
+    # Created by deploy.sh; the chart reads username and password from the secret.
+    existingSecret: forgejo-admin-secret
+    email: "admin@${DOMAIN}"
+    passwordMode: initialOnlyNoReset
+
+  # Prometheus scrapes Forgejo's own metrics endpoint.
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      additionalLabels:
+        release: prometheus
+
+  # Keycloak SSO is *not* configured here. The chart's configure-gitea init
+  # container calls `admin auth add-oauth`, which fetches the discovery document
+  # and fails the whole pod if it 404s — and the devops realm does not exist until
+  # setup-keycloak.sh runs, which needs Forgejo already up. setup-keycloak.sh
+  # registers the provider instead (see register_forgejo_oidc there), so the
+  # deadlock is broken and re-runs update the existing provider in place.
+
+  config:
+    APP_NAME: "DevHub"
+
+    server:
+      DOMAIN: git.${DOMAIN}
+      ROOT_URL: https://git.${DOMAIN}/
+      SSH_DOMAIN: git.${DOMAIN}
+      SSH_PORT: 22
+      SSH_LISTEN_PORT: 2222
+      START_SSH_SERVER: true
+      OFFLINE_MODE: true # no external avatars/CDN
+
+    database:
+      DB_TYPE: postgres
+      HOST: ${PG_HOST}:${PG_PORT}
+      NAME: forgejo
+      USER: forgejo
+      # PASSWD comes from forgejo-db-secret via extraEnvFrom below
+
+    security:
+      INSTALL_LOCK: true
+
+    service:
+      DISABLE_REGISTRATION: true # accounts come from Keycloak
+      REQUIRE_SIGNIN_VIEW: true
+      ENABLE_NOTIFY_MAIL: false
+
+    openid:
+      ENABLE_OPENID_SIGNIN: false
+      ENABLE_OPENID_SIGNUP: true
+
+    oauth2_client:
+      ENABLE_AUTO_REGISTRATION: true
+      ACCOUNT_LINKING: auto
+      UPDATE_AVATAR: false
+      # Valid values are userid|nickname|email; 'nickname' is the OIDC
+      # preferred_username claim, which is what Keycloak sends.
+      USERNAME: nickname
+
+    # In-memory sessions are lost on every restart; the database already holds
+    # everything else Forgejo needs to be stateful about.
+    session:
+      PROVIDER: db
+
+    # The OCI registry. Cleanup of untagged blobs runs with the other cron jobs.
+    packages:
+      ENABLED: true
+
+    actions:
+      # Forgejo Actions is off: CI runs on Woodpecker, whose Kubernetes backend
+      # runs each step as an unprivileged pod. The Actions runner expects Docker.
+      ENABLED: false
+
+    repository:
+      DEFAULT_BRANCH: main
+      DEFAULT_PRIVATE: private
+
+    "repository.pull-request":
+      DEFAULT_MERGE_STYLE: squash
+
+    cron:
+      ENABLED: true
+    "cron.cleanup_packages":
+      ENABLED: true
+      SCHEDULE: "@midnight"
+
+    log:
+      LEVEL: info
+
+# Secrets reach Forgejo as environment overrides: FORGEJO__section__KEY maps onto
+# app.ini, so the database password never appears in a values file.
+deployment:
+  env:
+    - name: FORGEJO__database__PASSWD
+      valueFrom:
+        secretKeyRef:
+          name: forgejo-db-secret
+          key: password
+
+  # Restart when External Secrets rotates the database password or OIDC secret.
+  annotations:
+    reloader.stakater.com/auto: "true"
+
+
+
+# The chart's own smoke-test hook is not useful in this pipeline.
+test:
+  enabled: false

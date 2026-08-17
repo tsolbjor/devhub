@@ -1,0 +1,39 @@
+# Velero Azure overlay — Blob backup location + disk snapshots via Workload Identity.
+#
+# Container and identity come from tofu/azure/modules/cluster/platform.tf
+# (outputs: velero_container, velero_identity_client_id).
+
+# Plugin version tracks the Velero app version in the pinned chart (1.18.x).
+initContainers:
+  - name: velero-plugin-for-microsoft-azure
+    image: velero/velero-plugin-for-microsoft-azure:v1.14.2
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+serviceAccount:
+  server:
+    annotations:
+      azure.workload.identity/client-id: "${VELERO_IDENTITY_CLIENT_ID}"
+
+podLabels:
+  azure.workload.identity/use: "true"
+
+configuration:
+  backupStorageLocation:
+    - name: default
+      provider: azure
+      bucket: ${VELERO_CONTAINER}
+      default: true
+      config:
+        storageAccount: ${AZURE_STORAGE_ACCOUNT}
+        subscriptionId: ${AZURE_SUBSCRIPTION_ID}
+        resourceGroup: ${AZURE_RESOURCE_GROUP}
+        useAAD: "true"
+  volumeSnapshotLocation:
+    - name: default
+      provider: azure
+      config:
+        # Managed disks live in the AKS-created node resource group.
+        resourceGroup: ${AZURE_NODE_RESOURCE_GROUP}
+        subscriptionId: ${AZURE_SUBSCRIPTION_ID}

@@ -40,8 +40,8 @@ output "pg_keycloak_password" {
   sensitive = true
 }
 
-output "pg_gitlab_password" {
-  value     = module.cluster.pg_gitlab_password
+output "pg_forgejo_password" {
+  value     = module.cluster.pg_forgejo_password
   sensitive = true
 }
 
@@ -71,10 +71,6 @@ output "storage_primary_access_key" {
   sensitive = true
 }
 
-output "gitlab_identity_client_id" {
-  value = module.cluster.gitlab_identity_client_id
-}
-
 # ─── Entra ID ────────────────────────────────────────────────────────
 
 output "entra_tenant_id" {
@@ -89,3 +85,20 @@ output "entra_keycloak_client_secret" {
   value     = module.cluster.entra_keycloak_client_secret
   sensitive = true
 }
+
+# ─── External-DNS / platform identities ──────────────────────────────
+
+output "external_dns_identity_client_id" { value = module.cluster.external_dns_identity_client_id }
+output "loki_identity_client_id" { value = module.cluster.loki_identity_client_id }
+output "loki_container" { value = module.cluster.loki_container }
+output "velero_identity_client_id" { value = module.cluster.velero_identity_client_id }
+output "velero_container" { value = module.cluster.velero_container }
+output "node_resource_group" { value = module.cluster.node_resource_group }
+output "subscription_id" { value = module.cluster.subscription_id }
+output "oidc_issuer_url" { value = module.cluster.oidc_issuer_url }
+
+# ─── Vault auto-unseal ──────────────────────────────────────────────
+
+output "vault_key_vault_name" { value = module.cluster.vault_key_vault_name }
+output "vault_key_name" { value = module.cluster.vault_key_name }
+output "vault_identity_client_id" { value = module.cluster.vault_identity_client_id }

@@ -1,4 +1,4 @@
-# ArgoCD Project for workload applications discovered via GitLab ApplicationSet
+# ArgoCD Project for workload applications auto-discovered from Forgejo.
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
@@ -7,18 +7,36 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  description: Workload applications auto-discovered from GitLab
+  description: Workload applications auto-discovered from Forgejo
 
   sourceRepos:
     - '*'
 
+  # Apps live on the workload clusters. Matching by cluster *name* keeps this
+  # independent of the API endpoint URL, which changes whenever a cluster is
+  # rebuilt. The in-cluster destination stays allowed only for the local
+  # single-cluster setup.
   destinations:
-    - namespace: devhub-*
+    - namespace: 'devhub-*'
+      name: '*-workload'
+    - namespace: 'devhub-*'
       server: https://kubernetes.default.svc
 
   clusterResourceWhitelist:
     - group: ''
       kind: Namespace
+
+  # Developer manifests may not create cluster-wide privilege or bypass the
+  # namespace guardrails that deploy-workload.sh applies.
+  namespaceResourceBlacklist:
+    - group: 'rbac.authorization.k8s.io'
+      kind: ClusterRole
+    - group: 'rbac.authorization.k8s.io'
+      kind: ClusterRoleBinding
+    - group: ''
+      kind: ResourceQuota
+    - group: ''
+      kind: LimitRange
 
   namespaceResourceWhitelist:
     - group: '*'
@@ -30,6 +48,7 @@ spec:
       policies:
         - p, proj:workloads:developer, applications, get, workloads/*, allow
         - p, proj:workloads:developer, applications, sync, workloads/*, allow
+        - p, proj:workloads:developer, logs, get, workloads/*, allow
       groups:
         - developers
 

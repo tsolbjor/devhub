@@ -13,6 +13,12 @@ prometheus:
   prometheusSpec:
     retention: 30d
     retentionSize: 40GB
+    priorityClassName: platform-critical
+
+    # Long-term metrics live outside the cluster. Set remoteWrite in the cloud
+    # overlay (Amazon Managed Prometheus, Azure Monitor, GCM, Grafana Cloud) —
+    # a 30-day local PVC is not an archive.
+    remoteWrite: []
 
     resources:
       requests:
@@ -38,21 +44,68 @@ prometheus:
     # Additional scrape configs for external targets
     additionalScrapeConfigs: []
 
-  # Ingress - domain/annotations overridden by overlays
+  # Routing is a Gateway API HTTPRoute (overlays/<env>/devops/httproutes.yaml).
   ingress:
-    enabled: true
-    ingressClassName: nginx
-    hosts:
-      - prometheus.example.com
-    annotations: {}
-    tls:
-      - secretName: prometheus-tls
-        hosts:
-          - prometheus.example.com
+    enabled: false
 
 # Alertmanager
 alertmanager:
+  # Alerts previously had nowhere to go: the stack shipped with the chart's
+  # default "null" route, so every firing alert was silently discarded.
+  #
+  # The Slack webhook is read from a mounted secret (created by deploy.sh, empty
+  # by default) so no credential lives in this file. With an empty webhook the
+  # config still loads and alerts are visible in the Alertmanager UI.
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      group_by: ['alertname', 'namespace', 'severity']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: platform-slack
+      routes:
+        # Watchdog proves the alert path itself works end to end.
+        - matchers:
+            - alertname = "Watchdog"
+          receiver: platform-null
+          repeat_interval: 1h
+        - matchers:
+            - severity = "critical"
+          receiver: platform-slack
+          group_wait: 10s
+          repeat_interval: 1h
+        - matchers:
+            - severity = "warning"
+          receiver: platform-slack
+    inhibit_rules:
+      # A critical alert already says the thing is broken; drop the warning.
+      - source_matchers:
+            - severity = "critical"
+        target_matchers:
+            - severity = "warning"
+        equal: ['alertname', 'namespace']
+    receivers:
+      - name: platform-null
+      - name: platform-slack
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url
+            channel: '#platform-alerts'
+            send_resolved: true
+            title: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
+            text: >-
+              {{ range .Alerts }}*{{ .Labels.severity }}* {{ .Annotations.summary }}
+              {{ .Annotations.description }}
+              {{ end }}
+
   alertmanagerSpec:
+    priorityClassName: platform-critical
+
+    # Mounted at /etc/alertmanager/secrets/alertmanager-slack/
+    secrets:
+      - alertmanager-slack
+
     resources:
       requests:
         cpu: 100m
@@ -69,20 +122,13 @@ alertmanager:
             requests:
               storage: 5Gi
 
-  # Ingress - domain/annotations overridden by overlays
+  # Routing is a Gateway API HTTPRoute (overlays/<env>/devops/httproutes.yaml).
   ingress:
-    enabled: true
-    ingressClassName: nginx
-    hosts:
-      - alertmanager.example.com
-    annotations: {}
-    tls:
-      - secretName: alertmanager-tls
-        hosts:
-          - alertmanager.example.com
+    enabled: false
 
 # Grafana
 grafana:
+  priorityClassName: platform-critical
   adminPassword: ""  # Use existingSecret
   admin:
     existingSecret: grafana-admin-secret
@@ -101,17 +147,9 @@ grafana:
     enabled: true
     size: 5Gi
 
-  # Ingress - domain/annotations overridden by overlays
+  # Routing is a Gateway API HTTPRoute (overlays/<env>/devops/httproutes.yaml).
   ingress:
-    enabled: true
-    ingressClassName: nginx
-    hosts:
-      - grafana.example.com
-    annotations: {}
-    tls:
-      - secretName: grafana-tls
-        hosts:
-          - grafana.example.com
+    enabled: false
 
   # Keycloak SSO integration - domain overridden by overlays
   grafana.ini:
@@ -127,7 +165,11 @@ grafana:
       auth_url: https://keycloak.example.com/realms/devops/protocol/openid-connect/auth
       token_url: https://keycloak.example.com/realms/devops/protocol/openid-connect/token
       api_url: https://keycloak.example.com/realms/devops/protocol/openid-connect/userinfo
-      role_attribute_path: contains(roles[*], 'admin') && 'Admin' || contains(roles[*], 'editor') && 'Editor' || 'Viewer'
+      # Keycloak's client scope emits a "groups" claim (realm groups), not
+      # "roles" — matching on roles[*] silently made every SSO user a Viewer.
+      role_attribute_path: contains(groups[*], 'devops-admins') && 'Admin' || contains(groups[*], 'developers') && 'Editor' || 'Viewer'
+      role_attribute_strict: false
+      allow_assign_grafana_admin: true
 
   # Additional data sources (Loki, Tempo)
   additionalDataSources:
@@ -136,7 +178,11 @@ grafana:
       url: http://loki-gateway.monitoring.svc.cluster.local:80
       access: proxy
       isDefault: false
+      secureJsonData:
+        httpHeaderValue1: platform
       jsonData:
+        # Loki runs with auth_enabled: true, so every read needs a tenant.
+        httpHeaderName1: X-Scope-OrgID
         derivedFields:
           - datasourceUid: tempo
             matcherRegex: "traceID=(\\w+)"

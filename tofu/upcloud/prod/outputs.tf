@@ -27,8 +27,8 @@ output "pg_keycloak_password" {
   sensitive = true
 }
 
-output "pg_gitlab_password" {
-  value     = module.cluster.pg_gitlab_password
+output "pg_forgejo_password" {
+  value     = module.cluster.pg_forgejo_password
   sensitive = true
 }
 
@@ -55,13 +55,4 @@ output "s3_endpoint" {
 
 output "s3_region" {
   value = module.cluster.s3_region
-}
-
-output "s3_access_key" {
-  value = module.cluster.s3_access_key
-}
-
-output "s3_secret_key" {
-  value     = module.cluster.s3_secret_key
-  sensitive = true
 }

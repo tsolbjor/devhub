@@ -6,11 +6,29 @@
 deploymentMode: SingleBinary
 
 loki:
-  auth_enabled: false
-  
+  # Multi-tenant. Every writer must send X-Scope-OrgID: the platform cluster's
+  # Alloy uses "platform", each workload cluster uses its environment name. With
+  # auth_enabled: false the header was ignored and all clusters' logs were mixed
+  # into one anonymous tenant.
+  auth_enabled: true
+
   commonConfig:
     replication_factor: 1
-  
+
+  # Retention must be enabled explicitly or Loki keeps chunks forever.
+  limits_config:
+    retention_period: 720h # 30d
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+    max_query_series: 10000
+    ingestion_rate_mb: 8
+    ingestion_burst_size_mb: 16
+
+  compactor:
+    working_directory: /var/loki/compactor
+    retention_enabled: true
+    delete_request_store: filesystem
+
   storage:
     type: filesystem
   
@@ -27,6 +45,7 @@ loki:
 # Single binary mode for simpler setup
 singleBinary:
   replicas: 1
+  priorityClassName: platform-critical
   resources:
     requests:
       cpu: 200m

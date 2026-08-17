@@ -39,9 +39,9 @@ output "pg_keycloak_password" {
   sensitive   = true
 }
 
-output "pg_gitlab_password" {
-  description = "Pre-generated password for gitlab DB user — create user post-provision"
-  value       = random_password.pg_gitlab.result
+output "pg_forgejo_password" {
+  description = "Pre-generated password for the forgejo DB user — create it post-provision"
+  value       = random_password.pg_forgejo.result
   sensitive   = true
 }
 
@@ -57,12 +57,18 @@ output "redis_port" {
   value       = aws_elasticache_replication_group.main.port
 }
 
-# ─── S3 ──────────────────────────────────────────────────────────────
-
-output "gitlab_s3_bucket_prefix" {
-  description = "S3 bucket name prefix — buckets are {prefix}-artifacts, {prefix}-uploads, etc."
-  value       = local.s3_bucket_prefix
+output "redis_auth_token" {
+  description = "ElastiCache AUTH token — store in the forgejo-redis-secret K8s secret"
+  value       = random_password.redis_auth.result
+  sensitive   = true
 }
+
+output "redis_tls_enabled" {
+  description = "Whether Redis requires TLS (rediss://)"
+  value       = aws_elasticache_replication_group.main.transit_encryption_enabled
+}
+
+# ─── S3 ──────────────────────────────────────────────────────────────
 
 output "aws_region_output" {
   description = "AWS region (for S3 connection config)"
@@ -71,14 +77,46 @@ output "aws_region_output" {
 
 # ─── IRSA ────────────────────────────────────────────────────────────
 
-output "gitlab_irsa_role_arn" {
-  description = "IAM Role ARN for GitLab IRSA — annotate the K8s service account with this value"
-  value       = aws_iam_role.gitlab_irsa.arn
+output "external_dns_irsa_role_arn" {
+  description = "IAM Role ARN for external-dns IRSA — written to tofu-outputs.env by sync-tofu-outputs.sh"
+  value       = aws_iam_role.external_dns_irsa.arn
 }
 
-output "external_dns_irsa_role_arn" {
-  description = "IAM Role ARN for external-dns IRSA — written to config.yaml by sync-tofu-outputs.sh"
-  value       = aws_iam_role.external_dns_irsa.arn
+output "loki_irsa_role_arn" {
+  description = "IAM Role ARN for Loki IRSA (S3 chunk storage)"
+  value       = aws_iam_role.loki_irsa.arn
+}
+
+output "loki_bucket" {
+  description = "S3 bucket for Loki chunks"
+  value       = aws_s3_bucket.loki.id
+}
+
+output "velero_irsa_role_arn" {
+  description = "IAM Role ARN for Velero IRSA (cluster backups)"
+  value       = aws_iam_role.velero_irsa.arn
+}
+
+output "velero_bucket" {
+  description = "S3 bucket for Velero backups"
+  value       = aws_s3_bucket.velero.id
+}
+
+output "cluster_autoscaler_irsa_role_arn" {
+  description = "IAM Role ARN for cluster-autoscaler IRSA"
+  value       = aws_iam_role.cluster_autoscaler.arn
+}
+
+# ─── Vault auto-unseal ───────────────────────────────────────────────
+
+output "vault_kms_key_id" {
+  description = "KMS key ID used for Vault auto-unseal"
+  value       = aws_kms_key.vault_unseal.key_id
+}
+
+output "vault_kms_irsa_role_arn" {
+  description = "IAM Role ARN granting the Vault service account access to the unseal key"
+  value       = aws_iam_role.vault_kms_irsa.arn
 }
 
 # ─── Cognito ─────────────────────────────────────────────────────────

@@ -36,11 +36,14 @@ DOMAINS=(
     # DevOps domains
     "keycloak.localhost"
     "vault.localhost"
-    "gitlab.localhost"
-    "registry.localhost"
+    "git.localhost"
+    "ci.localhost"
     "argocd.localhost"
     "grafana.localhost"
     "prometheus.localhost"
+    "alertmanager.localhost"
+    "headlamp.localhost"
+    "loki.localhost"
 )
 
 # Check for required tools

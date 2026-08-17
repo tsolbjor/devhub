@@ -1,0 +1,10 @@
+# Bootstrap once per subscription:
+#   az group create -n devhub-tfstate-rg -l westeurope
+#   az storage account create -n devhubtfstate -g devhub-tfstate-rg -l westeurope \
+#     --sku Standard_LRS --encryption-services blob --min-tls-version TLS1_2
+#   az storage container create -n tfstate --account-name devhubtfstate
+resource_group_name  = "devhub-tfstate-rg"
+storage_account_name = "devhubtfstate"
+container_name       = "tfstate"
+key                  = "azure-prod.terraform.tfstate"
+use_azuread_auth     = true

@@ -1,0 +1,67 @@
+# Woodpecker CI pipeline — App Template
+#
+# Every step runs as an unprivileged pod on the tainted CI node pool (Kyverno adds
+# the nodeSelector and toleration). No Docker daemon, no privileged container:
+# images are built with rootless BuildKit and pushed to Forgejo's registry.
+#
+# Secrets used (add them in the Woodpecker UI, repo settings → Secrets):
+#   registry_user, registry_token   — a Forgejo token with write:package
+
+when:
+  - event: [push, pull_request]
+
+steps:
+  - name: lint-manifests
+    image: bitnami/kubectl:latest
+    commands:
+      - kubectl apply --dry-run=client -f k8s/
+
+  - name: test
+    image: mcr.microsoft.com/dotnet/sdk:8.0
+    commands:
+      - dotnet test --logger "console;verbosity=normal"
+
+  # Pull requests build but never push: untrusted code must not be able to
+  # publish a tag other people might pull.
+  - name: build
+    image: moby/buildkit:v0.17.2-rootless
+    environment:
+      BUILDKITD_FLAGS: --oci-worker-no-process-sandbox
+      REGISTRY_USER:
+        from_secret: registry_user
+      REGISTRY_TOKEN:
+        from_secret: registry_token
+    commands:
+      - mkdir -p ~/.docker
+      - |
+        cat > ~/.docker/config.json <<EOF
+        {"auths":{"git.DOMAIN":{"username":"$REGISTRY_USER","password":"$REGISTRY_TOKEN"}}}
+        EOF
+      - |
+        PUSH=false
+        if [ "$CI_PIPELINE_EVENT" = "push" ]; then PUSH=true; fi
+        buildctl-daemonless.sh build \
+          --frontend dockerfile.v0 \
+          --local context=. \
+          --local dockerfile=. \
+          --import-cache type=registry,ref=git.DOMAIN/devhub/APP_NAME:latest \
+          --export-cache type=inline \
+          --output type=image,\"name=git.DOMAIN/devhub/APP_NAME:$CI_COMMIT_SHA,git.DOMAIN/devhub/APP_NAME:latest\",push=$PUSH
+
+  # ArgoCD watches k8s/ and syncs whatever image tag is committed there.
+  - name: deploy
+    image: alpine/git:latest
+    environment:
+      GIT_TOKEN:
+        from_secret: registry_token
+    when:
+      - event: push
+        branch: ${CI_REPO_DEFAULT_BRANCH}
+    commands:
+      - git config user.email "ci@git.DOMAIN"
+      - git config user.name "Woodpecker CI"
+      - sed -i "s|image: .*|image: git.DOMAIN/devhub/APP_NAME:$CI_COMMIT_SHA|" k8s/deployment.yaml
+      - git add k8s/deployment.yaml
+      - git diff --cached --quiet && echo "no image change" && exit 0
+      - git commit -m "[skip ci] deploy $CI_COMMIT_SHA"
+      - git push origin HEAD:${CI_REPO_DEFAULT_BRANCH}

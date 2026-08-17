@@ -1,0 +1,80 @@
+# Vault raft snapshots.
+#
+# Velero backs up the Vault PVCs, but a filesystem copy of a running raft store
+# is not a guaranteed-consistent snapshot. `vault operator raft snapshot save`
+# is, and it is the only artefact Vault's own restore path accepts.
+#
+# Snapshots are written to a PVC and then (optionally) synced to object storage
+# by the same Velero schedule that covers the vault namespace.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vault-snapshots
+  namespace: vault
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-snapshot
+  namespace: vault
+---
+# The job authenticates to Vault with its own Kubernetes auth role, so no root
+# token is involved. setup-vault.sh creates the matching role and policy.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vault-raft-snapshot
+  namespace: vault
+spec:
+  schedule: "0 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          serviceAccountName: vault-snapshot
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 100
+            fsGroup: 1000
+          containers:
+            - name: snapshot
+              image: hashicorp/vault:1.21.2 # matches the appVersion of the pinned chart (0.32.0)
+              env:
+                - name: VAULT_ADDR
+                  value: http://vault-active.vault.svc.cluster.local:8200
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  # Exchange the pod's projected service-account token for a
+                  # short-lived Vault token with snapshot-only permissions.
+                  jwt="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+                  VAULT_TOKEN="$(vault write -field=token \
+                      auth/kubernetes/login role=vault-snapshot jwt="$jwt")"
+                  export VAULT_TOKEN
+
+                  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+                  vault operator raft snapshot save "/snapshots/vault-${stamp}.snap"
+
+                  # Keep the last 28 snapshots (7 days at 6-hourly).
+                  ls -1t /snapshots/*.snap | tail -n +29 | xargs -r rm -f
+                  echo "snapshot complete: vault-${stamp}.snap"
+              volumeMounts:
+                - name: snapshots
+                  mountPath: /snapshots
+          volumes:
+            - name: snapshots
+              persistentVolumeClaim:
+                claimName: vault-snapshots

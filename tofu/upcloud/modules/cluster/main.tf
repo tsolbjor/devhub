@@ -50,8 +50,33 @@ resource "upcloud_kubernetes_node_group" "workers" {
   labels = {
     prefix  = var.prefix
     cluster = var.cluster_name
-    role    = "worker"
+    role    = "platform"
     env     = lookup(var.tags, "Environment", "dev")
+  }
+}
+
+# Tainted node group for CI jobs — keeps build containers off the nodes running
+# Vault, Keycloak and PostgreSQL.
+resource "upcloud_kubernetes_node_group" "ci" {
+  count = var.ci_node_count > 0 ? 1 : 0
+
+  cluster       = upcloud_kubernetes_cluster.main.id
+  name          = "${var.prefix}-${var.cluster_name}-ci"
+  node_count    = var.ci_node_count
+  plan          = var.ci_node_plan
+  anti_affinity = var.ci_node_count > 1
+
+  labels = {
+    prefix  = var.prefix
+    cluster = var.cluster_name
+    role    = "ci"
+    env     = lookup(var.tags, "Environment", "dev")
+  }
+
+  taint {
+    effect = "NoSchedule"
+    key    = "workload"
+    value  = "ci"
   }
 }
 
@@ -85,9 +110,9 @@ resource "upcloud_managed_database_logical_database" "keycloak" {
   name    = "keycloak"
 }
 
-resource "upcloud_managed_database_logical_database" "gitlab" {
+resource "upcloud_managed_database_logical_database" "forgejo" {
   service = upcloud_managed_database_postgresql.main.id
-  name    = "gitlabhq_production"
+  name    = "forgejo"
 }
 
 resource "upcloud_managed_database_user" "keycloak" {
@@ -95,9 +120,9 @@ resource "upcloud_managed_database_user" "keycloak" {
   username = "keycloak"
 }
 
-resource "upcloud_managed_database_user" "gitlab" {
+resource "upcloud_managed_database_user" "forgejo" {
   service  = upcloud_managed_database_postgresql.main.id
-  username = "gitlab"
+  username = "forgejo"
 }
 
 # ─── Managed Valkey ──────────────────────────────────────────────────
@@ -141,65 +166,9 @@ resource "upcloud_managed_object_storage" "main" {
   labels = var.tags
 }
 
-resource "upcloud_managed_object_storage_user" "gitlab" {
-  service_uuid = upcloud_managed_object_storage.main.id
-  username     = "${var.prefix}-gitlab"
-}
+# NOTE: Forgejo keeps repositories, LFS objects, packages and container registry
+# blobs on its PersistentVolume. Forgejo supports local disk or S3-compatible
+# storage only — Azure Blob and GCS have no S3 API — so rather than run two
+# storage models, every cloud uses the volume, and Velero backs it up alongside
+# the managed PostgreSQL PITR.
 
-resource "upcloud_managed_object_storage_user_access_key" "gitlab" {
-  service_uuid = upcloud_managed_object_storage.main.id
-  username     = upcloud_managed_object_storage_user.gitlab.username
-  status       = "Active"
-}
-
-resource "upcloud_managed_object_storage_policy" "gitlab" {
-  service_uuid = upcloud_managed_object_storage.main.id
-  name         = "gitlab-full-access"
-  description  = "Full S3 access for GitLab"
-  document = urlencode(jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = ["s3:*"]
-        Resource = "*"
-      }
-    ]
-  }))
-}
-
-resource "upcloud_managed_object_storage_user_policy" "gitlab" {
-  service_uuid = upcloud_managed_object_storage.main.id
-  username     = upcloud_managed_object_storage_user.gitlab.username
-  name         = upcloud_managed_object_storage_policy.gitlab.name
-}
-
-resource "upcloud_managed_object_storage_bucket" "gitlab_artifacts" {
-  service_uuid = upcloud_managed_object_storage.main.id
-  name         = "${var.prefix}-gitlab-artifacts"
-}
-
-resource "upcloud_managed_object_storage_bucket" "gitlab_uploads" {
-  service_uuid = upcloud_managed_object_storage.main.id
-  name         = "${var.prefix}-gitlab-uploads"
-}
-
-resource "upcloud_managed_object_storage_bucket" "gitlab_packages" {
-  service_uuid = upcloud_managed_object_storage.main.id
-  name         = "${var.prefix}-gitlab-packages"
-}
-
-resource "upcloud_managed_object_storage_bucket" "gitlab_lfs" {
-  service_uuid = upcloud_managed_object_storage.main.id
-  name         = "${var.prefix}-gitlab-lfs"
-}
-
-resource "upcloud_managed_object_storage_bucket" "gitlab_registry" {
-  service_uuid = upcloud_managed_object_storage.main.id
-  name         = "${var.prefix}-gitlab-registry"
-}
-
-resource "upcloud_managed_object_storage_bucket" "gitlab_backups" {
-  service_uuid = upcloud_managed_object_storage.main.id
-  name         = "${var.prefix}-gitlab-backups"
-}

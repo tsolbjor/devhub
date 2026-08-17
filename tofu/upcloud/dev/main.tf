@@ -15,6 +15,13 @@ module "cluster" {
 
   termination_protection = false
 
+  # Kubernetes API exposure — set in terraform.tfvars
+  control_plane_ip_filter = var.api_allowed_cidrs
+
+  # CI node group (tainted workload=ci) so build jobs never land on platform nodes
+  ci_node_count = 1
+  ci_node_plan  = "4xCPU-8GB"
+
   tags = {
     Environment = "dev"
     ManagedBy   = "tofu"

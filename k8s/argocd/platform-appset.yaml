@@ -1,0 +1,161 @@
+# ApplicationSet: the platform manages itself.
+#
+# Everything that is not bootstrap-critical is reconciled by ArgoCD from this
+# repository instead of by re-running deploy.sh. That closes the drift gap: a
+# hand-edited Helm release is reverted on the next sync, and upgrading a
+# component is a reviewable commit rather than a script invocation.
+#
+# Bootstrap seam
+# --------------
+# deploy.sh installs the pieces that must exist before GitOps can run at all
+# (Envoy Gateway, cert-manager CRDs, Keycloak, Vault, Forgejo, ArgoCD itself),
+# templates this file with the environment's values, and applies it once. From
+# then on `deploy.sh --env <env> gitops` is the only command needed to hand over
+# newly added components.
+#
+# Values resolution: each Application takes the chart from its upstream Helm
+# repo and layers this repo's base values plus the environment overlay values on
+# top — the same files deploy.sh renders, so behaviour does not change at handover.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform-components
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: devhub
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+
+  # Never delete a platform component just because its Application disappeared —
+  # removal should be a deliberate, separate act.
+  syncPolicy:
+    preserveResourcesOnDeletion: true
+
+  generators:
+    - list:
+        elements:
+          - component: cert-manager
+            chart: cert-manager
+            repo: https://charts.jetstack.io
+            version: v1.21.1
+            namespace: cert-manager
+            baseValues: k8s/base/devops/cert-manager/values.yaml
+            overlayValues: devops/cert-manager/values.yaml
+          - component: external-dns
+            chart: external-dns
+            repo: https://kubernetes-sigs.github.io/external-dns/
+            version: 1.21.1
+            namespace: external-dns
+            baseValues: k8s/base/devops/external-dns/values.yaml
+            overlayValues: devops/external-dns/values.yaml
+          - component: external-secrets
+            chart: external-secrets
+            repo: https://charts.external-secrets.io
+            version: 2.9.0
+            namespace: external-secrets
+            baseValues: k8s/base/devops/external-secrets/values.yaml
+            overlayValues: devops/external-secrets/values.yaml
+          - component: monitoring
+            chart: kube-prometheus-stack
+            repo: https://prometheus-community.github.io/helm-charts
+            version: 88.3.0
+            namespace: monitoring
+            baseValues: k8s/base/devops/monitoring/prometheus-stack-values.yaml
+            overlayValues: devops/monitoring/values.yaml
+          - component: loki
+            chart: loki
+            repo: https://grafana.github.io/helm-charts
+            version: 7.3.0
+            namespace: monitoring
+            baseValues: k8s/base/devops/monitoring/loki-values.yaml
+            overlayValues: devops/monitoring/loki-values.yaml
+          - component: tempo
+            chart: tempo
+            repo: https://grafana.github.io/helm-charts
+            version: 1.24.4
+            namespace: monitoring
+            baseValues: k8s/base/devops/monitoring/tempo-values.yaml
+            overlayValues: devops/monitoring/tempo-values.yaml
+          - component: alloy
+            chart: alloy
+            repo: https://grafana.github.io/helm-charts
+            version: 1.11.1
+            namespace: monitoring
+            baseValues: k8s/base/devops/monitoring/alloy-values.yaml
+            overlayValues: devops/monitoring/alloy-values.yaml
+          - component: headlamp
+            chart: headlamp
+            repo: https://kubernetes-sigs.github.io/headlamp/
+            version: 0.44.0
+            namespace: headlamp
+            baseValues: k8s/base/devops/headlamp/values.yaml
+            overlayValues: devops/headlamp/values.yaml
+          - component: kyverno
+            chart: kyverno
+            repo: https://kyverno.github.io/kyverno
+            version: 3.8.2
+            namespace: kyverno
+            baseValues: k8s/base/devops/kyverno/values.yaml
+            overlayValues: devops/kyverno/values.yaml
+          - component: reloader
+            chart: reloader
+            repo: https://stakater.github.io/stakater-charts
+            version: 2.2.16
+            namespace: reloader
+            baseValues: k8s/base/devops/reloader/values.yaml
+            overlayValues: devops/reloader/values.yaml
+          - component: woodpecker
+            chart: woodpecker
+            repo: https://woodpecker-ci.org/
+            version: 3.7.0
+            namespace: woodpecker
+            baseValues: k8s/base/devops/woodpecker/values.yaml
+            overlayValues: devops/woodpecker/values.yaml
+          - component: velero
+            chart: velero
+            repo: https://vmware-tanzu.github.io/helm-charts
+            version: 12.1.0
+            namespace: velero
+            baseValues: k8s/base/devops/velero/values.yaml
+            overlayValues: devops/velero/values.yaml
+
+  template:
+    metadata:
+      name: 'platform-{{.component}}'
+      namespace: argocd
+      labels:
+        app.kubernetes.io/part-of: devhub
+        devhub.io/component: '{{.component}}'
+    spec:
+      project: default
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{.namespace}}'
+      sources:
+        # Upstream chart, with values taken from this repo ($values).
+        - repoURL: '{{.repo}}'
+          chart: '{{.chart}}'
+          targetRevision: '{{.version}}'
+          helm:
+            releaseName: '{{.component}}'
+            ignoreMissingValueFiles: true
+            valueFiles:
+              - $values/{{.baseValues}}
+              - $values/k8s/overlays/${ENV}/{{.overlayValues}}
+        - repoURL: ${GITOPS_REPO_URL}
+          targetRevision: ${GITOPS_REVISION}
+          ref: values
+      syncPolicy:
+        automated:
+          prune: false   # charts own their resources; pruning is manual
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=false
+          - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 15s
+            factor: 2
+            maxDuration: 10m

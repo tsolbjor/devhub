@@ -1,0 +1,82 @@
+# ApplicationSet: developer repos from Forgejo → workload clusters.
+#
+# A matrix of (repositories in the devhub Forgejo organisation) × (registered
+# workload clusters). The cluster half is what makes the workload cluster real:
+# the destination used to be hardcoded to https://kubernetes.default.svc, so every
+# discovered app landed on the platform cluster next to Vault and Keycloak.
+#
+# Forgejo implements the Gitea API, so ArgoCD's gitea SCM provider is the correct
+# one — there is no separate Forgejo provider.
+#
+# Requires:
+#   - Secret 'argocd-forgejo-scm-token' in the argocd namespace:
+#       kubectl create secret generic argocd-forgejo-scm-token -n argocd \
+#         --from-literal=token=<Forgejo access token with read:organization,read:repository>
+#   - At least one cluster registered with the label devhub.io/role=workload
+#     (register-workload-cluster.sh adds it).
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: forgejo-workloads
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - matrix:
+        generators:
+          - scmProvider:
+              gitea:
+                # Internal service URL: keeps SCM scanning off the public gateway
+                # and avoids the *.localhost glibc resolution issue.
+                api: http://forgejo-http.forgejo.svc.cluster.local:3000
+                owner: devhub
+                allBranches: false
+                insecure: true # plain HTTP inside the cluster
+                tokenRef:
+                  secretName: argocd-forgejo-scm-token
+                  key: token
+              filters:
+                # Only repos with k8s/ manifests
+                - pathsExist:
+                    - k8s/
+                  # Exclude this platform repo (it has k8s/argocd/)
+                  pathsDoNotExist:
+                    - k8s/argocd/
+              cloneProtocol: https
+          - clusters:
+              selector:
+                matchLabels:
+                  devhub.io/role: workload
+  template:
+    metadata:
+      name: '{{.name}}-{{.repository}}'
+      namespace: argocd
+      labels:
+        app.kubernetes.io/part-of: devhub
+        app.kubernetes.io/managed-by: applicationset
+        devhub.io/cluster: '{{.name}}'
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: workloads
+      source:
+        repoURL: '{{.url}}'
+        targetRevision: HEAD
+        path: k8s
+      destination:
+        name: '{{.name}}'
+        namespace: 'devhub-{{.repository}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - PrunePropagationPolicy=foreground
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m

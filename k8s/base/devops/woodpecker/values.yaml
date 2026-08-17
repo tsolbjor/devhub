@@ -1,0 +1,121 @@
+# Woodpecker CI — pipelines for repositories hosted in Forgejo.
+# Chart: woodpecker/woodpecker
+#
+# Why this and not Forgejo Actions: Woodpecker's Kubernetes backend runs every
+# pipeline step as an ordinary pod. Actions' runner is built around Docker, which
+# on Kubernetes means a privileged daemon — the exact thing the platform removed.
+#
+# Job pods land in the woodpecker-ci namespace, where a NetworkPolicy blocks the
+# cloud metadata endpoint and all RFC1918 ranges, and a Kyverno mutation pins them
+# to the tainted CI node pool. Image builds use rootless BuildKit.
+#
+# Note the chart's shape: the server is a StatefulSet (it owns a volume), the agent
+# a Deployment — hence server.statefulSet.replicaCount but agent.replicaCount.
+
+server:
+  enabled: true
+
+  statefulSet:
+    replicaCount: 1
+    annotations:
+      # Restart when the Forgejo OAuth credentials or agent secret change.
+      reloader.stakater.com/auto: "true"
+
+  # Forgejo is Gitea-API compatible, so the Gitea integration is the correct one.
+  env:
+    WOODPECKER_OPEN: "false"
+    WOODPECKER_GITEA: "true"
+    WOODPECKER_AUTHENTICATE_PUBLIC_REPOS: "true"
+    WOODPECKER_LOG_LEVEL: info
+    WOODPECKER_HOST: https://ci.${DOMAIN}
+    WOODPECKER_GITEA_URL: https://git.${DOMAIN}
+    # Server-side calls stay in-cluster: *.localhost resolves to 127.0.0.1 inside
+    # glibc containers, so the public URL is browser-facing only.
+    WOODPECKER_GITEA_SKIP_VERIFY: "false"
+
+  # Client id/secret for the Forgejo OAuth application, plus the shared agent
+  # secret. Created by deploy.sh; the OAuth half is registered against Forgejo's
+  # API by `deploy.sh <env> woodpecker-oauth`.
+  extraSecretNamesForEnvFrom:
+    - woodpecker-server-secret
+
+  # The chart can mint the agent secret itself, but the platform creates it so the
+  # same value can be handed to the agent and stored in Vault.
+  createAgentSecret: false
+
+  persistentVolume:
+    enabled: true
+    size: 8Gi
+
+  ingress:
+    enabled: false # Gateway API HTTPRoute instead
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # The upstream image has no USER directive, so an explicit uid is required —
+  # runAsNonRoot alone makes the kubelet refuse to start the container. fsGroup
+  # gives that uid write access to the state volume.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false # SQLite/queue state lives on the volume
+    capabilities:
+      drop:
+        - ALL
+
+agent:
+  enabled: true
+  replicaCount: 2
+
+  env:
+    WOODPECKER_BACKEND: kubernetes
+    WOODPECKER_BACKEND_K8S_NAMESPACE: woodpecker-ci
+    WOODPECKER_BACKEND_K8S_VOLUME_SIZE: 10G
+    WOODPECKER_BACKEND_K8S_STORAGE_RWX: "false"
+    WOODPECKER_BACKEND_K8S_POD_LABELS: '{"devhub.io/workload":"ci"}'
+    WOODPECKER_MAX_WORKFLOWS: "2"
+
+  # The chart always mounts woodpecker-default-agent-secret into the agent, even
+  # with createAgentSecret: false — so deploy.sh creates a secret by that name
+  # rather than the chart minting one the platform cannot also give to Vault.
+
+  serviceAccount:
+    create: true
+    # The chart renders the Role/RoleBinding for WOODPECKER_BACKEND_K8S_NAMESPACE,
+    # so the agent can drive job pods in woodpecker-ci and nowhere else.
+    rbac:
+      create: true
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL

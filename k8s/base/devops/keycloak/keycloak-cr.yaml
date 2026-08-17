@@ -1,0 +1,84 @@
+# Keycloak, managed by the official Keycloak Operator.
+#
+# The operator is the Keycloak project's recommended way to run on Kubernetes: it
+# owns the StatefulSet, handles version upgrades and database migrations, and
+# exposes realms as CRDs. It replaces the community keycloakx Helm chart.
+#
+# Templated by deploy.sh with ${DOMAIN}, ${PG_HOST}, ${PG_PORT}.
+apiVersion: k8s.keycloak.org/v2beta1
+kind: Keycloak
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  instances: 1
+
+  # Image comes from the operator's version; pinning it here would fight upgrades.
+
+  db:
+    vendor: postgres
+    host: ${PG_HOST}
+    port: ${PG_PORT}
+    database: keycloak
+    usernameSecret:
+      name: keycloak-db-secret
+      key: username
+    passwordSecret:
+      name: keycloak-db-secret
+      key: password
+
+  # First-login credentials. Rotate or delete the secret once a real admin exists.
+  bootstrapAdmin:
+    user:
+      secret: keycloak-admin-secret
+
+  # TLS terminates at the Gateway, so Keycloak itself serves plain HTTP inside the
+  # cluster and trusts the forwarded headers the gateway sets.
+  http:
+    httpEnabled: true
+    httpPort: 8080
+
+  proxy:
+    headers: xforwarded
+
+  hostname:
+    hostname: https://keycloak.${DOMAIN}
+    # Lets in-cluster clients reach Keycloak on its service URL while browsers use
+    # the public hostname — the *.localhost resolution problem in one setting.
+    backchannelDynamic: true
+
+  # Routing is Gateway API (HTTPRoute), not the operator's own Ingress.
+  ingress:
+    enabled: false
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  additionalOptions:
+    - name: metrics-enabled
+      value: "true"
+    - name: health-enabled
+      value: "true"
+    # Group membership is what ArgoCD, Grafana, Forgejo and Headlamp authorise on.
+    - name: spi-login-protocol-openid-connect-legacy-logout-redirect-uri
+      value: "true"
+
+  unsupported:
+    podTemplate:
+      spec:
+        priorityClassName: platform-critical
+        securityContext:
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+        containers:
+          - securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL

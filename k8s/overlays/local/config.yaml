@@ -1,31 +1,40 @@
 # Local environment configuration
-# This file defines all environment-specific values for local deployment
-# Values are exported as environment variables by deploy.sh
+#
+# Human-owned configuration. Infrastructure values (database hosts, IAM role
+# ARNs, bucket names, KMS keys) are NOT stored here — sync-tofu-outputs.sh writes
+# them to k8s/scripts/local/tofu-outputs.env, which deploy.sh sources.
 
-# Domain configuration
+# Domain configuration - UPDATE THIS
 domain: localhost
 
 # TLS configuration
 tls:
   type: local-ca           # local-ca or cert-manager
   secretName: local-tls-secret
-  clusterIssuer: ""        # Not used for local
+  clusterIssuer: ""        # not used for local
 
-# Email for ACME (not used locally)
+# Email for ACME certificate notifications - UPDATE THIS
 acmeEmail: ""
 
-# Data services configuration
+# Data services: managed (cloud) or local (in-cluster StatefulSets)
 dataServices:
   type: local
+
+# GitOps: repository ArgoCD reconciles the platform and app manifests from.
+# Defaults to the Forgejo instance this platform runs, once it hosts the repo.
+gitops:
+  repoUrl: https://git.localhost/devhub/devhub.git
+  targetRevision: HEAD
 
 # Service subdomains (relative to domain)
 services:
   keycloak: keycloak
   vault: vault
-  gitlab: gitlab
-  registry: registry
+  git: git          # Forgejo: repositories, packages and the container registry
+  ci: ci            # Woodpecker
   argocd: argocd
   grafana: grafana
   prometheus: prometheus
   alertmanager: alertmanager
-  minio: minio
+  loki: loki
+  headlamp: headlamp

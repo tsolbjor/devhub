@@ -23,6 +23,24 @@ variable "availability_zones" {
   type        = list(string)
 }
 
+variable "nat_gateway_per_az" {
+  description = "Create one NAT gateway per AZ (HA, higher cost) instead of a single shared gateway"
+  type        = bool
+  default     = false
+}
+
+# ─── API server exposure ──────────────────────────────────────────────
+
+variable "api_allowed_cidrs" {
+  description = <<-EOT
+    CIDR blocks allowed to reach the public Kubernetes API endpoint.
+    Empty list = no public endpoint at all (VPC-only access via VPN/bastion).
+    There is deliberately no default: an unrestricted control plane must be a
+    conscious choice, e.g. ["203.0.113.4/32"] for an office egress IP.
+  EOT
+  type        = list(string)
+}
+
 # ─── EKS Cluster ─────────────────────────────────────────────────────
 
 variable "node_instance_type" {
@@ -52,6 +70,32 @@ variable "kubernetes_version" {
   default     = "1.30"
 }
 
+# ─── CI node group (Woodpecker agents) ────────────────────────────────
+
+variable "ci_node_instance_type" {
+  description = "Instance type for the tainted CI node group"
+  type        = string
+  default     = "t3.large"
+}
+
+variable "ci_node_min_count" {
+  description = "Minimum CI nodes (0 = scale to zero when no jobs are running)"
+  type        = number
+  default     = 0
+}
+
+variable "ci_node_max_count" {
+  description = "Maximum CI nodes (0 disables the CI node group entirely)"
+  type        = number
+  default     = 3
+}
+
+variable "ci_node_capacity_type" {
+  description = "CI node capacity type: SPOT (cheap, interruptible) or ON_DEMAND"
+  type        = string
+  default     = "SPOT"
+}
+
 variable "enable_deletion_protection" {
   description = "Enable deletion protection on stateful resources (RDS)"
   type        = bool
@@ -77,6 +121,18 @@ variable "rds_multi_az" {
   default     = false
 }
 
+variable "rds_backup_retention_days" {
+  description = "RDS automated backup retention in days (enables point-in-time recovery)"
+  type        = number
+  default     = 7
+}
+
+variable "rds_performance_insights" {
+  description = "Enable RDS Performance Insights (not supported on db.t3.micro)"
+  type        = bool
+  default     = false
+}
+
 # ─── ElastiCache (Redis) ──────────────────────────────────────────────
 
 variable "redis_node_type" {
@@ -94,6 +150,26 @@ variable "redis_automatic_failover" {
   description = "Enable automatic Redis failover (requires num_cache_clusters >= 2)"
   type        = bool
   default     = false
+}
+
+variable "redis_snapshot_retention_days" {
+  description = "ElastiCache daily snapshot retention in days (0 disables snapshots)"
+  type        = number
+  default     = 1
+}
+
+# ─── Backups / retention ──────────────────────────────────────────────
+
+variable "backup_retention_days" {
+  description = "Retention for Velero backup object versions"
+  type        = number
+  default     = 30
+}
+
+variable "log_retention_days" {
+  description = "Retention for Loki log chunks in S3"
+  type        = number
+  default     = 30
 }
 
 # ─── DNS ─────────────────────────────────────────────────────────────

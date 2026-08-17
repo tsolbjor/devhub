@@ -110,6 +110,28 @@ resource "google_container_cluster" "main" {
     workload_pool = "${var.project_id}.svc.id.goog"
   }
 
+  # Private nodes: workers get no public IPs and egress via Cloud NAT.
+  private_cluster_config {
+    enable_private_nodes    = true
+    enable_private_endpoint = length(var.api_allowed_cidrs) == 0
+    master_ipv4_cidr_block  = var.master_ipv4_cidr_block
+  }
+
+  # Who may reach the control plane. With an empty allow-list the endpoint is
+  # private-only and no public block is emitted.
+  dynamic "master_authorized_networks_config" {
+    for_each = length(var.api_allowed_cidrs) > 0 ? [1] : []
+    content {
+      dynamic "cidr_blocks" {
+        for_each = var.api_allowed_cidrs
+        content {
+          cidr_block   = cidr_blocks.value
+          display_name = "allowed-${cidr_blocks.key}"
+        }
+      }
+    }
+  }
+
   # Remove default node pool — we manage our own below
   remove_default_node_pool = true
   initial_node_count       = 1
@@ -129,11 +151,18 @@ resource "google_container_cluster" "main" {
 }
 
 resource "google_container_node_pool" "main" {
-  project    = var.project_id
-  name       = "${var.prefix}-nodes"
-  location   = var.region
-  cluster    = google_container_cluster.main.name
-  node_count = var.node_count
+  project  = var.project_id
+  name     = "${var.prefix}-nodes"
+  location = var.region
+  cluster  = google_container_cluster.main.name
+
+  # Per-zone node count; autoscaler owns the actual size from here on.
+  initial_node_count = var.node_count
+
+  autoscaling {
+    min_node_count = var.node_min_count
+    max_node_count = var.node_max_count
+  }
 
   node_config {
     machine_type = var.node_machine_type
@@ -143,12 +172,17 @@ resource "google_container_node_pool" "main" {
       mode = "GKE_METADATA"
     }
 
+    shielded_instance_config {
+      enable_secure_boot          = true
+      enable_integrity_monitoring = true
+    }
+
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform",
     ]
 
     labels = merge(var.labels, {
-      role = "worker"
+      role = "platform"
     })
   }
 
@@ -156,13 +190,94 @@ resource "google_container_node_pool" "main" {
     auto_repair  = true
     auto_upgrade = true
   }
+
+  lifecycle {
+    ignore_changes = [initial_node_count]
+  }
+}
+
+# Tainted, preemptible pool for Woodpecker CI jobs — build containers stay off the
+# nodes that run Vault, Keycloak and PostgreSQL.
+resource "google_container_node_pool" "ci" {
+  count = var.ci_node_max_count > 0 ? 1 : 0
+
+  project  = var.project_id
+  name     = "${var.prefix}-ci"
+  location = var.region
+  cluster  = google_container_cluster.main.name
+
+  initial_node_count = var.ci_node_min_count
+
+  autoscaling {
+    min_node_count = var.ci_node_min_count
+    max_node_count = var.ci_node_max_count
+  }
+
+  node_config {
+    machine_type = var.ci_node_machine_type
+    spot         = var.ci_node_spot
+
+    workload_metadata_config {
+      mode = "GKE_METADATA"
+    }
+
+    shielded_instance_config {
+      enable_secure_boot          = true
+      enable_integrity_monitoring = true
+    }
+
+    oauth_scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+
+    labels = merge(var.labels, { role = "ci" })
+
+    taint {
+      key    = "workload"
+      value  = "ci"
+      effect = "NO_SCHEDULE"
+    }
+  }
+
+  management {
+    auto_repair  = true
+    auto_upgrade = true
+  }
+
+  lifecycle {
+    ignore_changes = [initial_node_count]
+  }
+}
+
+# ─── Cloud NAT ────────────────────────────────────────────────────────
+# Private nodes have no external IPs, so egress (image pulls, Let's Encrypt,
+# webhooks) goes through a NAT gateway.
+
+resource "google_compute_router" "main" {
+  project = var.project_id
+  name    = "${var.prefix}-router"
+  region  = var.region
+  network = google_compute_network.main.id
+}
+
+resource "google_compute_router_nat" "main" {
+  project = var.project_id
+  name    = "${var.prefix}-nat"
+  router  = google_compute_router.main.name
+  region  = var.region
+
+  nat_ip_allocate_option             = "AUTO_ONLY"
+  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+
+  log_config {
+    enable = true
+    filter = "ERRORS_ONLY"
+  }
 }
 
 # ─── Cloud SQL PostgreSQL ─────────────────────────────────────────────
 #
 # Private IP only — reachable from GKE via VPC peering.
 # NOTE: Cloud SQL doesn't support Terraform-managed local user creation.
-#       Users (keycloak, gitlab) must be created post-provision via psql.
+#       Users (keycloak, forgejo) must be created post-provision via psql.
 #       Use: kubectl run pg-init --rm -it --image=postgres:16 -- psql -h <private_ip> -U pgadmin
 
 resource "random_password" "pg_admin" {
@@ -175,7 +290,7 @@ resource "random_password" "pg_keycloak" {
   special = false
 }
 
-resource "random_password" "pg_gitlab" {
+resource "random_password" "pg_forgejo" {
   length  = 32
   special = false
 }
@@ -226,16 +341,16 @@ resource "google_sql_database" "keycloak" {
   instance = google_sql_database_instance.main.name
 }
 
-resource "google_sql_database" "gitlab" {
+resource "google_sql_database" "forgejo" {
   project  = var.project_id
-  name     = "gitlabhq_production"
+  name     = "forgejo"
   instance = google_sql_database_instance.main.name
 }
 
 # ─── Cloud Memorystore (Redis) ────────────────────────────────────────
 #
 # Private IP within VPC. Auth enabled (password via AUTH command).
-# The auth_string is output and must be stored in a K8s secret for GitLab.
+# The auth_string is output and must be stored in a K8s secret for its consumers.
 
 resource "google_redis_instance" "main" {
   project        = var.project_id
@@ -254,82 +369,11 @@ resource "google_redis_instance" "main" {
   depends_on = [google_project_service.redis]
 }
 
-# ─── GCS Buckets (GitLab Object Storage) ─────────────────────────────
-#
-# GitLab supports GCS natively via the Fog/Google provider.
-# Workload Identity is used for keyless access — no access key required.
-# NOTE: GCS bucket names are globally unique. If "${prefix}-gitlab-*" conflicts,
-#       adjust var.prefix to include a project-specific component.
-
-locals {
-  gcs_bucket_prefix = "${var.prefix}-gitlab"
-}
-
-resource "google_storage_bucket" "gitlab_artifacts" {
-  project       = var.project_id
-  name          = "${local.gcs_bucket_prefix}-artifacts"
-  location      = var.region
-  storage_class = var.gcs_storage_class
-  force_destroy = true
-
-  uniform_bucket_level_access = true
-  labels                      = var.labels
-}
-
-resource "google_storage_bucket" "gitlab_uploads" {
-  project       = var.project_id
-  name          = "${local.gcs_bucket_prefix}-uploads"
-  location      = var.region
-  storage_class = var.gcs_storage_class
-  force_destroy = true
-
-  uniform_bucket_level_access = true
-  labels                      = var.labels
-}
-
-resource "google_storage_bucket" "gitlab_packages" {
-  project       = var.project_id
-  name          = "${local.gcs_bucket_prefix}-packages"
-  location      = var.region
-  storage_class = var.gcs_storage_class
-  force_destroy = true
-
-  uniform_bucket_level_access = true
-  labels                      = var.labels
-}
-
-resource "google_storage_bucket" "gitlab_lfs" {
-  project       = var.project_id
-  name          = "${local.gcs_bucket_prefix}-lfs"
-  location      = var.region
-  storage_class = var.gcs_storage_class
-  force_destroy = true
-
-  uniform_bucket_level_access = true
-  labels                      = var.labels
-}
-
-resource "google_storage_bucket" "gitlab_registry" {
-  project       = var.project_id
-  name          = "${local.gcs_bucket_prefix}-registry"
-  location      = var.region
-  storage_class = var.gcs_storage_class
-  force_destroy = true
-
-  uniform_bucket_level_access = true
-  labels                      = var.labels
-}
-
-resource "google_storage_bucket" "gitlab_backups" {
-  project       = var.project_id
-  name          = "${local.gcs_bucket_prefix}-backups"
-  location      = var.region
-  storage_class = var.gcs_storage_class
-  force_destroy = true
-
-  uniform_bucket_level_access = true
-  labels                      = var.labels
-}
+# NOTE: Forgejo keeps repositories, LFS objects, packages and container registry
+# blobs on its PersistentVolume. Forgejo supports local disk or S3-compatible
+# storage only — Azure Blob and GCS have no S3 API — so rather than run two
+# storage models, every cloud uses the volume, and Velero backs it up alongside
+# the managed PostgreSQL PITR.
 
 # ─── Google Identity Provider for Keycloak ────────────────────────────
 #
@@ -352,67 +396,6 @@ resource "google_project_service" "oauth2" {
   project            = var.project_id
   service            = "oauth2.googleapis.com"
   disable_on_destroy = false
-}
-
-# ─── Workload Identity for GitLab ─────────────────────────────────────
-#
-# Allows GitLab pods (webservice, sidekiq) to access GCS buckets without
-# a service account key. The K8s service account "gitlab" in the "gitlab"
-# namespace exchanges its projected OIDC token for a Google token.
-#
-# GKE must have workload_identity_config set (done above).
-
-resource "google_service_account" "gitlab" {
-  project      = var.project_id
-  account_id   = "${var.prefix}-gitlab"
-  display_name = "GitLab Service Account (Workload Identity)"
-
-  depends_on = [google_project_service.iam]
-}
-
-# Grant the GSA Object Admin on all GitLab buckets
-resource "google_storage_bucket_iam_member" "gitlab_artifacts" {
-  bucket = google_storage_bucket.gitlab_artifacts.name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.gitlab.email}"
-}
-
-resource "google_storage_bucket_iam_member" "gitlab_uploads" {
-  bucket = google_storage_bucket.gitlab_uploads.name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.gitlab.email}"
-}
-
-resource "google_storage_bucket_iam_member" "gitlab_packages" {
-  bucket = google_storage_bucket.gitlab_packages.name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.gitlab.email}"
-}
-
-resource "google_storage_bucket_iam_member" "gitlab_lfs" {
-  bucket = google_storage_bucket.gitlab_lfs.name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.gitlab.email}"
-}
-
-resource "google_storage_bucket_iam_member" "gitlab_registry" {
-  bucket = google_storage_bucket.gitlab_registry.name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.gitlab.email}"
-}
-
-resource "google_storage_bucket_iam_member" "gitlab_backups" {
-  bucket = google_storage_bucket.gitlab_backups.name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.gitlab.email}"
-}
-
-# Bind the K8s service account "gitlab/gitlab" to the GSA via Workload Identity.
-# The GitLab Helm chart creates the "gitlab" SA when global.serviceAccount.enabled=true.
-resource "google_service_account_iam_member" "gitlab_workload_identity" {
-  service_account_id = google_service_account.gitlab.name
-  role               = "roles/iam.workloadIdentityUser"
-  member             = "serviceAccount:${var.project_id}.svc.id.goog[gitlab/gitlab]"
 }
 
 # ─── External-DNS Workload Identity ──────────────────────────────────

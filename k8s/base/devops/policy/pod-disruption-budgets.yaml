@@ -1,0 +1,64 @@
+# PodDisruptionBudgets for platform services.
+#
+# Node upgrades and autoscaler scale-downs drain nodes. Without a PDB, a drain
+# can take every replica of Keycloak or the ArgoCD server at once, so SSO or
+# GitOps goes dark in the middle of routine maintenance.
+#
+# Vault installs its own PDB via its chart; these cover the rest.
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: keycloak
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: argocd-server
+  namespace: argocd
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-server
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: argocd-repo-server
+  namespace: argocd
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-repo-server
+---
+# The Envoy data plane: losing every proxy at once takes the whole platform
+# offline, so a drain must leave one standing.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: envoy-gateway-dataplane
+  namespace: envoy-gateway-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/managed-by: envoy-gateway
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: forgejo
+  namespace: forgejo
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: forgejo

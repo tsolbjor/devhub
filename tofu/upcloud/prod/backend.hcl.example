@@ -1,0 +1,18 @@
+# Create a Managed Object Storage instance + bucket + user access key in the
+# UpCloud console (or with upctl), then point this at it.
+bucket = "devhub-tfstate"
+key    = "upcloud/prod/terraform.tfstate"
+region = "europe-1"
+
+endpoints = {
+  s3 = "https://<your-objsto-id>.upcloudobjects.com"
+}
+
+# UpCloud object storage does not implement these AWS-specific behaviours.
+skip_credentials_validation = true
+skip_region_validation      = true
+skip_requesting_account_id  = true
+skip_metadata_api_check     = true
+skip_s3_checksum            = true
+use_path_style              = true
+use_lockfile                = true

@@ -4,12 +4,10 @@
 global:
   domain: argocd.${DOMAIN}
 
-server:
-  ingress:
-    annotations:
-      cert-manager.io/cluster-issuer: letsencrypt-prod
-
-  config:
+# SSO config lives under configs.cm — the chart ignores server.config.
+configs:
+  cm:
+    create: true
     url: https://argocd.${DOMAIN}
     oidc.config: |
       name: Keycloak
