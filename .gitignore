@@ -33,6 +33,14 @@ k8s/scripts/*/
 !k8s/scripts/lib/
 !k8s/scripts/windows/
 
+# End-to-end suite: the runner, its browsers and everything a run produces.
+# The saved storage state is a live signed-in session, so it is a credential.
+k8s/e2e/node_modules/
+k8s/e2e/.auth/
+k8s/e2e/report/
+k8s/e2e/results/
+k8s/e2e/package-lock.json
+
 # Editor
 *.swp
 *.swo

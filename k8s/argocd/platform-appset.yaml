@@ -150,7 +150,7 @@ spec:
             valueFiles:
               - $values/{{.baseValues}}
               - $values/k8s/overlays/${ENV}/{{.overlayValues}}
-        - repoURL: ${GITOPS_REPO_URL}
+        - repoURL: ${GITOPS_REPO_URL_INTERNAL}
           targetRevision: ${GITOPS_REVISION}
           ref: values
       syncPolicy:

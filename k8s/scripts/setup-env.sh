@@ -27,7 +27,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-REPO_ROOT="${SCRIPT_DIR}/../.."
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # ─── Arguments ────────────────────────────────────────────────────────
 
@@ -43,6 +43,8 @@ PROJECT_IN=""
 AAD_GROUPS_IN=""
 AZURE_STATE_RG=""
 OBJSTO_ENDPOINT=""
+MIRROR_URL_IN=""
+MIRROR_TOKEN_IN=""
 CREATE_STORE=""
 INTERACTIVE=true
 DRY_RUN=false
@@ -65,6 +67,9 @@ Options:
   --project <id>               GCP project id
   --aad-admin-groups <a,b>     Azure only: Entra group object ids for cluster-admin
   --objsto-endpoint <url>      UpCloud only: Managed Object Storage S3 endpoint
+  --mirror-url <url>           off-cluster mirror for the GitOps repository
+                               (e.g. https://github.com/acme/aws-dev.git)
+  --mirror-token <token>       write token for that mirror
   --create-state-store         create the bucket/container (and lock table)
   --no-create-state-store      skip creating it
   --non-interactive            never prompt; fail if a required value is missing
@@ -87,6 +92,8 @@ while [[ $# -gt 0 ]]; do
         --project)               PROJECT_IN="${2:-}"; shift 2 ;;
         --aad-admin-groups)      AAD_GROUPS_IN="${2:-}"; shift 2 ;;
         --objsto-endpoint)       OBJSTO_ENDPOINT="${2:-}"; shift 2 ;;
+        --mirror-url)            MIRROR_URL_IN="${2:-}"; shift 2 ;;
+        --mirror-token)          MIRROR_TOKEN_IN="${2:-}"; shift 2 ;;
         --create-state-store)    CREATE_STORE=true; shift ;;
         --no-create-state-store) CREATE_STORE=false; shift ;;
         --non-interactive)       INTERACTIVE=false; shift ;;
@@ -124,6 +131,7 @@ TOFU_DIR="${REPO_ROOT}/tofu/${CLOUD}/${TIER}"
 CONFIG_FILE="${REPO_ROOT}/k8s/overlays/${ENV}/config.yaml"
 BACKEND_FILE="${TOFU_DIR}/backend.hcl"
 TFVARS_FILE="${TOFU_DIR}/terraform.tfvars"
+MANUAL_SECRETS_FILE="${SCRIPT_DIR}/${ENV}/manual-secrets.env"
 
 [[ -d "$TOFU_DIR" ]]    || { log_error "No tofu module at ${TOFU_DIR}"; exit 1; }
 [[ -f "$CONFIG_FILE" ]] || { log_error "No overlay config at ${CONFIG_FILE}"; exit 1; }
@@ -262,6 +270,30 @@ CURRENT_EMAIL="$(yaml_get "$CONFIG_FILE" acmeEmail)"
 [[ "$CURRENT_EMAIL" == *example.com ]] && CURRENT_EMAIL=""
 ACME_EMAIL_IN="${ACME_EMAIL_IN:-$CURRENT_EMAIL}"
 ask ACME_EMAIL_IN "ACME contact email (expiry notices)" "admin@${DOMAIN_IN}"
+
+# ── Off-cluster mirror for the GitOps repository ──────────────────────
+#
+# The GitOps repository is hosted by the Forgejo running on this very cluster,
+# which is what self-hosted means and is fine in normal operation. It does mean
+# the repository describing the cluster dies with the cluster, so a copy
+# elsewhere is the difference between rebuilding and reconstructing. Forgejo
+# pushes to it on every commit; setup-gitops-repo.sh wires that up from here.
+#
+# Optional on purpose: an environment with no external git host is a legitimate
+# choice, and Velero still backs up Forgejo's volume.
+echo ""
+echo "Off-cluster mirror for the GitOps repository (optional)"
+if [[ -z "$MIRROR_URL_IN" ]] && $INTERACTIVE; then
+    echo "  The GitOps repository lives in this environment's own Forgejo."
+    echo "  A mirror elsewhere is what survives losing the cluster."
+    read -r -p "  Mirror repository URL (blank to skip): " MIRROR_URL_IN
+fi
+
+if [[ -n "$MIRROR_URL_IN" && -z "$MIRROR_TOKEN_IN" ]] && $INTERACTIVE; then
+    # -s: a write token must not land in scrollback or shell history.
+    read -r -s -p "  Write token for ${MIRROR_URL_IN}: " MIRROR_TOKEN_IN
+    echo ""
+fi
 
 # ── API server exposure ───────────────────────────────────────────────
 echo ""
@@ -455,6 +487,13 @@ if [[ "$TIER" == "workload" ]]; then
 fi
 echo ""
 
+if [[ -n "$MIRROR_URL_IN" && -n "$MIRROR_TOKEN_IN" ]]; then
+    echo "[STEP] manual-secrets.env → ${MANUAL_SECRETS_FILE#"${REPO_ROOT}/"}"
+    echo "    GITOPS_MIRROR_URL=${MIRROR_URL_IN}"
+    echo "    GITOPS_MIRROR_TOKEN=<hidden>"
+    echo ""
+fi
+
 if $DRY_RUN; then
     log_info "--dry-run: nothing written"
     exit 0
@@ -504,6 +543,31 @@ if command -v python3 &>/dev/null; then
 else
     log_warn "python3 not found — set domain and acmeEmail in ${CONFIG_FILE#"${REPO_ROOT}/"} by hand"
 fi
+
+# Mirror credentials: gitignored, 0600, alongside the other values tofu cannot
+# produce. setup-gitops-repo.sh reads them when it publishes the repository.
+if [[ -n "$MIRROR_URL_IN" && -n "$MIRROR_TOKEN_IN" ]]; then
+    mkdir -p "$(dirname "$MANUAL_SECRETS_FILE")"
+    touch "$MANUAL_SECRETS_FILE"
+    chmod 600 "$MANUAL_SECRETS_FILE"
+    # Replace previous values rather than appending a second definition, which
+    # would silently win or lose depending on source order.
+    grep -v -E '^GITOPS_MIRROR_(URL|TOKEN|USER)=' "$MANUAL_SECRETS_FILE" \
+        > "${MANUAL_SECRETS_FILE}.tmp" 2>/dev/null || true
+    mv "${MANUAL_SECRETS_FILE}.tmp" "$MANUAL_SECRETS_FILE"
+    {
+        echo "GITOPS_MIRROR_URL=${MIRROR_URL_IN}"
+        echo "GITOPS_MIRROR_TOKEN=${MIRROR_TOKEN_IN}"
+    } >> "$MANUAL_SECRETS_FILE"
+    chmod 600 "$MANUAL_SECRETS_FILE"
+    log_info "Mirror credentials → ${MANUAL_SECRETS_FILE#"${REPO_ROOT}/"}"
+elif [[ -n "$MIRROR_URL_IN" ]]; then
+    log_warn "Mirror URL given without a token — skipped. Add both to"
+    log_warn "  ${MANUAL_SECRETS_FILE#"${REPO_ROOT}/"}"
+else
+    log_info "No off-cluster mirror: the GitOps repository will exist only in this cluster"
+fi
+
 
 # ─── Optionally create the state store ────────────────────────────────
 #

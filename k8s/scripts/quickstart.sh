@@ -266,14 +266,32 @@ det_vault() {
 # The generated client-secret file is the marker, but it survives a cluster rebuild,
 # so Keycloak itself must also be running. Matched by label rather than pod name,
 # which depends on the chart's release name.
+#
+# Neither of those proves the realm is there: recreating the data-services
+# PostgreSQL leaves the file and the pod intact while Keycloak comes back with an
+# empty schema and a master realm only — every OIDC login then 404s at
+# /realms/devops. So ask Keycloak. The API server's service proxy is the way in:
+# the container image carries no curl, and *.localhost cannot be resolved from a
+# pod.
 det_keycloak() {
     [[ -f "${ENV_DIR}/oidc-secrets.env" ]] || return 1
-    kc get pod -n keycloak -l app=keycloak -o name 2>/dev/null | grep -q .
+    kc get pod -n keycloak -l app=keycloak -o name 2>/dev/null | grep -q . || return 1
+    kc get --raw \
+        "/api/v1/namespaces/keycloak/services/keycloak-service:8080/proxy/realms/devops/.well-known/openid-configuration" \
+        2>/dev/null | grep -q authorization_endpoint
 }
 det_secrets()    { kc get externalsecret forgejo-db-secret -n forgejo >/dev/null; }
 det_appofapps()  { kc get application devhub-apps -n argocd >/dev/null; }
 det_gitops()     { kc get applicationset platform-components -n argocd >/dev/null; }
 det_registered() { kc get secret loki-ingest-credentials -n monitoring >/dev/null; }
+# The environment's own GitOps repository, published into its Forgejo. Detected
+# by ArgoCD holding credentials for it and the Applications no longer reporting
+# Unknown — a repo that exists but that ArgoCD cannot read is not done.
+det_gitopsrepo() {
+    kc get secret "repo-${ENV}" -n argocd >/dev/null 2>&1 || return 1
+    ! kc get application -n argocd -o jsonpath='{.items[*].status.sync.status}' 2>/dev/null \
+        | grep -q Unknown
+}
 
 # ─── Step table ───────────────────────────────────────────────────────
 #
@@ -303,6 +321,7 @@ if [[ "$ENV" == "local" ]]; then
     step secrets   "Credentials moved into Vault"            det_secrets   "secrets --env ${ENV}"
     step appofapps "ArgoCD app-of-apps"                      det_appofapps "deploy --env ${ENV} bootstrap"
     step gitops    "Platform handed to ArgoCD"               det_gitops    "gitops --env ${ENV}"
+    step gitopsrepo "GitOps repository published"            det_gitopsrepo "gitops-repo --env ${ENV}"
 elif [[ "$TIER" == "workload" ]]; then
     step tools     "Required tooling installed"              det_tools     "doctor"
     step prereq    "Prerequisites confirmed"                 det_prereq    "preflight --env ${ENV}"
@@ -334,6 +353,7 @@ else
     step secrets   "Credentials moved into Vault"            det_secrets   "secrets --env ${ENV}"
     step appofapps "ArgoCD app-of-apps"                      det_appofapps "deploy --env ${ENV} bootstrap"
     step gitops    "Platform handed to ArgoCD"               det_gitops    "gitops --env ${ENV}"
+    step gitopsrepo "GitOps repository published"            det_gitopsrepo "gitops-repo --env ${ENV}"
 fi
 
 # Populated by refresh_state(): "done" / "todo" per step, and the first pending index.
@@ -428,13 +448,15 @@ print_checklist() {
         fi
         print_login_hint
         windows_setup_note "$d"
-        # The one thing no script can do for you: the GitOps repo has to exist.
+        # devhub's job ends here. Saying so is the point: an environment that
+        # still looks like it needs the installer invites someone to keep
+        # running it against a cluster that has moved on.
         local repo; repo="$(yaml_get "$CONFIG_FILE" gitops.repoUrl)"
-        if [[ -n "$repo" ]] && kc get application -n argocd -o jsonpath='{.items[*].status.sync.status}' 2>/dev/null | grep -q Unknown; then
+        if [[ -n "$repo" ]]; then
             echo ""
-            log_warn "ArgoCD cannot read ${repo} yet — its Applications show Sync=Unknown."
-            log_warn "Create the repository in Forgejo, then push this checkout to it:"
-            log_warn "  git remote add forgejo ${repo} && git push forgejo main"
+            log_info "${ENV} is standalone. Work on it from its own repository:"
+            log_info "  ${repo}"
+            log_info "This devhub checkout is no longer part of it."
         fi
     else
         local action="${STEP_ACTION[$NEXT_INDEX]}"

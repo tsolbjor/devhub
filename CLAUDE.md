@@ -13,6 +13,33 @@ Kubernetes DevOps platform with three layers:
 Platform environments: `local` (Rancher Desktop/WSL2), `upcloud-dev`, `upcloud-prod`, `azure-dev`, `azure-prod`, `gcp-dev`, `gcp-prod`, `aws-dev`, `aws-prod`.
 Workload environments: `upcloud-workload`, `azure-workload`, `gcp-workload`, `aws-workload`.
 
+## Lifecycle: devhub is an installer, not a runtime dependency
+
+devhub sets an environment up and then gets out of the way. The last step,
+`./devhub gitops-repo --env <env>`, publishes a **standalone** copy of the
+platform into that environment's own Forgejo and points its ArgoCD at it. From
+then on the environment owns its own history and can diverge freely — there is no
+upstream to pull from and no upgrade path back.
+
+What follows from that:
+
+- `setup-gitops-repo.sh` prunes as it copies: other clouds and environments are
+  cut away, and the overlay's `devops/` symlink is dereferenced into real files
+- the generated repo **commits** `backend.hcl` and `*.tfvars` (inverting this
+  repo's `.gitignore`) — without them nobody can `tofu init` the environment
+- `renovate.json` ships, so chart pins keep moving after the link is cut
+- installer-only scripts (`quickstart.sh`, `setup-env.sh`, `preflight.sh`,
+  `setup-gitops-repo.sh`) do not ship; `devhub` reports that rather than failing
+  on a missing file
+- the staged tree is scanned for credentials and key material before any commit;
+  publishing aborts rather than warns
+- `.devhub-origin` records the generating version. Provenance only — nothing
+  reads it
+
+The environment's Forgejo is the source of truth; an off-cluster **push mirror**
+(`GITOPS_MIRROR_URL`) is the copy that survives losing the cluster. It carries git
+refs only — issues, packages and registry blobs are Velero's job.
+
 ## Common Commands
 
 ### Entry point: `./devhub`
@@ -55,6 +82,7 @@ Standard flow from a fresh clone:
 ./devhub doctor                   # required/optional tooling present?
 ./devhub envs                     # per-environment state (tofu init? outputs? kubeconfig?)
 ./devhub validate [--helm] [env]  # static checks, no cluster needed
+./devhub validate --e2e --env <env>  # browser end-to-end against the live environment
 source <(./devhub completion)     # bash completion
 
 ./devhub preflight --env <env> [--dns|--recheck]          # external prerequisites
@@ -65,6 +93,9 @@ source <(./devhub completion)     # bash completion
 ./devhub bootstrap --env <env>               # setup-all.sh
 ./devhub vault|keycloak|ca|cluster --env <env>
 ./devhub db-users|secrets|gitops --env <env>
+./devhub gitops-repo --env <env>             # publish the standalone env repo
+                                             #   --stage-only <dir>  build and inspect
+                                             #   --no-mirror         skip the mirror
 ./devhub register --env <workload> [--platform-env <env>]
 ./devhub status --env <env>
 eval "$(./devhub kubeconfig --env <env>)"
@@ -126,6 +157,11 @@ does not match the environment.
 # Static validation (no cluster, no credentials — same checks CI runs)
 ./validate-overlays.sh
 ./validate-overlays.sh --helm local
+
+# End-to-end validation of a *deployed* environment (browser, real SSO login)
+./validate-e2e.sh --env local
+./validate-e2e.sh --env local --grep grafana     # one service
+./validate-e2e.sh --env local --headed --report  # watch it, then open the report
 ```
 
 ### Workload Cluster
@@ -308,6 +344,9 @@ devhub/
 │   │   ├── quickstart.sh              #   guided, resumable walkthrough
 │   │   ├── preflight.sh               #   external prerequisites (cloud, domain, DNS)
 │   │   └── setup-env.sh               #   wizard: backend.hcl + tfvars + config.yaml
+│   ├── e2e/                           # Playwright end-to-end validation of a live environment
+│   │   ├── lib/                       #   env, SSO helpers, in-browser HTTP, local-noise policy
+│   │   └── tests/                     #   one spec per service, numbered to run in order
 │   ├── templates/app-template/        # developer app scaffold (rootless CI, hardened manifests)
 │   └── docs/                          # guides
 ```
@@ -320,6 +359,7 @@ devhub/
 | `k8s/docs/ADDING_A_CLOUD.md` | Checklist for adding a provider (worked example: Scaleway) |
 | `k8s/docs/OPERATIONS.md` | **Day two**: state, secrets/rotation, backups/restore, GitOps, access, alerting, cost |
 | `k8s/docs/LOCAL_SETUP.md` | Local dev with Rancher Desktop / WSL2 |
+| `k8s/e2e/README.md` | What `validate --e2e` asserts per service, and how to add a check |
 | `k8s/docs/{UPCLOUD,AZURE,GCP,AWS}_SETUP.md` | Per-cloud deployment walkthroughs |
 | `k8s/docs/KEYCLOAK_SSO.md` | Realm/client/IdP federation setup |
 | `k8s/docs/SSO_TESTING_GUIDE.md` | End-to-end SSO testing |
@@ -327,6 +367,13 @@ devhub/
 ## Key Conventions
 
 - `./devhub` is routing only; behaviour belongs in `k8s/scripts/*.sh`
+- Two validators, two questions: `validate` asks "would this deploy?" (static, no
+  cluster, what CI runs); `validate --e2e` asks "does what was deployed work?"
+  (Playwright, one Keycloak sign-in, read-only assertions per service). A new
+  service needs a spec in `k8s/e2e/tests/` or its breakage is invisible
+- The e2e suite drives everything through Chromium, including API calls
+  (`lib/http.js`): Node resolves `*.localhost` through glibc and fails, Chromium
+  resolves it to loopback itself. Never reach for Playwright's `request` fixture
 - New setup steps need three things: the script, a `devhub` command, and a
   detector + row in `quickstart.sh`'s step table (otherwise the checklist lies)
 - Bash scripts use `set -euo pipefail` with colored logging (`[INFO]`, `[WARN]`, `[ERROR]`, `[STEP]`, `[PHASE]`)
@@ -335,12 +382,16 @@ devhub/
 - Every script calls `use_env_kubeconfig` + `require_cluster_match` before touching a cluster
 - Rendered Helm values go to a per-run `mktemp -d` directory, not fixed `/tmp` paths
 - Helm chart versions are pinned in three places (deploy scripts, `platform-appset.yaml`, docs) — Renovate groups them into one PR
-- `.terraform.lock.hcl` **is** committed; `backend.hcl` and `*.tfvars` are not
+- `.terraform.lock.hcl` **is** committed; `backend.hcl` and `*.tfvars` are not — in *this* repo. A generated environment repo commits them (see Lifecycle)
 - Adding a `${VAR}` to a values file means adding it to `TEMPLATE_VARS` too, or `validate-overlays.sh` fails
 - YAML files must not have duplicate keys (silent override) — the validator enforces this
 - Cloud overlay envs symlink `devops/` from their shared cloud overlay; only `config.yaml` is per-env
 - New platform component: add base values, per-cloud overlay values, an entry in `platform-appset.yaml`, a chart pin at the top of `deploy.sh`, and (if bootstrap-critical) an install function
 - Routing is Gateway API: add a listener to `overlays/<env>/devops/gateway.yaml` and an `HTTPRoute` to `httproutes.yaml`; never an Ingress. A new local hostname also needs a line in `k8s/scripts/windows/setup-hosts.ps1`, or it resolves in WSL and 404s in the Windows browser
+- ArgoCD clones `${GITOPS_REPO_URL_INTERNAL}`, not `${GITOPS_REPO_URL}`: on local
+  the repo is only reachable in-cluster by Forgejo's Service name, because glibc
+  answers `*.localhost` in `getaddrinfo` before `/etc/hosts` and a hostAlias
+  cannot override it. Elsewhere the two are equal
 - Keycloak is the **operator** (`k8s.keycloak.org/v2beta1`), pod `keycloak-0`, service `keycloak-service:8080`
 - GCP OAuth client must be created manually (no Terraform resource) → `manual-secrets.env`
 - AWS Cognito domain prefix and all bucket names are globally unique; prefix with the account/project

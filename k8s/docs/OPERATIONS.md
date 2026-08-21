@@ -147,6 +147,7 @@ denied, so a leaked admin token cannot switch auditing off to cover its tracks.
 | Cluster objects + PVs | Velero (`velero` namespace) | daily 02:00 full, hourly platform state | 30d / 7d, plus bucket lifecycle |
 | Vault storage | `vault-raft-snapshot` CronJob | every 6h | last 28 snapshots on a PVC |
 | Forgejo (repos, packages, registry blobs) | Velero snapshots its PVC | daily 02:00 + hourly platform state | 30d / 7d |
+| GitOps repository (git refs only) | Forgejo push mirror to an off-cluster remote | on every commit | remote's own |
 | Managed PostgreSQL | Cloud-native PITR | continuous | `rds_backup_retention_days` / equivalent |
 | Managed Redis/Valkey | Cloud snapshots | daily | `redis_snapshot_retention_days` |
 
@@ -176,6 +177,54 @@ kubectl exec -n vault vault-0 -- vault operator raft snapshot restore /tmp/vault
 Alerts fire when this stops working: `VeleroBackupFailed`,
 `VeleroNoRecentBackup`, `VaultSnapshotJobFailed`.
 
+### The GitOps repository is inside the cluster it manages
+
+This is deliberate — the platform hosts its own tooling — but it means the
+repository describing the environment dies with the environment. Two things
+cover that, and they cover different halves:
+
+- **The push mirror** (`GITOPS_MIRROR_URL`, configured by `setup-gitops-repo.sh`)
+  syncs on every commit, so git history is seconds behind at worst. It carries
+  **refs only**: no issues, pull requests, releases, packages or registry blobs.
+  It force-overwrites the remote, so never commit directly there — those commits
+  are destroyed on the next sync.
+- **Velero** captures Forgejo's PVC, which is where everything the mirror omits
+  actually lives.
+
+An environment with neither has exactly one copy of its own definition.
+
+### Rebuilding an environment from nothing
+
+Order matters, and it is not circular the way it first appears: Forgejo is part
+of the imperative bootstrap set, so it comes back before ArgoCD needs it.
+
+```bash
+# 1. Infrastructure
+cd tofu/<cloud>/<tier> && tofu init -backend-config=backend.hcl && tofu apply
+
+# 2. Platform, imperatively — this installs Forgejo itself
+./devhub sync   --env <env>
+./devhub deploy --env <env>
+
+# 3. Vault, from a raft snapshot (see the sketches above), then unseal
+
+# 4. Forgejo's content: restore the PVC, which brings back repositories,
+#    packages and the registry in one step
+velero restore create --from-backup <daily-full> --include-namespaces forgejo
+
+#    If the PVC is unrecoverable, push the mirror back into the fresh Forgejo
+#    instead and accept losing issues, packages and registry blobs:
+#      git clone --mirror <GITOPS_MIRROR_URL> && cd <repo>.git
+#      git push --mirror https://git.<domain>/<org>/<repo>.git
+
+# 5. Point ArgoCD at the repository again and let it reconcile the rest
+./devhub deploy --env <env> bootstrap
+./devhub deploy --env <env> gitops
+```
+
+Step 5 is where the platform starts healing itself: everything ArgoCD owns comes
+back from git without further intervention.
+
 ---
 
 ## 5. GitOps
@@ -193,6 +242,19 @@ self-heal.
 
 Bootstrap-critical components stay imperative because GitOps cannot install
 itself: Envoy Gateway, Keycloak, Vault, Forgejo, and ArgoCD.
+
+The repository ArgoCD reads is **this environment's own**, published by
+`./devhub gitops-repo --env <env>` into the environment's Forgejo. devhub
+generated it and is not referenced again: there is no upstream to pull from and
+no upgrade path back, by design. `renovate.json` ships with the environment so
+chart pins keep moving anyway.
+
+On a local environment ArgoCD clones Forgejo's in-cluster Service
+(`http://forgejo-http.forgejo.svc.cluster.local:3000/...`) rather than
+`https://git.localhost`. glibc answers `*.localhost` with 127.0.0.1 inside
+`getaddrinfo`, before `/etc/hosts` is read, so a pod cloning the public hostname
+dials itself and a hostAlias cannot override it. `GITOPS_REPO_URL_INTERNAL` in
+`lib/common.sh` is that distinction; everywhere else the two URLs are identical.
 
 Developer apps are discovered by the `forgejo-workloads` ApplicationSet: a matrix
 of Forgejo repositories in the `devhub` organisation × clusters labelled

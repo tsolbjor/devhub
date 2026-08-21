@@ -137,20 +137,42 @@ cmd_infra() {
     esac
 }
 
+# Commands that set an environment *up*. setup-gitops-repo.sh deliberately does
+# not ship them into a generated environment repository — an environment has no
+# use for the installer that made it — so resolve them with an explanation
+# rather than letting exec fail with "no such file or directory".
+installer_script() {
+    local script="${SCRIPTS}/$1"
+    if [[ ! -f "$script" ]]; then
+        log_error "'${COMMAND}' is an installer command and is not part of an environment repository."
+        log_error "Environments are standalone by design. To create another one, use a"
+        log_error "devhub checkout: https://github.com/tsolbjor/devhub"
+        exit 1
+    fi
+    echo "$script"
+}
+
 cmd_quickstart() {
     local extra=()
     [[ -n "$ENV_ARG" ]] && extra=(--env "$ENV_ARG")
-    exec "${SCRIPTS}/quickstart.sh" "${extra[@]+"${extra[@]}"}" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+    exec "$(installer_script quickstart.sh)" "${extra[@]+"${extra[@]}"}" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
 }
 
 cmd_preflight() {
     check_env "$ENV_ARG"
-    exec "${SCRIPTS}/preflight.sh" --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+    exec "$(installer_script preflight.sh)" --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
 }
 
 cmd_setup() {
     check_env "$ENV_ARG"
-    exec "${SCRIPTS}/setup-env.sh" --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+    exec "$(installer_script setup-env.sh)" --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+}
+
+# Publish this environment's standalone GitOps repository into its own Forgejo
+# and point ArgoCD at it. The last step devhub takes for an environment.
+cmd_gitops_repo() {
+    check_env "$ENV_ARG"
+    exec "$(installer_script setup-gitops-repo.sh)" --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
 }
 
 cmd_sync() {
@@ -235,9 +257,12 @@ cmd_bootstrap() {
     # Closing DNS reminder with the address people actually need.
     if [[ -n "$dir" ]]; then
         local lb
-        lb="$(KUBECONFIG="${SCRIPTS}/${ENV_ARG}/kubeconfig" kubectl get svc -n ingress-nginx \
-              ingress-nginx-controller \
-              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}' \
+        # The Envoy data-plane Service, created by Envoy Gateway and named after
+        # the Gateway it serves — ingress-nginx has not existed since the Gateway
+        # API migration, so this printed nothing at all.
+        lb="$(KUBECONFIG="${SCRIPTS}/${ENV_ARG}/kubeconfig" kubectl get svc -n envoy-gateway-system \
+              -l gateway.envoyproxy.io/owning-gateway-name=devhub \
+              -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}{.items[0].status.loadBalancer.ingress[0].ip}' \
               2>/dev/null || true)"
         if [[ -n "$lb" ]]; then
             echo ""
@@ -291,8 +316,33 @@ cmd_status() {
     exec "${SCRIPTS}/deploy.sh" --env "$ENV_ARG" all status
 }
 
+# Two depths, one verb.
+#
+#   validate            static: YAML, config keys, placeholders, chart rendering.
+#                       No cluster, no credentials — what CI runs on every push.
+#   validate --e2e      the deployed environment, through a browser: sign in
+#                       with Keycloak once and assert what each service returns.
+#
+# They answer different questions ("would this deploy?" vs "does what was
+# deployed work?"), and the second needs a live cluster and an admin password,
+# so it is opt-in rather than the default.
 cmd_validate() {
-    exec "${SCRIPTS}/validate-overlays.sh" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+    local e2e=false rest=()
+    local arg
+    for arg in "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"; do
+        if [[ "$arg" == "--e2e" ]]; then
+            e2e=true
+        else
+            rest+=("$arg")
+        fi
+    done
+
+    if $e2e; then
+        check_env "$ENV_ARG"
+        exec "${SCRIPTS}/validate-e2e.sh" --env "$ENV_ARG" "${rest[@]+"${rest[@]}"}"
+    fi
+
+    exec "${SCRIPTS}/validate-overlays.sh" "${rest[@]+"${rest[@]}"}"
 }
 
 # Print the export line for an environment's kubeconfig. Use with eval:
@@ -390,8 +440,8 @@ _devhub() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     commands="quickstart setup infra sync deploy bootstrap register vault keycloak
-              ca cluster secrets gitops db-users status validate kubeconfig envs
-              doctor completion help preflight"
+              ca cluster secrets gitops gitops-repo db-users status validate kubeconfig
+              envs doctor completion help preflight"
     envs="local upcloud-dev upcloud-prod azure-dev azure-prod gcp-dev gcp-prod
           aws-dev aws-prod upcloud-workload azure-workload gcp-workload aws-workload"
 
@@ -401,6 +451,7 @@ _devhub() {
         quickstart) COMPREPLY=($(compgen -W "--env --status --run-remaining-steps --auto" -- "$cur")); return ;;
         setup) COMPREPLY=($(compgen -W "--env --dry-run --force --non-interactive --yes" -- "$cur")); return ;;
         preflight) COMPREPLY=($(compgen -W "--env --dns --recheck" -- "$cur")); return ;;
+        gitops-repo) COMPREPLY=($(compgen -W "--env --stage-only --no-mirror --force" -- "$cur")); return ;;
     esac
 
     if [[ $COMP_CWORD -eq 1 ]]; then
@@ -456,12 +507,22 @@ Identity, secrets, GitOps
   keycloak --env <env> [action]   realm | clients | user | idp | all
   secrets --env <env>             move platform credentials into Vault + ExternalSecrets
   gitops --env <env>              hand platform components over to ArgoCD
+  gitops-repo --env <env>         publish the environment's standalone GitOps
+                                  repository to its Forgejo and point ArgoCD at it.
+                                  From then on the environment is independent of devhub
+                                    --stage-only <dir>   build it and stop, to inspect
+                                    --no-mirror          skip the off-cluster mirror
   db-users --env <env>            create managed-PostgreSQL users (once per database)
 
 Inspection
   status --env <env>              pods, Vault seal state, backups, GitOps state
   envs                            what state every environment is in
   validate [--helm] [env...]      static checks (no cluster needed)
+  validate --e2e --env <env>      browser end-to-end: sign in with Keycloak and
+                                  check every service returns real data
+                                    --grep <pattern>  one service only
+                                    --headed          watch it run
+                                    --report          open the HTML report
   doctor                          check required tooling
   kubeconfig --env <env>          print the KUBECONFIG export line
   completion                      bash completion script
@@ -521,6 +582,7 @@ case "$COMMAND" in
     cluster)        cmd_cluster ;;
     secrets)        cmd_secrets ;;
     gitops)         cmd_gitops ;;
+    gitops-repo)    cmd_gitops_repo ;;
     db-users)       cmd_dbusers ;;
     status)         cmd_status ;;
     validate)       cmd_validate ;;

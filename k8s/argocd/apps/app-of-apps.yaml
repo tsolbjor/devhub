@@ -1,9 +1,13 @@
 # App-of-Apps: root ArgoCD Application.
 #
 # Manages every other Application/ApplicationSet in this directory.
-# deploy.sh templates ${GITOPS_REPO_URL} / ${GITOPS_REVISION} from
+# deploy.sh templates ${GITOPS_REPO_URL_INTERNAL} / ${GITOPS_REVISION} from
 # overlays/<env>/config.yaml before applying — a hardcoded local URL would point
 # a cloud environment's ArgoCD at a repository that does not exist.
+#
+# _INTERNAL, not the plain URL: on local the repository is only reachable from
+# inside the cluster by Forgejo's Service name. See common.sh for why a hostAlias
+# cannot paper over a *.localhost hostname.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -15,7 +19,7 @@ spec:
   project: default
 
   source:
-    repoURL: ${GITOPS_REPO_URL}
+    repoURL: ${GITOPS_REPO_URL_INTERNAL}
     targetRevision: ${GITOPS_REVISION}
     path: k8s/argocd/apps
     directory:

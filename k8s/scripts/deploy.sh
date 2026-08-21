@@ -794,6 +794,13 @@ install_argocd() {
     # keycloak.localhost, and glibc resolves *.localhost to 127.0.0.1 before DNS.
     # A hostAlias pointing at the Envoy data-plane service makes the call land on
     # the gateway instead.
+    #
+    # Note what this cannot fix: git.${DOMAIN}. glibc applies the *.localhost rule
+    # inside getaddrinfo, ahead of /etc/hosts, so curl and git ignore the alias
+    # even though `getent hosts` honours it — a repo-server clone of
+    # https://git.localhost fails with "could not connect" against its own
+    # loopback. The GitOps repository is therefore addressed by Forgejo's Service
+    # name instead; see GITOPS_REPO_URL_INTERNAL in lib/common.sh.
     local extra_args=""
     if [[ "$ENV" == "local" ]]; then
         local gw_ip
@@ -806,6 +813,17 @@ install_argocd() {
         else
             log_warn "Envoy data-plane service not found — ArgoCD SSO may fail to discover Keycloak"
         fi
+    fi
+
+    # A local CA with a real domain (rather than *.localhost) does reach Forgejo
+    # over HTTPS, and then the clone fails verification unless ArgoCD holds the
+    # CA. The chart takes a map of server name → PEM; every dot in the key has to
+    # be escaped for --set-file.
+    if [[ "$TLS_TYPE" == "local-ca" && -f "${CERTS_DIR}/ca/ca.crt" && "$GITOPS_REPO_URL_INTERNAL" == https://* ]]; then
+        local git_host_key="git.${DOMAIN}"
+        git_host_key="${git_host_key//./\\.}"
+        extra_args="${extra_args} --set-file configs.tls.certificates.${git_host_key}=${CERTS_DIR}/ca/ca.crt"
+        log_info "ArgoCD trusts the local CA for git.${DOMAIN}"
     fi
 
     helm upgrade --install argocd argo/argo-cd \
@@ -940,14 +958,13 @@ enable_gitops_platform() {
     log_warn "reloader, woodpecker, velero."
     log_warn "Change them through git from now on — a manual 'helm upgrade' will be reverted."
     echo ""
-    log_info "The Applications stay 'Unknown' until ${GITOPS_REPO_URL} exists and holds"
-    log_info "this repository. Create it in Forgejo (organisation 'devhub', repo 'devhub'), then:"
-    log_info "  git remote add forgejo ${GITOPS_REPO_URL}"
-    # targetRevision is often HEAD, which is not a branch you can push to.
-    local push_ref="${GITOPS_REVISION}"
-    [[ "$push_ref" == "HEAD" || -z "$push_ref" ]] && push_ref="main"
-    log_info "  git push forgejo ${push_ref}"
-    log_info "Private repo: add the credentials to ArgoCD with 'argocd repo add'."
+    log_info "The Applications stay 'Unknown' until this environment's own GitOps"
+    log_info "repository exists and ArgoCD can read it:"
+    log_info "  ./devhub gitops-repo --env ${ENV}"
+    log_info ""
+    log_info "That creates ${GITOPS_REPO_URL}, pushes a standalone copy of the"
+    log_info "platform into it, and registers the credentials with ArgoCD. The"
+    log_info "environment is independent of devhub from that point on."
 }
 
 # Move platform credentials into Vault and let External Secrets deliver them.

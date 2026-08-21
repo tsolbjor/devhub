@@ -181,6 +181,23 @@ parse_config() {
     DATA_SERVICES_TYPE="${DATA_SERVICES_TYPE:-local}"
     GITOPS_REVISION="${GITOPS_REVISION:-HEAD}"
 
+    # The URL ArgoCD clones from, which is not always the URL a human clones from.
+    #
+    # On local, gitops.repoUrl is https://git.localhost/... — reachable from the
+    # workstation through the gateway, and unreachable from inside the cluster:
+    # glibc answers *.localhost with 127.0.0.1 in getaddrinfo before /etc/hosts is
+    # consulted, so a pod dials itself and a hostAlias cannot override it (the
+    # same reason Keycloak's server-side endpoints use KEYCLOAK_INTERNAL_URL).
+    # ArgoCD therefore addresses Forgejo by its Service, over plain HTTP inside
+    # the cluster. Everywhere else the two URLs are identical.
+    if [[ "$DOMAIN" == "localhost" || "$DOMAIN" == *.localhost ]]; then
+        local repo_path="${GITOPS_REPO_URL#*://}"
+        repo_path="${repo_path#*/}"
+        export GITOPS_REPO_URL_INTERNAL="http://forgejo-http.forgejo.svc.cluster.local:3000/${repo_path}"
+    else
+        export GITOPS_REPO_URL_INTERNAL="$GITOPS_REPO_URL"
+    fi
+
     load_tofu_outputs
     default_infra_vars
 }
@@ -279,7 +296,7 @@ ${VAULT_KMS_KEY_ID} ${VAULT_KMS_IRSA_ROLE_ARN} ${VAULT_IDENTITY_CLIENT_ID}
 ${VAULT_KEY_VAULT_NAME} ${VAULT_KEY_NAME} ${VAULT_GSA_EMAIL}
 ${VAULT_KMS_REGION} ${VAULT_KMS_KEY_RING} ${VAULT_KMS_CRYPTO_KEY}
 ${ENTRA_TENANT_ID} ${PLATFORM_LOKI_URL} ${PLATFORM_VAULT_URL}
-${ENV} ${GITOPS_REPO_URL} ${GITOPS_REVISION}'
+${ENV} ${GITOPS_REPO_URL} ${GITOPS_REPO_URL_INTERNAL} ${GITOPS_REVISION}'
 
 # Template a file with the allow-listed environment variables.
 template_values() {
