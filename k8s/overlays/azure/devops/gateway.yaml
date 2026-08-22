@@ -138,6 +138,18 @@ spec:
         certificateRefs:
           - kind: Secret
             name: homepage-tls
+    - name: portal-https
+      protocol: HTTPS
+      port: 443
+      hostname: "portal.${DOMAIN}"
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: portal-tls
     - name: loki-https
       protocol: HTTPS
       port: 443

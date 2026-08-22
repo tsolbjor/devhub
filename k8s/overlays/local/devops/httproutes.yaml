@@ -156,3 +156,20 @@ spec:
     - backendRefs:
         - name: homepage
           port: 3000
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: portal
+  namespace: portal
+spec:
+  parentRefs:
+    - name: devhub
+      namespace: gateway
+      sectionName: portal-https
+  hostnames:
+    - "portal.${DOMAIN}"
+  rules:
+    - backendRefs:
+        - name: portal
+          port: 8080

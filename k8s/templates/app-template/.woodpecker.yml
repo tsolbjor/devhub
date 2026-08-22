@@ -4,8 +4,10 @@
 # the nodeSelector and toleration). No Docker daemon, no privileged container:
 # images are built with rootless BuildKit and pushed to Forgejo's registry.
 #
-# Secrets used (add them in the Woodpecker UI, repo settings → Secrets):
-#   registry_user, registry_token   — a Forgejo token with write:package
+# Secrets used: registry_user, registry_token — provided as Woodpecker *org*
+# secrets on the devhub org (`deploy.sh <env> ci-secrets`), scoped to push
+# events so pull-request builds from untrusted code cannot read them. Nothing
+# to add per repository; a missing secret means ci-secrets has not been run.
 
 when:
   - event: [push, pull_request]

@@ -157,7 +157,7 @@ configure_groups_scope() {
 
     kcadm update realms/${REALM}/default-default-client-scopes/${scope_id} -r ${REALM} 2>/dev/null || true
 
-    for client_name in "grafana" "argocd" "forgejo" "vault" "headlamp" "homepage"; do
+    for client_name in "grafana" "argocd" "forgejo" "vault" "headlamp" "homepage" "portal"; do
         local client_id=$(kcadm get clients -r ${REALM} --fields id,clientId 2>/dev/null | grep "\"clientId\" : \"${client_name}\"" -B 1 | grep "\"id\"" | cut -d'"' -f4 || echo "")
         if [[ -n "$client_id" ]]; then
             kcadm update clients/${client_id}/default-client-scopes/${scope_id} -r ${REALM} 2>/dev/null || true
@@ -330,6 +330,18 @@ configure_clients() {
 
     kubectl create secret generic homepage-oidc-secret -n homepage \
         --from-literal=client-secret="${homepage_secret}" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    # Portal — same shape as Homepage: Envoy Gateway is the OIDC client on its
+    # behalf (k8s/base/devops/portal/oidc-securitypolicy.yaml).
+    log_info "Configuring Portal OIDC client..."
+    local portal_secret=$(create_client "portal" \
+        "https://portal.${DOMAIN}/oauth2/callback")
+    echo "PORTAL_OIDC_SECRET=${portal_secret}" >> "${secrets_file}"
+
+    kubectl create namespace portal 2>/dev/null || true
+    kubectl create secret generic portal-oidc-secret -n portal \
+        --from-literal=client-secret="${portal_secret}" \
         --dry-run=client -o yaml | kubectl apply -f -
 
     log_info "Client secrets saved to: ${secrets_file}"

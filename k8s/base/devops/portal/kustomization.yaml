@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Portal — the platform's developer wizard (see README.md in this directory).
+#
+# The application code ships as a ConfigMap rather than a container image: the
+# portal must be installable before the platform's own registry and CI exist
+# (deploy.sh installs it, ArgoCD adopts it), so it cannot depend on an image
+# nothing has built yet. The generated name hash means an edit to server.js or
+# index.html rolls the Deployment automatically, on both the imperative install
+# and the ArgoCD-managed one.
+
+resources:
+  - deployment.yaml
+  - oidc-securitypolicy.yaml
+
+configMapGenerator:
+  - name: portal-app
+    namespace: portal
+    files:
+      - server.js
+      - index.html

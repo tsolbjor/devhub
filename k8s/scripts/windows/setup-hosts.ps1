@@ -38,6 +38,7 @@ $Domains = @(
     # k8s/overlays/local/devops/gateway.yaml. Adding a listener there without
     # adding it here means the service works in-cluster and 404s from Windows.
     "home.localhost",
+    "portal.localhost",
     "keycloak.localhost",
     "vault.localhost",
     "git.localhost",

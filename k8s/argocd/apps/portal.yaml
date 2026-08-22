@@ -1,0 +1,40 @@
+# Portal — ArgoCD ownership after the GitOps handover.
+#
+# The portal is raw manifests + a kustomize configMapGenerator, not a Helm
+# chart, so it cannot ride platform-appset (whose template is chart-shaped).
+# It gets its own Application instead; the app-of-apps picks up every file in
+# this directory.
+#
+# deploy.sh installs the same kustomization imperatively during bootstrap; from
+# the handover on, this Application reconciles it from the environment's own
+# repository and a hand-edit is reverted on the next sync.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-portal
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: devhub
+    devhub.io/component: portal
+spec:
+  project: default
+  source:
+    repoURL: ${GITOPS_REPO_URL_INTERNAL}
+    targetRevision: ${GITOPS_REVISION}
+    path: k8s/base/devops/portal
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: portal
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 10m

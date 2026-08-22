@@ -88,6 +88,10 @@ config:
 
   services:
     - Delivery:
+        - Portal:
+            href: https://portal.${DOMAIN}
+            description: New application wizard — repo, CI, namespace, work items
+            icon: mdi-rocket-launch
         - Forgejo:
             href: https://git.${DOMAIN}
             description: Git repositories, packages, container registry
@@ -147,7 +151,7 @@ config:
     layout:
       Delivery:
         style: row
-        columns: 3
+        columns: 4
       Observability:
         style: row
         columns: 2

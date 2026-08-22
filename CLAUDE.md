@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Kubernetes DevOps platform with three layers:
 1. **Infrastructure (OpenTofu)** — provisions K8s clusters and managed data services on UpCloud, Azure, GCP, or AWS
 2. **Platform cluster (Helm/K8s + ArgoCD)** — DevOps services (Keycloak, Vault, Forgejo, Woodpecker CI, ArgoCD, Prometheus/Grafana/Loki/Tempo/Alloy, Envoy Gateway, cert-manager, External-DNS, Kyverno, Reloader, Velero, Headlamp,
-   Homepage)
+   Homepage, Portal)
 3. **Workload cluster** — lean K8s cluster running developer apps, managed by platform ArgoCD via ApplicationSets
 
 Platform environments: `local` (Rancher Desktop/WSL2), `upcloud-dev`, `upcloud-prod`, `azure-dev`, `azure-prod`, `gcp-dev`, `gcp-prod`, `aws-dev`, `aws-prod`.
@@ -223,9 +223,28 @@ from that list.
 |-------|-----------|-----|
 | `deploy.sh` (imperative) | Envoy Gateway, Keycloak (operator), Vault, Forgejo, ArgoCD | GitOps cannot install itself; these hold the bootstrap credentials and the ingress path |
 | ArgoCD (`k8s/argocd/platform-appset.yaml`) | cert-manager, external-dns, external-secrets, monitoring, loki, tempo, alloy, kyverno, reloader, woodpecker, headlamp, homepage, velero | reconciled from git; drift self-heals |
+| ArgoCD (`k8s/argocd/apps/portal.yaml`) | portal (kustomize, not a chart, so it cannot ride the appset) | reconciled from git; drift self-heals |
 | ArgoCD (`k8s/argocd/apps/forgejo-appset.yaml`) | developer apps | matrix of Forgejo repos × clusters labelled `devhub.io/role=workload` |
 
 Registering a workload cluster is enough to start receiving apps — no manifest edit.
+
+### Portal (internal developer platform)
+
+`https://portal.<domain>` is a wizard that scaffolds a new application: Forgejo
+repo copied from `devhub-templates/app-template` (with `APP_NAME`/`DOMAIN`
+substituted), starter issues, optional dev-grade PostgreSQL/Redis manifests.
+Everything downstream is existing convention — the repo landing in the `devhub`
+org is what makes `forgejo-appset` deploy it, and the `devhub-*` namespace is
+what makes Kyverno fence it. Design rule: **the portal writes git, never the
+cluster** — one Forgejo token, no Kubernetes RBAC. Templates live in the
+`devhub-templates` org because every `devhub`-org repo with `k8s/` gets
+deployed. `deploy.sh --env <env> portal` installs it (and publishes the
+template + mints the token); `portal-templates` republishes the template after
+an edit (force-push of a fresh tree); `WOODPECKER_TOKEN=<ui-token> deploy.sh
+--env <env> ci-secrets` — the one manual step — stores the Woodpecker token so
+the portal auto-activates repos, and sets `registry_user`/`registry_token` as
+Woodpecker org secrets (push events only). See
+`k8s/base/devops/portal/README.md`.
 
 ### Cloud-Specific Managed Services
 
@@ -290,6 +309,9 @@ groups). Client secrets come from `secrets.env` / `manual-secrets.env`.
 - **Homepage**: links only, no service API tokens, no cluster RBAC. It has no
   authentication of its own — an Envoy Gateway `SecurityPolicy` runs the Keycloak
   OIDC flow at the gateway, so the page never serves an anonymous request.
+- **Portal**: same gateway-OIDC pattern as Homepage, and the NetworkPolicy that
+  admits only the gateway is what makes it enforcement — the pod holds a Forgejo
+  token that can create repositories. No Kubernetes RBAC at all.
 - **Ingress**: Envoy Gateway (Gateway API). One `Gateway` owns listeners and TLS;
   each service owns an `HTTPRoute` in its own namespace. cert-manager issues one
   certificate per listener through the gateway shim.
@@ -330,6 +352,7 @@ devhub/
 │   │   │   ├── forgejo/               #   values (git, packages, registry)
 │   │   │   ├── woodpecker/            #   values + CI namespace RBAC
 │   │   │   ├── homepage/              #   link-portal values + OIDC SecurityPolicy
+│   │   │   ├── portal/                #   new-app wizard (ConfigMap-served Node app, kustomize)
 │   │   │   ├── gateway/               #   Envoy Gateway values
 │   │   │   ├── kyverno/               #   values + platform policies
 │   │   │   ├── reloader/              #   values
