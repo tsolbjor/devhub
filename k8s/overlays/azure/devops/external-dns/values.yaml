@@ -1,12 +1,23 @@
 # external-dns Azure overlay — Azure DNS provider via Workload Identity
-# The managed identity client ID is provisioned by tofu and written to config.yaml by sync-tofu-outputs.sh.
+# The managed identity client ID is provisioned by tofu and written to the env
+# files by sync-tofu-outputs.sh.
 
 provider: azure
 
-azure:
-  useWorkloadIdentityExtension: true
-  # resourceGroup: the resource group containing the Azure DNS zone.
-  # Defaults to the cluster resource group — override here if your DNS zone is in a separate RG.
+# The Azure provider reads /etc/kubernetes/azure.json — the chart has no
+# `azure:` values key, so the file arrives as a Secret (created by deploy.sh's
+# install_external_dns: tenantId, subscriptionId, useWorkloadIdentityExtension;
+# no resourceGroup, so zones are found by the domain filter and access is
+# bounded by the identity's DNS Zone Contributor role).
+extraVolumes:
+  - name: azure-config
+    secret:
+      secretName: external-dns-azure-config
+extraVolumeMounts:
+  - name: azure-config
+    mountPath: /etc/kubernetes/azure.json
+    subPath: azure.json
+    readOnly: true
 
 # Workload Identity: annotate the service account so AKS binds the federated credential
 serviceAccount:
