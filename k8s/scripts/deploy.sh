@@ -141,17 +141,11 @@ install_cert_manager() {
 
     log_step "Installing cert-manager..."
 
-    # The ServiceMonitor in the values needs the Prometheus-operator CRDs, and
-    # monitoring arrives later via ArgoCD — on a fresh cluster this install
-    # fails outright with "no matches for kind ServiceMonitor". Disable it for
-    # the bootstrap install; ArgoCD reconciles the full values (monitor
-    # included) once it owns cert-manager and monitoring is on the cluster.
     helm upgrade --install cert-manager jetstack/cert-manager \
         --namespace cert-manager \
         --create-namespace \
         --version "$CHART_CERT_MANAGER" \
         -f "${BASE_DIR}/devops/cert-manager/values.yaml" \
-        --set prometheus.servicemonitor.enabled=false \
         --atomic --timeout 5m
 
     kubectl wait --for=condition=ready pod -l app=webhook -n cert-manager --timeout=60s
@@ -434,13 +428,10 @@ install_vault() {
         fi
     fi
 
-    # ServiceMonitor off at bootstrap: the Prometheus-operator CRDs arrive
-    # later with the monitoring stack; ArgoCD reconciles the full values then.
     helm upgrade --install vault hashicorp/vault \
         --namespace vault \
         --version "$CHART_VAULT" \
         $values_args \
-        --set serverTelemetry.serviceMonitor.enabled=false \
         --atomic --timeout 5m
 
     # Scheduled raft snapshots (consistent backups Vault can actually restore).
@@ -739,13 +730,10 @@ install_forgejo() {
 
     local values_args=$(get_values_args "forgejo")
 
-    # ServiceMonitor off at bootstrap: the Prometheus-operator CRDs arrive
-    # later with the monitoring stack; ArgoCD reconciles the full values then.
     helm upgrade --install forgejo oci://code.forgejo.org/forgejo-helm/forgejo \
         --namespace forgejo \
         --version "$CHART_FORGEJO" \
         $values_args \
-        --set gitea.metrics.serviceMonitor.enabled=false \
         --atomic --timeout 10m
 
     log_info "Forgejo installed — https://git.${DOMAIN}"
@@ -890,15 +878,10 @@ install_argocd() {
         log_info "ArgoCD trusts the local CA for git.${DOMAIN}"
     fi
 
-    # ServiceMonitors off at bootstrap: the Prometheus-operator CRDs arrive
-    # later with the monitoring stack; ArgoCD reconciles the full values then.
     helm upgrade --install argocd argo/argo-cd \
         --namespace argocd \
         --version "$CHART_ARGOCD" \
         $values_args $extra_args \
-        --set server.metrics.serviceMonitor.enabled=false \
-        --set repoServer.metrics.serviceMonitor.enabled=false \
-        --set controller.metrics.serviceMonitor.enabled=false \
         --atomic --timeout 5m
 
     log_info "ArgoCD installed"
@@ -1462,13 +1445,15 @@ deploy_devops() {
     # only exists once a Gateway has been created. Routes whose backends are not
     # deployed yet simply report unresolved until they are.
     apply_gateway_routes
+    # Monitoring before every other component: it owns the
+    # ServiceMonitor/PrometheusRule CRDs, and nearly everything below ships a
+    # ServiceMonitor in its values — helm refuses the whole release when the
+    # CRD is missing ("no matches for kind ServiceMonitor").
+    install_monitoring
     install_cert_manager
     install_external_dns
     install_cluster_autoscaler
     install_data_services
-    # Monitoring first: it owns the ServiceMonitor/PrometheusRule CRDs that later
-    # components register against.
-    install_monitoring
     install_vault
     install_external_secrets
     install_keycloak
