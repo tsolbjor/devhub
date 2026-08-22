@@ -32,10 +32,9 @@ module "cluster" {
   pg_ha_mode               = "Disabled"
   pg_geo_redundant_backup  = false
 
-  # Redis — Basic C0 (250 MB) for dev
-  redis_sku_name = "Basic"
-  redis_family   = "C"
-  redis_capacity = 0
+  # Managed Redis — smallest balanced SKU, single node, Entra-only auth
+  redis_sku_name          = "Balanced_B0"
+  redis_high_availability = false
 
   # Blob storage — locally-redundant for dev
   storage_replication = "LRS"

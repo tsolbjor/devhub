@@ -257,7 +257,7 @@ Woodpecker org secrets (push events only). See
 | Cloud   | K8s  | PostgreSQL                | Cache                       | Object Storage |
 |---------|------|---------------------------|-----------------------------|----------------|
 | UpCloud | UCS  | Managed PG                | Valkey (TLS + auth)         | S3-compatible  |
-| Azure   | AKS  | PostgreSQL Flexible Server| Azure Cache for Redis (TLS) | Azure Blob     |
+| Azure   | AKS  | PostgreSQL Flexible Server| Managed Redis (Entra-only)  | Azure Blob     |
 | GCP     | GKE  | Cloud SQL                 | Memorystore (auth)          | GCS            |
 | AWS     | EKS  | RDS                       | ElastiCache (TLS + auth)    | S3             |
 

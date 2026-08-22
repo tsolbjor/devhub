@@ -177,21 +177,17 @@ variable "pg_standby_zone" {
   default     = "2"
 }
 
-# ─── Azure Cache for Redis ────────────────────────────────────────────
+# ─── Azure Managed Redis ──────────────────────────────────────────────
 
 variable "redis_sku_name" {
-  description = "Azure Cache for Redis SKU: Basic, Standard, or Premium"
+  description = "Azure Managed Redis SKU (e.g. Balanced_B0, Balanced_B1, MemoryOptimized_M10)"
   type        = string
 }
 
-variable "redis_family" {
-  description = "Redis family: C (Basic/Standard) or P (Premium)"
-  type        = string
-}
-
-variable "redis_capacity" {
-  description = "Redis cache size (0-6, meaning depends on SKU/family)"
-  type        = number
+variable "redis_high_availability" {
+  description = "Two-node high availability for Managed Redis (small dev SKUs run without it)"
+  type        = bool
+  default     = false
 }
 
 # ─── Blob Storage ─────────────────────────────────────────────────────

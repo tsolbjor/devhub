@@ -155,7 +155,8 @@ case "$CLOUD" in
             add_secret PG_ADMIN_PASSWORD "$(out pg_admin_password)"
             add_secret PG_KEYCLOAK_PASSWORD "$(out pg_keycloak_password)"
             add_secret PG_FORGEJO_PASSWORD "$(out pg_forgejo_password)"
-            add_secret REDIS_PASSWORD "$(out redis_password)"
+            # No REDIS_PASSWORD: Managed Redis runs with access keys disabled —
+            # clients authenticate as managed identities (Entra access policies).
             add_secret AZURE_STORAGE_KEY "$(out storage_primary_access_key)"
             add_secret ENTRA_KEYCLOAK_CLIENT_SECRET "$(out entra_keycloak_client_secret)"
         fi
