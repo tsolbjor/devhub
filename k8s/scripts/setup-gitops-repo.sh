@@ -314,6 +314,11 @@ k8s/overlays/*/tls-secret.yaml
 .idea/
 .DS_Store
 Thumbs.db
+
+# Claude Code: machine-local state. Shared config (.claude/settings.json,
+# commands/, skills/) is deliberately not ignored — commit it if it appears.
+.claude/worktrees/
+.claude/settings.local.json
 EOF
 }
 

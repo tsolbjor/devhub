@@ -51,3 +51,8 @@ k8s/e2e/package-lock.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code: machine-local state. Shared config (.claude/settings.json,
+# commands/, skills/) is deliberately not ignored — commit it if it appears.
+.claude/worktrees/
+.claude/settings.local.json
