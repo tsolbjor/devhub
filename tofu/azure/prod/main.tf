@@ -1,9 +1,9 @@
 module "cluster" {
   source = "../modules/cluster"
 
-  prefix              = "devhub"
+  prefix              = var.prefix
   location            = "westeurope"
-  resource_group_name = "devhub-prod-rg"
+  resource_group_name = "${var.prefix}-rg"
 
   # Kubernetes API exposure — set in terraform.tfvars
   api_allowed_cidrs          = var.api_allowed_cidrs
@@ -51,5 +51,7 @@ module "cluster" {
   tags = {
     Environment = "prod"
     ManagedBy   = "tofu"
+    Deployment  = var.prefix
+    DeployedBy  = var.deployed_by
   }
 }

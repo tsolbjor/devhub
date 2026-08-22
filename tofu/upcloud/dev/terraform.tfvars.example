@@ -1,3 +1,10 @@
 # Copy to terraform.tfvars (gitignored) and adjust.
 # UpCloud has no private-endpoint option, so at least one CIDR is required.
 api_allowed_cidrs = ["203.0.113.4/32"]
+
+# Deployment identity: names every resource and the object-storage buckets.
+# One per deployment, e.g. "acme-dev".
+prefix = "devhub-dev"
+
+# Who configured this deployment — used only in labels. setup-env.sh fills it in.
+deployed_by = "you@example.org"

@@ -15,9 +15,23 @@
 # =============================================================================
 
 variable "prefix" {
-  description = "Prefix for resource names (e.g., devhub-workload)"
+  description = "Deployment identifier — prefixes every resource name; pick one per deployment (e.g. acme-workload)"
   type        = string
   default     = "devhub-workload"
+
+  validation {
+    condition = (
+      length(var.prefix) >= 3 && length(var.prefix) <= 16 &&
+      can(regex("^[a-z][a-z0-9-]*[a-z0-9]$", var.prefix))
+    )
+    error_message = "prefix must be 3-16 lowercase letters, digits or dashes, starting with a letter and not ending in a dash."
+  }
+}
+
+variable "deployed_by" {
+  description = "Identity of the operator who configured this deployment (written by setup-env.sh; used only in labels)"
+  type        = string
+  default     = "unknown"
 }
 
 variable "node_machine_type" {
@@ -51,6 +65,15 @@ variable "labels" {
     environment = "workload"
     managed-by  = "tofu"
   }
+}
+
+locals {
+  labels = merge(var.labels, {
+    deployment = var.prefix
+    # GCP label values allow only lowercase letters, digits, "_" and "-";
+    # operator identities are usually emails, so squash everything else.
+    deployed-by = substr(replace(lower(var.deployed_by), "/[^a-z0-9_-]/", "_"), 0, 63)
+  })
 }
 
 # ─── Required APIs ────────────────────────────────────────────────────
@@ -158,7 +181,7 @@ resource "google_container_cluster" "main" {
     }
   }
 
-  resource_labels = var.labels
+  resource_labels = local.labels
 
   depends_on = [google_project_service.container]
 }
@@ -181,7 +204,7 @@ resource "google_container_node_pool" "main" {
       "https://www.googleapis.com/auth/cloud-platform",
     ]
 
-    labels = merge(var.labels, { role = "worker" })
+    labels = merge(local.labels, { role = "worker" })
   }
 
   management {

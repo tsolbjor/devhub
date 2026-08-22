@@ -15,9 +15,23 @@
 # =============================================================================
 
 variable "prefix" {
-  description = "Prefix for resource names (e.g., devhub-workload)"
+  description = "Deployment identifier — prefixes every resource name; pick one per deployment (e.g. acme-workload)"
   type        = string
   default     = "devhub-workload"
+
+  validation {
+    condition = (
+      length(var.prefix) >= 3 && length(var.prefix) <= 16 &&
+      can(regex("^[a-z][a-z0-9-]*[a-z0-9]$", var.prefix))
+    )
+    error_message = "prefix must be 3-16 lowercase letters, digits or dashes, starting with a letter and not ending in a dash."
+  }
+}
+
+variable "deployed_by" {
+  description = "Identity of the operator who configured this deployment (written by setup-env.sh; used only in tags)"
+  type        = string
+  default     = "unknown"
 }
 
 variable "availability_zones" {
@@ -76,6 +90,13 @@ variable "tags" {
   }
 }
 
+locals {
+  tags = merge(var.tags, {
+    Deployment = var.prefix
+    DeployedBy = var.deployed_by
+  })
+}
+
 # ─── VPC ──────────────────────────────────────────────────────────────
 
 resource "aws_vpc" "main" {
@@ -83,12 +104,12 @@ resource "aws_vpc" "main" {
   enable_dns_hostnames = true
   enable_dns_support   = true
 
-  tags = merge(var.tags, { Name = "${var.prefix}-vpc" })
+  tags = merge(local.tags, { Name = "${var.prefix}-vpc" })
 }
 
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
-  tags   = merge(var.tags, { Name = "${var.prefix}-igw" })
+  tags   = merge(local.tags, { Name = "${var.prefix}-igw" })
 }
 
 resource "aws_subnet" "public" {
@@ -99,7 +120,7 @@ resource "aws_subnet" "public" {
 
   map_public_ip_on_launch = true
 
-  tags = merge(var.tags, {
+  tags = merge(local.tags, {
     Name                                      = "${var.prefix}-public-${count.index + 1}"
     "kubernetes.io/cluster/${var.prefix}-eks" = "shared"
     "kubernetes.io/role/elb"                  = "1"
@@ -112,7 +133,7 @@ resource "aws_subnet" "private" {
   cidr_block        = cidrsubnet(var.vpc_cidr, 4, count.index + length(var.availability_zones))
   availability_zone = var.availability_zones[count.index]
 
-  tags = merge(var.tags, {
+  tags = merge(local.tags, {
     Name                                      = "${var.prefix}-private-${count.index + 1}"
     "kubernetes.io/cluster/${var.prefix}-eks" = "shared"
     "kubernetes.io/role/internal-elb"         = "1"
@@ -121,13 +142,13 @@ resource "aws_subnet" "private" {
 
 resource "aws_eip" "nat" {
   domain = "vpc"
-  tags   = merge(var.tags, { Name = "${var.prefix}-nat-eip" })
+  tags   = merge(local.tags, { Name = "${var.prefix}-nat-eip" })
 }
 
 resource "aws_nat_gateway" "main" {
   allocation_id = aws_eip.nat.id
   subnet_id     = aws_subnet.public[0].id
-  tags          = merge(var.tags, { Name = "${var.prefix}-nat" })
+  tags          = merge(local.tags, { Name = "${var.prefix}-nat" })
 
   depends_on = [aws_internet_gateway.main]
 }
@@ -140,7 +161,7 @@ resource "aws_route_table" "public" {
     gateway_id = aws_internet_gateway.main.id
   }
 
-  tags = merge(var.tags, { Name = "${var.prefix}-public-rt" })
+  tags = merge(local.tags, { Name = "${var.prefix}-public-rt" })
 }
 
 resource "aws_route_table_association" "public" {
@@ -157,7 +178,7 @@ resource "aws_route_table" "private" {
     nat_gateway_id = aws_nat_gateway.main.id
   }
 
-  tags = merge(var.tags, { Name = "${var.prefix}-private-rt" })
+  tags = merge(local.tags, { Name = "${var.prefix}-private-rt" })
 }
 
 resource "aws_route_table_association" "private" {
@@ -180,7 +201,7 @@ resource "aws_iam_role" "eks_cluster" {
     }]
   })
 
-  tags = var.tags
+  tags = local.tags
 }
 
 resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
@@ -208,7 +229,7 @@ resource "aws_eks_cluster" "main" {
     authentication_mode = "API_AND_CONFIG_MAP"
   }
 
-  tags = var.tags
+  tags = local.tags
 
   depends_on = [aws_iam_role_policy_attachment.eks_cluster_policy]
 }
@@ -244,7 +265,7 @@ data "aws_iam_policy_document" "ebs_csi_assume_role" {
 resource "aws_iam_role" "ebs_csi" {
   name_prefix        = "${var.prefix}-ebs-csi-"
   assume_role_policy = data.aws_iam_policy_document.ebs_csi_assume_role.json
-  tags               = var.tags
+  tags               = local.tags
 }
 
 resource "aws_iam_role_policy_attachment" "ebs_csi" {
@@ -258,7 +279,7 @@ resource "aws_eks_addon" "ebs_csi" {
   service_account_role_arn    = aws_iam_role.ebs_csi.arn
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
-  tags                        = var.tags
+  tags                        = local.tags
 
   depends_on = [aws_eks_node_group.main]
 }
@@ -268,7 +289,7 @@ resource "aws_eks_addon" "vpc_cni" {
   addon_name                  = "vpc-cni"
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
-  tags                        = var.tags
+  tags                        = local.tags
 }
 
 resource "aws_eks_addon" "kube_proxy" {
@@ -276,7 +297,7 @@ resource "aws_eks_addon" "kube_proxy" {
   addon_name                  = "kube-proxy"
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
-  tags                        = var.tags
+  tags                        = local.tags
 }
 
 resource "aws_eks_addon" "coredns" {
@@ -284,7 +305,7 @@ resource "aws_eks_addon" "coredns" {
   addon_name                  = "coredns"
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
-  tags                        = var.tags
+  tags                        = local.tags
 
   depends_on = [aws_eks_node_group.main]
 }
@@ -299,7 +320,7 @@ resource "aws_iam_openid_connect_provider" "eks" {
   thumbprint_list = [data.tls_certificate.eks.certificates[0].sha1_fingerprint]
   url             = aws_eks_cluster.main.identity[0].oidc[0].issuer
 
-  tags = var.tags
+  tags = local.tags
 }
 
 resource "aws_iam_role" "eks_nodes" {
@@ -314,7 +335,7 @@ resource "aws_iam_role" "eks_nodes" {
     }]
   })
 
-  tags = var.tags
+  tags = local.tags
 }
 
 resource "aws_iam_role_policy_attachment" "eks_worker_node_policy" {
@@ -350,7 +371,7 @@ resource "aws_eks_node_group" "main" {
     max_unavailable = 1
   }
 
-  tags = var.tags
+  tags = local.tags
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_worker_node_policy,
@@ -396,7 +417,7 @@ resource "aws_iam_role" "external_dns_irsa" {
   name_prefix        = "${var.prefix}-external-dns-irsa-"
   assume_role_policy = data.aws_iam_policy_document.external_dns_assume_role.json
 
-  tags = var.tags
+  tags = local.tags
 }
 
 data "aws_iam_policy_document" "external_dns_route53" {

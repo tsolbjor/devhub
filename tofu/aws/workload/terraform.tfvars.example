@@ -1,3 +1,9 @@
 # Copy to terraform.tfvars (gitignored) and adjust.
 # [] means the API server has no public endpoint — reach it over VPN/bastion.
 api_allowed_cidrs = ["203.0.113.4/32"]
+
+# Deployment identity: names every resource. One per deployment, e.g. "acme-workload".
+prefix = "devhub-workload"
+
+# Who configured this deployment — used only in tags. setup-env.sh fills it in.
+deployed_by = "you@example.org"

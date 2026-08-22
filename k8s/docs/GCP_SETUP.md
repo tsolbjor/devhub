@@ -72,6 +72,8 @@ Re-check DNS alone at any time with `./devhub preflight --env gcp-dev --dns`.
 
 Asks for:
   - your domain and the ACME contact address
+  - a deployment prefix — names every resource and the globally-unique
+    namespaces; the wizard also records who is deploying, as a resource tag
   - which CIDRs may reach the Kubernetes API (offers your current public IP,
     specific CIDRs, or no public endpoint at all)
 #   - the GCP project id

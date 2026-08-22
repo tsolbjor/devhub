@@ -15,9 +15,23 @@
 # =============================================================================
 
 variable "prefix" {
-  description = "Prefix for resource names (e.g., devhub-workload)"
+  description = "Deployment identifier — prefixes every resource name; pick one per deployment (e.g. acme-workload)"
   type        = string
   default     = "devhub-workload"
+
+  validation {
+    condition = (
+      length(var.prefix) >= 3 && length(var.prefix) <= 16 &&
+      can(regex("^[a-z][a-z0-9-]*[a-z0-9]$", var.prefix))
+    )
+    error_message = "prefix must be 3-16 lowercase letters, digits or dashes, starting with a letter and not ending in a dash."
+  }
+}
+
+variable "deployed_by" {
+  description = "Identity of the operator who configured this deployment (written by setup-env.sh; used only in tags)"
+  type        = string
+  default     = "unknown"
 }
 
 variable "location" {
@@ -82,12 +96,19 @@ variable "tags" {
   }
 }
 
+locals {
+  tags = merge(var.tags, {
+    Deployment = var.prefix
+    DeployedBy = var.deployed_by
+  })
+}
+
 # ─── Resource Group ───────────────────────────────────────────────────
 
 resource "azurerm_resource_group" "main" {
   name     = var.resource_group_name
   location = var.location
-  tags     = var.tags
+  tags     = local.tags
 }
 
 # ─── Networking ───────────────────────────────────────────────────────
@@ -97,7 +118,7 @@ resource "azurerm_virtual_network" "main" {
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
   address_space       = [var.vnet_address_space]
-  tags                = var.tags
+  tags                = local.tags
 }
 
 resource "azurerm_subnet" "aks" {
@@ -115,7 +136,7 @@ resource "azurerm_kubernetes_cluster" "main" {
   location            = azurerm_resource_group.main.location
   dns_prefix          = replace(var.prefix, "-", "")
   kubernetes_version  = var.aks_kubernetes_version
-  tags                = var.tags
+  tags                = local.tags
 
   default_node_pool {
     name           = "system"
@@ -125,7 +146,7 @@ resource "azurerm_kubernetes_cluster" "main" {
     node_labels = {
       prefix = var.prefix
       role   = "worker"
-      env    = lookup(var.tags, "Environment", "workload")
+      env    = lookup(local.tags, "Environment", "workload")
     }
   }
 
@@ -180,7 +201,7 @@ resource "azurerm_user_assigned_identity" "external_dns" {
   name                = "${var.prefix}-external-dns-identity"
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
-  tags                = var.tags
+  tags                = local.tags
 }
 
 resource "azurerm_role_assignment" "external_dns_dns_contributor" {

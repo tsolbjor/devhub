@@ -5,3 +5,10 @@ api_allowed_cidrs = ["203.0.113.4/32"]
 # Entra ID groups that get cluster-admin. Setting this disables the AKS local
 # admin account (a permanent, unauditable cluster-admin certificate).
 aad_admin_group_object_ids = ["00000000-0000-0000-0000-000000000000"]
+
+# Deployment identity: names every resource and the globally-unique namespaces
+# (buckets, Cognito domain / storage account). One per deployment, e.g. "acme-dev".
+prefix = "devhub-dev"
+
+# Who configured this deployment — used only in tags. setup-env.sh fills it in.
+deployed_by = "you@example.org"

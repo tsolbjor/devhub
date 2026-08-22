@@ -2,7 +2,7 @@ module "cluster" {
   source = "../modules/cluster"
 
   region = var.region
-  prefix = "devhub-dev"
+  prefix = var.prefix
 
   # VPC
   availability_zones = ["${var.region}a", "${var.region}b"]
@@ -44,13 +44,16 @@ module "cluster" {
   # DNS — must match an existing Route53 hosted zone
   domain = "dev.example.com" # TODO: set to your actual domain
 
-  # Cognito — domain prefix must be globally unique
-  cognito_domain_prefix = "devhub-dev-devhub" # TODO: customize to avoid conflicts
+  # Cognito — the hosted-UI domain derives from the deployment prefix,
+  # which is what keeps it globally unique
+  cognito_domain_prefix = var.prefix
 
   enable_deletion_protection = false
 
   tags = {
     Environment = "dev"
     ManagedBy   = "tofu"
+    Deployment  = var.prefix
+    DeployedBy  = var.deployed_by
   }
 }
