@@ -165,6 +165,14 @@ CONFIG_FILE="${REPO_ROOT}/k8s/overlays/${ENV}/config.yaml"
 ENV_DIR="${SCRIPT_DIR}/${ENV}"
 KUBECONFIG_FILE="${ENV_DIR}/kubeconfig"
 
+# Config lookup: the wizard's answers file wins, the committed overlay is the
+# sample/fallback — same layering as cfg_get in lib/common.sh.
+qs_cfg() {
+    local v
+    v="$(yaml_get "${ENV_DIR}/config.yaml" "$1")"
+    if [[ -n "$v" ]]; then echo "$v"; else yaml_get "$CONFIG_FILE" "$1"; fi
+}
+
 # ─── Detection ────────────────────────────────────────────────────────
 #
 # Each check is cheap and read-only. kubectl calls are bounded so an unreachable
@@ -195,7 +203,7 @@ det_prereq()     { [[ -f "${ENV_DIR}/preflight.ok" ]]; }
 det_dnszone() {
     [[ -n "$TOFU_DIR" ]] || return 0
     local domain
-    domain="$(yaml_get "$CONFIG_FILE" domain)"
+    domain="$(qs_cfg domain)"
     [[ -n "$domain" && "$domain" != *example.com ]] || return 1
     case "$CLOUD" in
         aws)   [[ -n "$(aws route53 list-hosted-zones-by-name --dns-name "${domain}." \
@@ -214,7 +222,7 @@ det_dnszone() {
 }
 
 det_config()     { [[ -z "$TOFU_DIR" ]] || { [[ -f "${TOFU_DIR}/backend.hcl" ]] && [[ -f "${TOFU_DIR}/terraform.tfvars" ]]; }; }
-det_domain()     { local d; d="$(yaml_get "$CONFIG_FILE" domain)"; [[ -n "$d" && "$d" != *example.com ]]; }
+det_domain()     { local d; d="$(qs_cfg domain)"; [[ -n "$d" && "$d" != *example.com ]]; }
 det_init()       { [[ -z "$TOFU_DIR" ]] || [[ -f "${TOFU_DIR}/.terraform/terraform.tfstate" ]] \
                    || (cd "$TOFU_DIR" && tofu output -json &>/dev/null); }
 # `tofu output -raw` on an empty state prints its "No outputs found" warning on
@@ -449,7 +457,7 @@ print_checklist() {
 
     if [[ $NEXT_INDEX -lt 0 ]]; then
         log_info "Everything is done for ${ENV}"
-        local d; d="$(yaml_get "$CONFIG_FILE" domain)"
+        local d; d="$(qs_cfg domain)"
         if [[ -n "$d" ]]; then
             echo ""
             # One URL, not eight: Homepage lists the rest, so this is the only
@@ -462,7 +470,7 @@ print_checklist() {
         # devhub's job ends here. Saying so is the point: an environment that
         # still looks like it needs the installer invites someone to keep
         # running it against a cluster that has moved on.
-        local repo; repo="$(yaml_get "$CONFIG_FILE" gitops.repoUrl)"
+        local repo; repo="$(qs_cfg gitops.repoUrl)"
         if [[ -n "$repo" ]]; then
             echo ""
             log_info "${ENV} is standalone. Work on it from its own repository:"

@@ -55,7 +55,9 @@ CONFIG_FILE="${REPO_ROOT}/k8s/overlays/${ENV}/config.yaml"
 MARKER="${ENV_DIR}/preflight.ok"
 mkdir -p "$ENV_DIR"
 
-DOMAIN="$(yaml_get "$CONFIG_FILE" domain 2>/dev/null || true)"
+# The wizard's answers file wins; the committed overlay is the sample/fallback.
+DOMAIN="$(yaml_get "${ENV_DIR}/config.yaml" domain 2>/dev/null || true)"
+[[ -n "$DOMAIN" ]] || DOMAIN="$(yaml_get "$CONFIG_FILE" domain 2>/dev/null || true)"
 [[ "$DOMAIN" == *example.com ]] && DOMAIN=""
 
 FAILED=0
