@@ -10,10 +10,13 @@ module "cluster" {
   aad_admin_group_object_ids = var.aad_admin_group_object_ids
 
   # AKS — small dev nodes
+  # The full platform (Keycloak, Vault, Forgejo, ArgoCD, monitoring, CI, ...)
+  # needs roughly 6-8 B2s nodes' worth of requests; a max of 5 left the last
+  # components permanently Pending with the autoscaler at its ceiling.
   aks_node_vm_size   = "Standard_B2s"
   aks_node_count     = 2
   aks_node_min_count = 2
-  aks_node_max_count = 5
+  aks_node_max_count = 8
 
   # CI node pool — spot, scales to zero, tainted workload=ci
   ci_node_vm_size   = "Standard_D4s_v3"
