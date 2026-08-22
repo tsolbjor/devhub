@@ -646,6 +646,36 @@ state_store_exists() {
     esac
 }
 
+# The Azure backend authenticates with use_azuread_auth, and Owner/Contributor
+# on the subscription carries no data-plane rights — without "Storage Blob Data
+# Contributor" on the account, container creation and every tofu init get a 403
+# AuthorizationPermissionMismatch. Idempotent: checked on every run, so an
+# account created earlier (or by hand) is repaired, not just a fresh one.
+azure_ensure_blob_role() {
+    local scope me
+    scope="$(az storage account show -n "$STATE_BUCKET" -g "$AZURE_STATE_RG" --query id -o tsv 2>/dev/null)"
+    me="$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)"
+    if [[ -z "$me" || -z "$scope" ]]; then
+        log_warn "Could not resolve your identity or the storage account —"
+        log_warn "make sure you hold 'Storage Blob Data Contributor' on ${STATE_BUCKET}, or tofu init gets a 403."
+        return 0
+    fi
+    local existing
+    existing="$(az role assignment list --assignee "$me" --scope "$scope" \
+        --query "[?roleDefinitionName=='Storage Blob Data Contributor'] | [0].id" -o tsv 2>/dev/null)"
+    [[ -n "$existing" ]] && return 0
+
+    log_step "Granting yourself 'Storage Blob Data Contributor' on ${STATE_BUCKET}..."
+    if az role assignment create --assignee-object-id "$me" --assignee-principal-type User \
+            --role "Storage Blob Data Contributor" --scope "$scope" >/dev/null; then
+        log_info "Role granted (propagation can take a minute or two)"
+    else
+        log_warn "Could not grant the role (service principal login, or no rights to assign roles)."
+        log_warn "Grant it before 'init', or tofu cannot reach the state:"
+        log_warn "  az role assignment create --assignee <you> --role 'Storage Blob Data Contributor' --scope ${scope}"
+    fi
+}
+
 create_state_store() {
     case "$CLOUD" in
         aws)
@@ -684,23 +714,7 @@ create_state_store() {
                 --sku Standard_LRS --encryption-services blob --min-tls-version TLS1_2 \
                 --allow-blob-public-access false >/dev/null || return 1
 
-            # The backend uses use_azuread_auth, and Owner/Contributor on the
-            # subscription carries no data-plane rights — without this role,
-            # both the container create below and every tofu init get a 403
-            # AuthorizationPermissionMismatch.
-            log_step "Granting yourself 'Storage Blob Data Contributor' on ${STATE_BUCKET}..."
-            local scope me
-            scope="$(az storage account show -n "$STATE_BUCKET" -g "$AZURE_STATE_RG" --query id -o tsv)"
-            me="$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)"
-            if [[ -n "$me" && -n "$scope" ]] && az role assignment create \
-                    --assignee-object-id "$me" --assignee-principal-type User \
-                    --role "Storage Blob Data Contributor" --scope "$scope" >/dev/null; then
-                : # role granted; propagation can still take a minute
-            else
-                log_warn "Could not grant the role (service principal login, or no rights to assign roles)."
-                log_warn "Grant it before 'init', or tofu cannot reach the state:"
-                log_warn "  az role assignment create --assignee <you> --role 'Storage Blob Data Contributor' --scope ${scope:-<account-id>}"
-            fi
+            azure_ensure_blob_role
 
             log_step "Creating container tfstate..."
             # Data-plane RBAC propagates asynchronously; retry briefly before giving up.
@@ -734,6 +748,8 @@ if [[ "$CLOUD" == "upcloud" ]]; then
     log_info "Assuming the object storage bucket already exists (UpCloud has no create step here)."
 elif state_store_exists; then
     log_info "State store already exists: ${STATE_BUCKET}"
+    # An account that exists is not necessarily an account tofu can reach.
+    [[ "$CLOUD" == "azure" ]] && azure_ensure_blob_role
 else
     log_warn "State store ${STATE_BUCKET} does not exist yet. tofu cannot create its own backend."
     if [[ "${CREATE_STORE:-}" == "true" ]] || { [[ -z "${CREATE_STORE:-}" ]] && confirm "Create it now?"; }; then
