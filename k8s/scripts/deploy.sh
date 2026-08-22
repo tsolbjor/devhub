@@ -350,6 +350,12 @@ EOSQL
             -h "${PG_HOST}" -p "${PG_PORT}" -U "${admin_login}" -d postgres \
             -v ON_ERROR_STOP=1 -c "$sql_arg"
 
+    # Marker for quickstart's detector: nothing else this step creates is
+    # observable from outside (the users live in the managed database), and the
+    # secret the old detector looked for is created by a later deploy step.
+    kubectl create configmap devhub-db-users-created -n data-services \
+        --from-literal=createdBy=deploy.sh --dry-run=client -o yaml | kubectl apply -f -
+
     log_info "Database users created"
 }
 
