@@ -286,6 +286,15 @@ default_infra_vars() {
         export S3_ENDPOINT="${S3_ENDPOINT:-http://minio.data-services.svc.cluster.local:9000}"
     fi
 
+    # Managed PostgreSQL (Azure/AWS/GCP/UpCloud) refuses plaintext connections
+    # ("no pg_hba.conf entry ... no encryption"); the local in-cluster
+    # PostgreSQL has no TLS at all. Consumers template ${PG_SSL_MODE}.
+    if [[ "${DATA_SERVICES_TYPE:-local}" == "managed" ]]; then
+        export PG_SSL_MODE="${PG_SSL_MODE:-require}"
+    else
+        export PG_SSL_MODE="${PG_SSL_MODE:-disable}"
+    fi
+
     # Convenience defaults derived from other values.
     export PG_PORT="${PG_PORT:-5432}"
     export REDIS_PORT="${REDIS_PORT:-6379}"
@@ -322,7 +331,7 @@ render_dir() {
 # Variables envsubst is allowed to substitute. The list is explicit so that
 # ArgoCD's own `$oidc.keycloak.clientSecret` placeholders survive templating.
 TEMPLATE_VARS='${DOMAIN} ${TLS_SECRET_NAME} ${CLUSTER_ISSUER} ${ACME_EMAIL}
-${PG_HOST} ${PG_PORT} ${VALKEY_HOST} ${REDIS_HOST} ${REDIS_PORT} ${REDIS_TLS_ENABLED}
+${PG_HOST} ${PG_PORT} ${PG_SSL_MODE} ${VALKEY_HOST} ${REDIS_HOST} ${REDIS_PORT} ${REDIS_TLS_ENABLED}
 ${S3_ENDPOINT} ${S3_REGION} ${AWS_REGION}
 ${AZURE_STORAGE_ACCOUNT} ${AZURE_SUBSCRIPTION_ID} ${AZURE_RESOURCE_GROUP} ${AZURE_NODE_RESOURCE_GROUP}
 ${GCS_PROJECT_ID}
