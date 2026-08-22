@@ -169,6 +169,26 @@ stage_repo() {
     mkdir -p "${dest}/k8s/overlays"
     cp -rL "${REPO_ROOT}/k8s/overlays/${ENV}" "${dest}/k8s/overlays/${ENV}"
 
+    # In this repo the overlay config.yaml is a sample and the wizard's answers
+    # live in the gitignored k8s/scripts/<env>/config.yaml (see cfg_get). The
+    # published repo has no wizard and owns its history, so the effective
+    # values are baked into its committed config.yaml here.
+    local local_cfg="${REPO_ROOT}/k8s/scripts/${ENV}/config.yaml"
+    if [[ -f "$local_cfg" ]]; then
+        local staged_cfg="${dest}/k8s/overlays/${ENV}/config.yaml"
+        local key val
+        for key in domain acmeEmail gitops.repoUrl platformVaultUrl platformLokiUrl; do
+            val="$(yaml_get "$local_cfg" "$key")"
+            [[ -n "$val" ]] || continue
+            case "$key" in
+                gitops.repoUrl)
+                    sed -i "s|^\([[:space:]]*repoUrl:\).*|\1 ${val}|" "$staged_cfg" ;;
+                *)
+                    sed -i "s|^${key}:.*|${key}: ${val}|" "$staged_cfg" ;;
+            esac
+        done
+    fi
+
     # Generated locally and holding a private key — never publish it. deploy.sh
     # recreates it from k8s/certs on the machine that owns the CA.
     rm -f "${dest}/k8s/overlays/${ENV}/tls-secret.yaml"
@@ -472,7 +492,7 @@ main() {
     log_phase "Publishing the GitOps repository for ${ENV}"
 
     if [[ -z "${GITOPS_REPO_URL:-}" ]]; then
-        log_error "gitops.repoUrl is not set in ${OVERLAY_DIR}/config.yaml"
+        log_error "gitops.repoUrl is not set — run './devhub setup --env ${ENV}' (or set it in ${OVERLAY_DIR}/config.yaml)"
         exit 1
     fi
 

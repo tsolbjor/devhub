@@ -200,17 +200,23 @@ deploy.sh --env <env> gitops
 
 ### Configuration Model
 
-Two files, one owner each:
+Three files, one owner each:
 
 | File | Owner | Contents |
 |------|-------|----------|
-| `k8s/overlays/<env>/config.yaml` | humans, committed | domain, TLS mode, `dataServices.type`, `gitops.repoUrl`, workload `platformVaultUrl`/`platformLokiUrl` |
+| `k8s/overlays/<env>/config.yaml` | humans, committed | sample/fallback: TLS mode, `dataServices.type`, service subdomains — and the defaults for everything below |
+| `k8s/scripts/<env>/config.yaml` | `setup-env.sh`, gitignored | the interview's answers: domain, `acmeEmail`, `gitops.repoUrl`, workload `platformVaultUrl`/`platformLokiUrl` |
 | `k8s/scripts/<env>/*.env` | `sync-tofu-outputs.sh`, gitignored | everything tofu knows |
 
-Nothing rewrites `config.yaml`, so `tofu apply` never produces a git diff.
-`lib/common.sh` reads it with `yaml_get` (indentation-aware awk, so a nested
-`host:` cannot be picked up from the wrong parent) — the previous `grep -A1` /
-`sed -i` round-trip was order-dependent and silently wrong.
+Reads are layered through `cfg_get` in `lib/common.sh`: the answers file wins,
+the committed overlay is the fallback — so no script ever edits a committed
+file and `git status` stays clean through setup, while the overlay keeps
+working as a sample (and as the whole config for anyone who prefers editing it
+by hand). `setup-gitops-repo.sh` bakes the effective values into the published
+repo's committed `config.yaml`, because a standalone environment has no wizard.
+Underneath, `yaml_get` is indentation-aware awk, so a nested `host:` cannot be
+picked up from the wrong parent — the previous `grep -A1` / `sed -i`
+round-trip was order-dependent and silently wrong.
 
 `template_values()` substitutes an explicit allow-list (`TEMPLATE_VARS` in
 `lib/common.sh`) so ArgoCD's own `$oidc.keycloak.clientSecret` placeholders
@@ -404,7 +410,7 @@ devhub/
   detector + row in `quickstart.sh`'s step table (otherwise the checklist lies)
 - Bash scripts use `set -euo pipefail` with colored logging (`[INFO]`, `[WARN]`, `[ERROR]`, `[STEP]`, `[PHASE]`)
 - Config parsing goes through `yaml_get` in `lib/common.sh` (awk, indentation-aware); no `yq` dependency
-- Scripts never edit committed files; generated output goes to `k8s/scripts/<env>/` (gitignored, mode 600). The one exception is `setup-env.sh`, which writes the domain/email you typed into the overlay `config.yaml` after showing them and asking
+- Scripts never edit committed files — no exceptions; generated output (including `setup-env.sh`'s answers file `config.yaml`) goes to `k8s/scripts/<env>/` (gitignored, mode 600)
 - Every script calls `use_env_kubeconfig` + `require_cluster_match` before touching a cluster
 - Rendered Helm values go to a per-run `mktemp -d` directory, not fixed `/tmp` paths
 - Helm chart versions are pinned in three places (deploy scripts, `platform-appset.yaml`, docs) — Renovate groups them into one PR

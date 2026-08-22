@@ -150,9 +150,24 @@ yaml_get() {
 # Configuration
 # =============================================================================
 
-# Parse config.yaml (human-owned values) and load tofu-outputs.env (generated).
+# Layered config lookup: the environment's local answers file (written by
+# setup-env.sh, gitignored under k8s/scripts/<env>/) wins; the committed
+# overlay config.yaml is the fallback and doubles as the sample. This is what
+# lets the wizard record your domain without ever editing a committed file.
+cfg_get() {
+    local key="$1" v=""
+    v="$(yaml_get "${SCRIPT_DIR}/${ENV}/config.yaml" "$key")"
+    if [[ -n "$v" ]]; then
+        echo "$v"
+    else
+        yaml_get "${K8S_DIR}/overlays/${ENV}/config.yaml" "$key"
+    fi
+}
+
+# Parse config (local answers over committed overlay, see cfg_get) and load
+# tofu-outputs.env (generated).
 #
-# Exports, from config.yaml:
+# Exports, from config:
 #   DOMAIN TLS_TYPE TLS_SECRET_NAME CLUSTER_ISSUER ACME_EMAIL DATA_SERVICES_TYPE
 #   PLATFORM_VAULT_URL PLATFORM_LOKI_URL ALERT_SLACK_WEBHOOK_SECRET
 # Exports, from tofu-outputs.env (cloud-dependent):
@@ -164,16 +179,16 @@ parse_config() {
         exit 1
     fi
 
-    export DOMAIN=$(yaml_get "$config_file" domain)
-    export TLS_TYPE=$(yaml_get "$config_file" tls.type)
-    export TLS_SECRET_NAME=$(yaml_get "$config_file" tls.secretName)
-    export CLUSTER_ISSUER=$(yaml_get "$config_file" tls.clusterIssuer)
-    export ACME_EMAIL=$(yaml_get "$config_file" acmeEmail)
-    export DATA_SERVICES_TYPE=$(yaml_get "$config_file" dataServices.type)
-    export PLATFORM_VAULT_URL=$(yaml_get "$config_file" platformVaultUrl)
-    export PLATFORM_LOKI_URL=$(yaml_get "$config_file" platformLokiUrl)
-    export GITOPS_REPO_URL=$(yaml_get "$config_file" gitops.repoUrl)
-    export GITOPS_REVISION=$(yaml_get "$config_file" gitops.targetRevision)
+    export DOMAIN=$(cfg_get domain)
+    export TLS_TYPE=$(cfg_get tls.type)
+    export TLS_SECRET_NAME=$(cfg_get tls.secretName)
+    export CLUSTER_ISSUER=$(cfg_get tls.clusterIssuer)
+    export ACME_EMAIL=$(cfg_get acmeEmail)
+    export DATA_SERVICES_TYPE=$(cfg_get dataServices.type)
+    export PLATFORM_VAULT_URL=$(cfg_get platformVaultUrl)
+    export PLATFORM_LOKI_URL=$(cfg_get platformLokiUrl)
+    export GITOPS_REPO_URL=$(cfg_get gitops.repoUrl)
+    export GITOPS_REVISION=$(cfg_get gitops.targetRevision)
 
     # Defaults
     TLS_SECRET_NAME="${TLS_SECRET_NAME:-local-tls-secret}"
@@ -436,7 +451,8 @@ check_requirements() {
 
     if [[ "$DOMAIN" == *example.com ]]; then
         log_error "DOMAIN is still the placeholder '${DOMAIN}'"
-        log_error "Set a real domain in ${K8S_DIR}/overlays/${ENV}/config.yaml"
+        log_error "Run './devhub setup --env ${ENV}' (answers land in k8s/scripts/${ENV}/config.yaml),"
+        log_error "or edit ${K8S_DIR}/overlays/${ENV}/config.yaml directly."
         exit 1
     fi
 
