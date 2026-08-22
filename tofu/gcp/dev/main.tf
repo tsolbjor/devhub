@@ -3,7 +3,7 @@ module "cluster" {
 
   project_id = var.project_id
   region     = var.region
-  prefix     = "devhub-dev"
+  prefix     = var.prefix
 
   # Kubernetes API exposure — set in terraform.tfvars
   api_allowed_cidrs = var.api_allowed_cidrs
@@ -42,5 +42,7 @@ module "cluster" {
   labels = {
     environment = "dev"
     managed-by  = "tofu"
+    deployment  = var.prefix
+    deployed-by = local.deployed_by_label
   }
 }

@@ -72,6 +72,8 @@ Re-check DNS alone at any time with `./devhub preflight --env aws-dev --dns`.
 
 Asks for:
   - your domain and the ACME contact address
+  - a deployment prefix — names every resource and the globally-unique
+    namespaces; the wizard also records who is deploying, as a resource tag
   - which CIDRs may reach the Kubernetes API (offers your current public IP,
     specific CIDRs, or no public endpoint at all)
   - where tofu state lives
@@ -298,7 +300,7 @@ tofu output cognito_issuer_url
 # Configure in Keycloak UI or via setup-keycloak.sh
 ```
 
-**Note:** The `cognito_domain_prefix` in the tofu configuration must be globally unique across all AWS accounts. Update it in `tofu/aws/dev/main.tf` or `tofu/aws/prod/main.tf` before applying.
+**Note:** The Cognito hosted-UI domain must be globally unique across all AWS accounts. It derives from the deployment `prefix` in `terraform.tfvars` (set by `./devhub setup`), so a unique prefix is what keeps it collision-free.
 
 ## Troubleshooting
 

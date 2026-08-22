@@ -1,7 +1,7 @@
 module "cluster" {
   source = "../modules/cluster"
 
-  prefix       = "devhub"
+  prefix       = var.prefix
   zone         = "de-fra1"
   node_plan    = "4xCPU-8GB"
   node_count   = 3
@@ -25,5 +25,7 @@ module "cluster" {
   tags = {
     Environment = "prod"
     ManagedBy   = "tofu"
+    Deployment  = var.prefix
+    DeployedBy  = local.deployed_by_label
   }
 }

@@ -72,6 +72,8 @@ Re-check DNS alone at any time with `./devhub preflight --env azure-dev --dns`.
 
 Asks for:
   - your domain and the ACME contact address
+  - a deployment prefix — names every resource and the globally-unique
+    namespaces; the wizard also records who is deploying, as a resource tag
   - which CIDRs may reach the Kubernetes API (offers your current public IP,
     specific CIDRs, or no public endpoint at all)
 #   - Entra group object ids for cluster-admin (optional)
@@ -234,9 +236,9 @@ open https://grafana.dev.yourdomain.com
 
 | Setting | Dev (`tofu/azure/dev`) | Prod (`tofu/azure/prod`) |
 |---------|--------------------------|----------------------------|
-| Prefix | `devhub-dev` | `devhub` |
+| Prefix (default) | `devhub-dev` | `devhub-prod` |
 | Location | `norwayeast` | `westeurope` |
-| Resource Group | `devhub-dev-rg` | `devhub-prod-rg` |
+| Resource Group | `<prefix>-rg` | `<prefix>-rg` |
 | AKS Node Size | `Standard_B2s` | `Standard_D4s_v3` |
 | AKS Node Count | 2 | 3 |
 | PostgreSQL SKU | `B_Standard_B1ms` | `GP_Standard_D2s_v3` |

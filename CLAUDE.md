@@ -420,7 +420,7 @@ devhub/
   cannot override it. Elsewhere the two are equal
 - Keycloak is the **operator** (`k8s.keycloak.org/v2beta1`), pod `keycloak-0`, service `keycloak-service:8080`
 - GCP OAuth client must be created manually (no Terraform resource) → `manual-secrets.env`
-- AWS Cognito domain prefix and all bucket names are globally unique; prefix with the account/project
+- The deployment `prefix` (tfvars, asked by `setup-env.sh`) names every resource and the globally-unique namespaces (buckets, Cognito domain, Azure storage account); one per deployment. `deployed_by` rides along as a tag
 - Grafana requires `initChownData: enabled: false` for local k3s/Rancher Desktop
 - Keycloak `setup-keycloak.sh` uses `kcadm.sh` via `kubectl exec` — avoid `!` `@` `$` in passwords
 - `.localhost` DNS gotcha: glibc resolves `*.localhost` to 127.0.0.1 before DNS, so server-side OIDC endpoints must use internal service URLs (`http://keycloak-service.keycloak.svc.cluster.local:8080`) while browser-facing URLs stay external
