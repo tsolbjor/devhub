@@ -1,0 +1,50 @@
+# Loki UpCloud overlay: S3-compatible Managed Object Storage backend.
+#
+# Provisioned by tofu/upcloud/modules/cluster:
+#   - bucket <prefix>-loki (output: loki_bucket)
+#   - a loki user scoped to that bucket, with an access key
+#     (outputs: loki_s3_access_key_id / loki_s3_secret_access_key)
+# sync-tofu-outputs.sh exports LOKI_BUCKET (public) and the key pair (secrets).
+#
+# No workload identity on UpCloud: deploy.sh writes the key pair into the
+# loki-objstore-credentials Secret, and Loki's S3 client picks it up through
+# the standard AWS env-var chain (extraEnvFrom below). The keys never appear
+# in this file — which is rendered into the published GitOps repository — or
+# anywhere else in git.
+#
+# deploy.sh applies this overlay only when LOKI_S3_ACCESS_KEY_ID is set.
+
+loki:
+  # Retention is enforced by the compactor; the delete store must match the
+  # object-storage backend configured below.
+  compactor:
+    working_directory: /var/loki/compactor
+    retention_enabled: true
+    delete_request_store: s3
+
+  storage:
+    type: s3
+    s3:
+      endpoint: ${S3_ENDPOINT}
+      bucketnames: ${LOKI_BUCKET}
+      region: ${S3_REGION}
+      s3forcepathstyle: true
+      insecure: false
+
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: s3
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
+# Switch from filesystem to S3 — disable the local PVC, feed the credentials in
+singleBinary:
+  persistence:
+    enabled: false
+  extraEnvFrom:
+    - secretRef:
+        name: loki-objstore-credentials

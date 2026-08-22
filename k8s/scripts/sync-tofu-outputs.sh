@@ -198,10 +198,19 @@ case "$CLOUD" in
             add_public VALKEY_PORT "$(out valkey_port)"
             add_public S3_ENDPOINT "$(out s3_endpoint)"
             add_public S3_REGION "$(out s3_region)"
+            add_public LOKI_BUCKET "$(out loki_bucket)"
+            add_public VELERO_BUCKET "$(out velero_bucket)"
 
             add_secret PG_KEYCLOAK_PASSWORD "$(out pg_keycloak_password)"
             add_secret PG_FORGEJO_PASSWORD "$(out pg_forgejo_password)"
             add_secret REDIS_PASSWORD "$(out valkey_password)"
+            # No workload identity on UpCloud — bucket-scoped access keys instead.
+            # deploy.sh turns these into Kubernetes Secrets; they never enter
+            # values files or git.
+            add_secret LOKI_S3_ACCESS_KEY_ID "$(out loki_s3_access_key_id)"
+            add_secret LOKI_S3_SECRET_ACCESS_KEY "$(out loki_s3_secret_access_key)"
+            add_secret VELERO_S3_ACCESS_KEY_ID "$(out velero_s3_access_key_id)"
+            add_secret VELERO_S3_SECRET_ACCESS_KEY "$(out velero_s3_secret_access_key)"
         fi
         ;;
 esac

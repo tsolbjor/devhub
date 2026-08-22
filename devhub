@@ -244,7 +244,7 @@ cmd_bootstrap() {
         fi
 
         # Managed PostgreSQL has no Terraform resource for local users, and both
-        # Keycloak and GitLab fail to start without them — so this runs before the
+        # Keycloak and Forgejo fail to start without them — so this runs before the
         # platform deploy, not after.
         if [[ "$(env_cloud_of "$ENV_ARG")" != "upcloud" ]]; then
             log_phase "Creating managed PostgreSQL users"
@@ -500,7 +500,7 @@ Platform / workload clusters
   register --env <env> [--platform-env <env>]
                                   register a workload cluster with the platform
   ca --env <env>                  local CA + TLS certificates
-  cluster --env <env>             nginx-ingress + cluster resources
+  cluster --env <env>             cluster prerequisites (namespaces, priority classes)
 
 Identity, secrets, GitOps
   vault --env <env> [action]      init | unseal | configure | seed-secrets | status

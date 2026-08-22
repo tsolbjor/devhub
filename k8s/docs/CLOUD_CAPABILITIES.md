@@ -52,8 +52,8 @@ Vault as the source of truth for platform credentials via External Secrets.
 
 | | UpCloud | Azure | GCP | AWS | local |
 |---|---|---|---|---|---|
-| Loki chunks in object storage | **—** local PVC | ✓ | ✓ | ✓ | — local PVC |
-| Velero cluster backups | **—** | ✓ | ✓ | ✓ | — |
+| Loki chunks in object storage | ✓ (access key) | ✓ | ✓ | ✓ | — local PVC |
+| Velero cluster backups | ✓ (FS backup) | ✓ | ✓ | ✓ | — |
 | Vault raft snapshots (CronJob) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Forgejo state (repos, packages, registry) | PVC + Velero | PVC + Velero | PVC + Velero | PVC + Velero | PVC only |
 | Node autoscaling | fixed pool | ✓ built-in | ✓ built-in | ✓ cluster-autoscaler | n/a |
@@ -69,26 +69,30 @@ Vault as the source of truth for platform credentials via External Secrets.
 
 ## Known gaps and what to do about them
 
-### UpCloud: no Loki object storage, no Velero, no Vault auto-unseal
+### UpCloud: access keys instead of workload identity, no Vault auto-unseal
 
-The UpCloud module provisions object storage but not the Loki or Velero buckets,
-and UpCloud has no Vault seal type. Consequences and mitigations:
+UpCloud's Managed Object Storage has no workload identity, so Loki and Velero
+each get a dedicated object-storage user with a bucket-scoped policy and an
+access key (`tofu/upcloud/modules/cluster`). The keys flow through
+`secrets.env` into Kubernetes Secrets (`loki-objstore-credentials`,
+`velero-objstore-credentials`) — never into values files or git. Remaining
+differences from the other clouds:
 
-- **Logs** live on a 10Gi PVC and are lost when the Loki pod is replaced. Mitigate
-  by adding a Loki bucket + access key to `tofu/upcloud/modules/cluster` and an
-  `overlays/upcloud/devops/monitoring/loki-values.yaml` using the S3 backend with a
-  custom endpoint (the AWS overlay is the template; credentials come from a key, not
-  a role).
-- **No cluster-object backups.** Managed PostgreSQL has its own backups, and Vault
-  snapshots run, but Kubernetes objects and PVCs are not backed up. Same fix
-  shape: a Velero bucket + key, then `overlays/upcloud/devops/velero/values.yaml`.
-- **Vault needs 3 of 5 unseal keys after every restart.** `setup-vault.sh` prints
-  the keys once and writes them to a mode-600 gitignored file; move that file to
-  offline storage. Watch the `VaultSealed` alert — on this cloud it is not
-  theoretical.
+- **Velero uses file-system backups** (kopia via the node agent) — there is no
+  UpCloud volume-snapshot plugin. FS backup only reaches volumes mounted by a
+  running pod: an unmounted PVC, such as `vault-snapshots` between CronJob
+  runs, is not captured. The Vault raft data itself (mounted by `vault-0`) is.
+- **Vault needs 3 of 5 unseal keys after every restart** — UpCloud has no
+  Vault seal type. `setup-vault.sh` prints the keys once and writes them to a
+  mode-600 gitignored file; move that file to offline storage. Watch the
+  `VaultSealed` alert — on this cloud it is not theoretical.
+- **Key rotation is manual**: taint the
+  `upcloud_managed_object_storage_user_access_key` resource, re-apply, re-run
+  `sync` and `deploy` for the affected components.
 
-Until those exist, `deploy.sh` skips Velero and the Loki overlay with a warning
-rather than failing, so the platform still comes up.
+If the tofu outputs lack the buckets or keys (module not yet re-applied),
+`deploy.sh` skips Velero and the Loki overlay with a warning rather than
+failing, so the platform still comes up.
 
 ### Forgejo keeps its state on a volume, not in object storage
 
@@ -138,7 +142,8 @@ the platform, not for testing its cloud behaviour.
   (with the local admin account disabled) and as Keycloak's upstream IdP.
 - **Simplest private networking** — GCP: private nodes plus Cloud NAT, private
   Cloud SQL and Memorystore, one Workload Identity mechanism throughout.
-- **Lowest cost / EU-only footprint** — UpCloud, accepting the three gaps above.
+- **Lowest cost / EU-only footprint** — UpCloud, accepting manual Vault unseal,
+  access keys instead of workload identity, and Cloudflare for DNS.
 - **Fastest to try** — local.
 
 Adding a cloud, or closing one of the gaps above, follows the same checklist:

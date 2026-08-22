@@ -431,6 +431,22 @@ install_external_dns() {
         return 0
     fi
 
+    # UpCloud has no external-dns provider; the overlay uses Cloudflare with a
+    # hand-made token secret (preflight prints the command). Installing without
+    # it would not merely degrade — the pod never starts and --atomic below
+    # rolls the release back, failing the whole deploy. Skip and say why.
+    if [[ "$CLOUD" == "upcloud" ]]; then
+        kubectl create namespace external-dns 2>/dev/null || true
+        if ! kubectl get secret external-dns-cloudflare -n external-dns &>/dev/null; then
+            log_warn "Skipping external-dns: secret external-dns-cloudflare not found."
+            log_warn "Create it, then re-run this component:"
+            log_warn "  kubectl create secret generic external-dns-cloudflare -n external-dns \\"
+            log_warn "    --from-literal=api-token=<Cloudflare token with DNS:Edit>"
+            log_warn "  ./deploy.sh --env ${ENV} external-dns"
+            return 0
+        fi
+    fi
+
     log_step "Installing external-dns..."
 
     local values_args=$(get_values_args "external-dns")
@@ -548,8 +564,18 @@ install_monitoring() {
             aws)   [[ -n "${LOKI_IRSA_ROLE_ARN:-}" ]]     && apply_loki_overlay=true ;;
             azure) [[ -n "${LOKI_IDENTITY_CLIENT_ID:-}" ]] && apply_loki_overlay=true ;;
             gcp)   [[ -n "${LOKI_GSA_EMAIL:-}" ]]          && apply_loki_overlay=true ;;
+            upcloud) [[ -n "${LOKI_S3_ACCESS_KEY_ID:-}" ]] && apply_loki_overlay=true ;;
         esac
         if $apply_loki_overlay; then
+            # UpCloud has no workload identity: Loki's S3 client falls back to
+            # the standard AWS env-var credential chain, fed from this Secret
+            # via the overlay's extraEnvFrom. Keys stay out of values files.
+            if [[ "$CLOUD" == "upcloud" ]]; then
+                kubectl create secret generic loki-objstore-credentials -n monitoring \
+                    --from-literal=AWS_ACCESS_KEY_ID="${LOKI_S3_ACCESS_KEY_ID}" \
+                    --from-literal=AWS_SECRET_ACCESS_KEY="${LOKI_S3_SECRET_ACCESS_KEY}" \
+                    --dry-run=client -o yaml | kubectl apply -f -
+            fi
             template_values "$loki_overlay" "${dir}/loki-overlay-values.yaml"
             loki_args="$loki_args -f ${dir}/loki-overlay-values.yaml"
             log_info "Loki cloud object storage enabled (${LOKI_BUCKET:-${LOKI_CONTAINER:-}})"
@@ -598,6 +624,7 @@ install_velero() {
         aws)   [[ -n "${VELERO_BUCKET:-}" ]]    && have_target=true ;;
         gcp)   [[ -n "${VELERO_BUCKET:-}" ]]    && have_target=true ;;
         azure) [[ -n "${VELERO_CONTAINER:-}" ]] && have_target=true ;;
+        upcloud) [[ -n "${VELERO_BUCKET:-}" && -n "${VELERO_S3_ACCESS_KEY_ID:-}" ]] && have_target=true ;;
     esac
 
     if ! $have_target; then
@@ -609,6 +636,16 @@ install_velero() {
     log_step "Installing Velero (cluster backups)..."
 
     kubectl create namespace velero 2>/dev/null || true
+
+    # UpCloud has no workload identity: the chart mounts this Secret as the
+    # AWS-style credentials file (credentials.existingSecret in the overlay).
+    if [[ "$CLOUD" == "upcloud" ]]; then
+        kubectl create secret generic velero-objstore-credentials -n velero \
+            --from-literal=cloud="[default]
+aws_access_key_id=${VELERO_S3_ACCESS_KEY_ID}
+aws_secret_access_key=${VELERO_S3_SECRET_ACCESS_KEY}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+    fi
 
     local values_args=$(get_values_args "velero")
 

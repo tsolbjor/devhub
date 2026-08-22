@@ -151,6 +151,13 @@ denied, so a leaked admin token cannot switch auditing off to cover its tracks.
 | Managed PostgreSQL | Cloud-native PITR | continuous | `rds_backup_retention_days` / equivalent |
 | Managed Redis/Valkey | Cloud snapshots | daily | `redis_snapshot_retention_days` |
 
+**UpCloud caveat:** Velero uses kopia file-system backup (no volume-snapshot
+plugin exists), which only reaches volumes mounted by a running pod. Vault's
+raft data (mounted by `vault-0`) is captured; the `vault-snapshots` PVC is
+only mounted while the CronJob runs and is usually **not** captured — copy a
+snapshot off-cluster (`kubectl cp`) whenever you want a restore point you can
+rely on independently of the cluster.
+
 ### Verify (do this, do not assume)
 
 ```bash

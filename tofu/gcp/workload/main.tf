@@ -6,7 +6,7 @@
 # cluster) deploys apps to this cluster via the app-of-apps pattern.
 #
 # Platform components deployed by deploy-workload.sh:
-#   nginx-ingress, cert-manager, external-dns, external-secrets, alloy
+#   envoy-gateway, cert-manager, kyverno, external-dns, external-secrets, alloy
 #
 # Usage:
 #   tofu init && tofu plan && tofu apply

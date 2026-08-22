@@ -30,7 +30,7 @@ Envoy Gateway / Gateway API (TLS via cert-manager / Let's Encrypt)
     v (private SDN network)
     +---> Managed PostgreSQL (Keycloak DB, Forgejo DB)
     +---> Managed Valkey (Forgejo cache/sessions)
-    +---> Managed Object Storage (Forgejo artifacts, registry, backups)
+    +---> Managed Object Storage (Loki log chunks, Velero backups)
 ```
 
 ## Guided path
@@ -74,8 +74,10 @@ Asks for:
   - your domain and the ACME contact address
   - which CIDRs may reach the Kubernetes API (offers your current public IP,
     specific CIDRs, or no public endpoint at all)
-#   - the Managed Object Storage S3 endpoint
+  - the Managed Object Storage S3 endpoint for tofu state
   - where tofu state lives
+  - optionally, an off-cluster mirror for the GitOps repository (URL + write
+    token) — the copy that survives losing the cluster
 
 Then writes `tofu/upcloud/dev/backend.hcl` and `terraform.tfvars`, sets
 `domain` / `acmeEmail` / `gitops.repoUrl` in `k8s/overlays/upcloud-dev/config.yaml`, and offers
@@ -105,7 +107,8 @@ tofu init -backend-config=backend.hcl
 # default — an internet-facing control plane should be a deliberate choice.
 cp terraform.tfvars.example terraform.tfvars
 #   api_allowed_cidrs = ["203.0.113.4/32"]   # office egress
-#   api_allowed_cidrs = []                   # private endpoint only
+# UpCloud has no private API endpoint — the module rejects an empty list;
+# at least one CIDR is required (the other clouds accept [] for private-only).
 tofu plan     # Review what will be created
 tofu apply    # Provision (takes 10-15 min)
 
@@ -121,7 +124,9 @@ This provisions:
 - Managed Kubernetes cluster with private worker nodes
 - Managed PostgreSQL (databases: `keycloak`, `forgejo`)
 - Managed Valkey (Redis-compatible)
-- Managed Object Storage with Forgejo S3 buckets
+- Managed Object Storage with buckets and scoped access keys for Loki (log
+  chunks) and Velero (cluster backups) — Forgejo keeps its state on a
+  PersistentVolume on every cloud
 
 Review environment-specific settings in `tofu/upcloud/dev/main.tf` or `tofu/upcloud/prod/main.tf`.
 
@@ -133,8 +138,9 @@ cd k8s/scripts
 ```
 
 This script:
-- Reads tofu outputs (PG host, Valkey host, S3 endpoint, etc.)
-- Writes them into `k8s/overlays/upcloud-dev/config.yaml`
+- Reads tofu outputs (PG host, Valkey host, buckets, access keys, etc.)
+- Writes them to `k8s/scripts/upcloud-dev/tofu-outputs.env` and `secrets.env`
+  (gitignored, mode 600) — `config.yaml` is never touched
 - Fetches the cluster kubeconfig via `upctl`
 
 ### Step 3: Configure Domain and Email
@@ -173,7 +179,10 @@ export KUBECONFIG=upcloud-dev/kubeconfig
 # Deploy the platform
 ./deploy.sh --env upcloud-dev
 
-# Initialise Vault (auto-unseals via cloud KMS; root token is revoked at the end)
+# Initialise Vault. UpCloud has no KMS seal: Vault needs 3 of 5 unseal keys
+# after every pod restart. The keys are printed once and written to a mode-600
+# gitignored file — move it to offline storage. The root token is revoked at
+# the end of setup.
 ./setup-vault.sh --env upcloud-dev
 
 # Realm, groups and OIDC clients
@@ -192,11 +201,28 @@ monitoring stack, Kyverno, Reloader, Headlamp, Homepage and Velero **through
 git** — ArgoCD
 self-heals manual `helm upgrade`s away. See [OPERATIONS.md](OPERATIONS.md).
 
-### Step 6: Verify
+### Step 6: Publish the environment's GitOps repository
+
+```bash
+./devhub gitops-repo --env upcloud-dev
+```
+
+Publishes a standalone copy of the platform into this environment's own
+Forgejo and points ArgoCD at it. From then on the environment is independent
+of this devhub checkout — work on it from its own repository. If you gave
+`setup` a mirror URL and token, Forgejo pushes every commit to the off-cluster
+mirror; without Velero that mirror would be the only copy surviving the
+cluster, so on UpCloud set one up.
+
+### Step 7: Verify
 
 ```bash
 # Check all services
 ./deploy.sh --env upcloud-dev all status
+
+# Browser end-to-end: one Keycloak sign-in, then read-only assertions
+# against every service (Grafana datasources, ArgoCD apps, Vault seal state…)
+./devhub validate --e2e --env upcloud-dev
 
 # Check certificate issuance
 kubectl get certificate -A
@@ -230,7 +256,7 @@ IRSA / Workload Identity.
 cert-manager automatically provisions Let's Encrypt certificates. For initial testing, use the staging issuer to avoid rate limits:
 
 ```yaml
-# In tofu-outputs.env (generated)
+# In k8s/overlays/upcloud-dev/config.yaml
 tls:
   clusterIssuer: letsencrypt-staging   # Switch to letsencrypt-prod when verified
 ```

@@ -56,3 +56,31 @@ output "s3_endpoint" {
 output "s3_region" {
   value = module.cluster.s3_region
 }
+
+output "loki_bucket" {
+  value = module.cluster.loki_bucket
+}
+
+output "velero_bucket" {
+  value = module.cluster.velero_bucket
+}
+
+output "loki_s3_access_key_id" {
+  value     = module.cluster.loki_s3_access_key_id
+  sensitive = true
+}
+
+output "loki_s3_secret_access_key" {
+  value     = module.cluster.loki_s3_secret_access_key
+  sensitive = true
+}
+
+output "velero_s3_access_key_id" {
+  value     = module.cluster.velero_s3_access_key_id
+  sensitive = true
+}
+
+output "velero_s3_secret_access_key" {
+  value     = module.cluster.velero_s3_secret_access_key
+  sensitive = true
+}

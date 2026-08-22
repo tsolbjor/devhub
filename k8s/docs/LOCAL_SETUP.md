@@ -88,16 +88,23 @@ cd k8s/scripts
 every platform Application sits at `Sync=Unknown`; the components keep running,
 because they were installed with Helm first, but nothing reconciles.
 
-Create it once Forgejo is up (log in at https://git.localhost, create the `devhub`
-organisation and a `devhub` repository), then push this checkout:
+Publish it once Forgejo is up:
 
 ```bash
-git remote add forgejo https://git.localhost/devhub/devhub.git
-git push forgejo main
+./devhub gitops-repo --env local
 ```
 
-For a private repository, register the credentials with ArgoCD as well
-(`argocd repo add https://git.localhost/devhub/devhub.git --username ... --password ...`).
+This creates the repository in the environment's own Forgejo, pushes a
+standalone copy of the platform into it, and registers the credentials with
+ArgoCD. From then on the environment is independent of this devhub checkout.
+(In-cluster, ArgoCD clones Forgejo's Service name rather than
+`git.localhost` — glibc resolves `*.localhost` to loopback inside pods.)
+
+Then verify the whole environment from a browser:
+
+```bash
+./devhub validate --e2e --env local
+```
 
 ## Access URLs
 

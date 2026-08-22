@@ -87,3 +87,35 @@ output "s3_region" {
   value       = var.objstore_region
 }
 
+
+output "loki_bucket" {
+  description = "Object storage bucket for Loki log chunks"
+  value       = upcloud_managed_object_storage_bucket.platform["loki"].name
+}
+
+output "velero_bucket" {
+  description = "Object storage bucket for Velero backups"
+  value       = upcloud_managed_object_storage_bucket.platform["velero"].name
+}
+
+output "loki_s3_access_key_id" {
+  description = "Access key for the loki object-storage user (bucket-scoped)"
+  value       = upcloud_managed_object_storage_user_access_key.platform["loki"].access_key_id
+  sensitive   = true
+}
+
+output "loki_s3_secret_access_key" {
+  value     = upcloud_managed_object_storage_user_access_key.platform["loki"].secret_access_key
+  sensitive = true
+}
+
+output "velero_s3_access_key_id" {
+  description = "Access key for the velero object-storage user (bucket-scoped)"
+  value       = upcloud_managed_object_storage_user_access_key.platform["velero"].access_key_id
+  sensitive   = true
+}
+
+output "velero_s3_secret_access_key" {
+  value     = upcloud_managed_object_storage_user_access_key.platform["velero"].secret_access_key
+  sensitive = true
+}

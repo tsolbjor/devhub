@@ -238,7 +238,11 @@ Registering a workload cluster is enough to start receiving apps — no manifest
 
 Per cloud, tofu also provisions: Loki log storage + identity, Velero backup
 storage + identity, a Vault auto-unseal KMS key + identity, an external-dns
-identity, and a tainted spot/preemptible CI node pool.
+identity, and a tainted spot/preemptible CI node pool. UpCloud differs: no
+workload identity (bucket-scoped access keys for Loki/Velero instead, turned
+into Kubernetes Secrets by deploy.sh), no Vault KMS seal (manual 3-of-5
+unseal), no DNS product (external-dns uses Cloudflare with a hand-made token
+secret), and Velero uses kopia file-system backup — no snapshot plugin.
 
 Forgejo keeps repositories, packages and registry blobs on its **PersistentVolume**
 — it supports local disk or S3-compatible storage only, and Azure Blob and GCS have
@@ -314,7 +318,6 @@ devhub/
 │   ├── {upcloud,azure,gcp,aws}/
 │   │   ├── modules/cluster/           #   main.tf, addons.tf (AWS), platform.tf, variables, outputs
 │   │   ├── dev/ prod/ workload/       #   root modules: backend.tf + tfvars.example + main + outputs
-│   └── scripts/                       # shared tofu helpers
 ├── k8s/
 │   ├── base/
 │   │   ├── devops/                    # per-service Helm values + manifests

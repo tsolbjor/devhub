@@ -202,8 +202,14 @@ det_dnszone() {
                         --query "HostedZones[?Name=='${domain}.'].Id" --output text 2>/dev/null | grep -v '^None$')" ]] ;;
         azure) [[ -n "$(az network dns zone list --query "[?name=='${domain}'].name" -o tsv 2>/dev/null)" ]] ;;
         gcp)   [[ -n "$(gcloud dns managed-zones list --filter="dnsName=${domain}." --format='value(name)' 2>/dev/null)" ]] ;;
-        # UpCloud uses Cloudflare; the token secret is the closest observable proxy.
-        upcloud) kc get secret external-dns-cloudflare -n external-dns >/dev/null ;;
+        # UpCloud uses Cloudflare, and there is no CLI to ask. The token secret
+        # cannot be the marker: this step sits before the cluster exists, so a
+        # kubectl-based detector is permanently 'todo' and --run-remaining-steps
+        # loops on it. Public NS delegation is the pre-cluster observable half;
+        # preflight --dns still explains the token secret.
+        upcloud)
+            command -v dig &>/dev/null || return 0
+            dig +short NS "$domain" 2>/dev/null | grep -q . ;;
     esac
 }
 

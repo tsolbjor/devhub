@@ -172,3 +172,76 @@ resource "upcloud_managed_object_storage" "main" {
 # storage models, every cloud uses the volume, and Velero backs it up alongside
 # the managed PostgreSQL PITR.
 
+# Buckets and scoped credentials for the platform services that use object
+# storage: Loki (log chunks) and Velero (backups). UpCloud has no workload
+# identity for Managed Object Storage, so each service gets its own user, a
+# policy limited to its bucket, and an access key. The keys land in the
+# gitignored secrets.env via sync-tofu-outputs.sh and become Kubernetes
+# Secrets; they never enter values files or git.
+locals {
+  objsto_services = toset(["loki", "velero"])
+}
+
+resource "upcloud_managed_object_storage_bucket" "platform" {
+  for_each = local.objsto_services
+
+  service_uuid = upcloud_managed_object_storage.main.id
+  name         = "${var.prefix}-${each.key}"
+}
+
+resource "upcloud_managed_object_storage_user" "platform" {
+  for_each = local.objsto_services
+
+  service_uuid = upcloud_managed_object_storage.main.id
+  username     = each.key
+}
+
+resource "upcloud_managed_object_storage_policy" "platform" {
+  for_each = local.objsto_services
+
+  service_uuid = upcloud_managed_object_storage.main.id
+  name         = "${each.key}-bucket-rw"
+  description  = "Read/write limited to the ${each.key} bucket"
+  document = urlencode(jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+          "s3:GetBucketLocation",
+          "s3:ListBucketMultipartUploads",
+        ]
+        Resource = "arn:aws:s3:::${upcloud_managed_object_storage_bucket.platform[each.key].name}"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:AbortMultipartUpload",
+          "s3:ListMultipartUploadParts",
+        ]
+        Resource = "arn:aws:s3:::${upcloud_managed_object_storage_bucket.platform[each.key].name}/*"
+      },
+    ]
+  }))
+}
+
+resource "upcloud_managed_object_storage_user_policy" "platform" {
+  for_each = local.objsto_services
+
+  service_uuid = upcloud_managed_object_storage.main.id
+  username     = upcloud_managed_object_storage_user.platform[each.key].username
+  name         = upcloud_managed_object_storage_policy.platform[each.key].name
+}
+
+resource "upcloud_managed_object_storage_user_access_key" "platform" {
+  for_each = local.objsto_services
+
+  service_uuid = upcloud_managed_object_storage.main.id
+  username     = upcloud_managed_object_storage_user.platform[each.key].username
+  status       = "Active"
+}
+

@@ -210,7 +210,27 @@ monitoring stack, Kyverno, Reloader, Headlamp, Homepage and Velero **through
 git** — ArgoCD
 self-heals manual `helm upgrade`s away. See [OPERATIONS.md](OPERATIONS.md).
 
-### Step 6: Verify
+### Step 6: Publish the environment's GitOps repository
+
+```bash
+./devhub gitops-repo --env aws-dev
+```
+
+Publishes a standalone copy of the platform into this environment's own
+Forgejo and points ArgoCD at it. From then on the environment is independent
+of this devhub checkout — work on it from its own repository. If you gave
+`setup` a mirror URL and token, Forgejo pushes every commit to the
+off-cluster mirror.
+
+### Step 7: Verify
+
+```bash
+# Browser end-to-end: one Keycloak sign-in, then read-only assertions
+# against every service (Grafana datasources, ArgoCD apps, Vault seal state…)
+./devhub validate --e2e --env aws-dev
+```
+
+#### Further checks
 
 ```bash
 # Check all services

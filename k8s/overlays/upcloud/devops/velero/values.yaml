@@ -1,0 +1,51 @@
+# Velero UpCloud overlay — S3-compatible backup location, filesystem backups.
+#
+# Bucket + scoped access key come from tofu/upcloud/modules/cluster
+# (outputs: velero_bucket, velero_s3_access_key_id / velero_s3_secret_access_key).
+# No workload identity on UpCloud: deploy.sh creates the
+# velero-objstore-credentials Secret from the synced outputs and the chart
+# mounts it below. The key never appears in this file — which is rendered into
+# the published GitOps repository — or anywhere else in git.
+#
+# UpCloud also has no Velero volume-snapshot plugin, so PV contents are backed
+# up by the node agent (kopia file-system backup) instead of snapshots.
+# Caveat: file-system backup only reaches volumes mounted by a running pod —
+# an unmounted PVC (e.g. vault-snapshots between CronJob runs) is not captured.
+
+# The AWS plugin speaks S3, which is all this location needs.
+# Plugin version tracks the Velero app version in the pinned chart (1.18.x).
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.14.2
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+credentials:
+  useSecret: true
+  existingSecret: velero-objstore-credentials
+
+configuration:
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: ${VELERO_BUCKET}
+      default: true
+      config:
+        region: ${S3_REGION}
+        s3Url: ${S3_ENDPOINT}
+        s3ForcePathStyle: "true"
+  # No snapshot provider on UpCloud — volume contents go through the node agent.
+  defaultVolumesToFsBackup: true
+
+# Override just the snapshot switches; the schedules' namespaces and TTLs merge
+# in from the base values.
+schedules:
+  daily-full:
+    template:
+      snapshotVolumes: false
+      defaultVolumesToFsBackup: true
+  hourly-platform-state:
+    template:
+      snapshotVolumes: false
+      defaultVolumesToFsBackup: true
