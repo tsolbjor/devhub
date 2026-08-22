@@ -67,6 +67,19 @@ write:
 backend:
   replicas: 0
 
+# Memcached caches: the chart's defaults allocate 8G for the chunks cache
+# (~9.8Gi pod request), which no small dev node can schedule — the pod sits
+# Pending until helm's --atomic deadline rolls the whole release back.
+chunksCache:
+  allocatedMemory: 1024
+resultsCache:
+  allocatedMemory: 512
+
+# The canary is a per-node probe DaemonSet; on small tainted-node clusters it
+# leaves permanently-Pending pods and adds nothing a dev platform needs.
+lokiCanary:
+  enabled: false
+
 # Gateway (nginx)
 gateway:
   enabled: true
