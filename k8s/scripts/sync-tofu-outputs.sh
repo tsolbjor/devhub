@@ -294,6 +294,22 @@ fetch_kubeconfig() {
             if command -v az &>/dev/null; then
                 az aks get-credentials --resource-group "$rg" --name "$CLUSTER_NAME" \
                     --file "$KUBECONFIG_FILE" --overwrite-existing
+
+                # With Entra RBAC enabled (aad_admin_group_object_ids set) the
+                # fetched kubeconfig uses interactive devicecode auth; convert
+                # it to reuse the az CLI's session or kubectl prompts on every
+                # call — and fails outright in scripts.
+                if grep -q 'devicecode' "$KUBECONFIG_FILE" 2>/dev/null; then
+                    if command -v kubelogin &>/dev/null; then
+                        kubelogin convert-kubeconfig -l azurecli --kubeconfig "$KUBECONFIG_FILE"
+                        log_info "Converted kubeconfig to az CLI auth (kubelogin)"
+                    else
+                        log_warn "kubeconfig uses devicecode auth and kubelogin is not installed."
+                        log_warn "Install it, then convert:"
+                        log_warn "  az aks install-cli   # or: https://github.com/Azure/kubelogin"
+                        log_warn "  kubelogin convert-kubeconfig -l azurecli --kubeconfig ${KUBECONFIG_FILE}"
+                    fi
+                fi
             else
                 log_warn "az CLI not found — run:"
                 log_warn "  az aks get-credentials --resource-group ${rg} --name ${CLUSTER_NAME} --file ${KUBECONFIG_FILE}"
