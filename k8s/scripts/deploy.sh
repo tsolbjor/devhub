@@ -464,6 +464,17 @@ install_external_dns() {
 
     log_step "Installing external-dns..."
 
+    # The Azure provider insists on /etc/kubernetes/azure.json; the chart has
+    # no values key for it, so the overlay mounts this Secret. resourceGroup is
+    # deliberately absent — external-dns then finds the zone by the domain
+    # filter, wherever it lives, and the identity's role bounds what it can touch.
+    if [[ "$CLOUD" == "azure" ]]; then
+        kubectl create namespace external-dns 2>/dev/null || true
+        kubectl create secret generic external-dns-azure-config -n external-dns \
+            --from-literal=azure.json="{\"tenantId\": \"${ENTRA_TENANT_ID}\", \"subscriptionId\": \"${AZURE_SUBSCRIPTION_ID}\", \"useWorkloadIdentityExtension\": true}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+    fi
+
     local values_args=$(get_values_args "external-dns")
 
     helm upgrade --install external-dns external-dns/external-dns \
