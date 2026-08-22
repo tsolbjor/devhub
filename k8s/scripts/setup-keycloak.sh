@@ -437,12 +437,12 @@ configure_entra_idp() {
         log_warn "  ${redirect_uri}"
     fi
 
-    # Skip if already configured
+    # Idempotent: the instance is skipped when present, but the mappers below
+    # are still ensured — a run that died between instance and mappers used to
+    # leave the IdP half-configured forever.
     if kcadm get identity-provider/instances/entra -r ${REALM} >/dev/null 2>&1; then
-        log_warn "Entra ID identity provider already configured — skipping"
-        return 0
-    fi
-
+        log_warn "Entra ID identity provider already exists — ensuring its mappers"
+    else
     # Create the OIDC identity provider pointing to Entra ID v2.0 endpoints
     kcadm create identity-provider/instances -r ${REALM} \
         -s alias=entra \
@@ -465,22 +465,39 @@ configure_entra_idp() {
         -s "config.clientSecret=${ENTRA_KEYCLOAK_CLIENT_SECRET}"
 
     log_info "Entra ID identity provider created"
+    fi
+
+    # ensure_entra_mapper <name> <mapper-type> <config-json>
+    # Mapper creates are the one part of this section that cannot be re-issued:
+    # Keycloak answers 409 on a duplicate name, and set -e then killed the whole
+    # setup half-way. Check by name first; the API also requires the alias in
+    # the body, not just the path.
+    ensure_entra_mapper() {
+        local name="$1" type="$2" config="$3"
+        if kcadm get identity-provider/instances/entra/mappers -r ${REALM} --fields name 2>/dev/null \
+                | grep -q "\"name\" : \"${name}\""; then
+            log_info "Mapper ${name} already exists"
+            return 0
+        fi
+        kcadm create identity-provider/instances/entra/mappers -r ${REALM} \
+            -s "name=${name}" \
+            -s identityProviderAlias=entra \
+            -s "identityProviderMapper=${type}" \
+            -s "config=${config}"
+    }
 
     # Mapper: sync email claim → Keycloak user email attribute
-    kcadm create identity-provider/instances/entra/mappers -r ${REALM} \
-        -s name="entra-email" \
-        -s identityProviderMapper=oidc-user-attribute-idp-mapper \
-        -s 'config={"syncMode":"INHERIT","claim":"email","user.attribute":"email"}'
+    ensure_entra_mapper "entra-email" oidc-user-attribute-idp-mapper \
+        '{"syncMode":"INHERIT","claim":"email","user.attribute":"email"}'
 
     # Mappers: map Entra ID App Roles → Keycloak groups (requires Keycloak 25+)
     # App Roles are defined in the tofu module and appear in the token's 'roles' claim.
     # Assign users/groups to these App Roles in the Azure portal or via azuread_app_role_assignment.
     # syncMode=FORCE re-evaluates group membership on every login (reflects role changes immediately).
+    local role_group
     for role_group in "devops-admins" "developers" "viewers"; do
-        kcadm create identity-provider/instances/entra/mappers -r ${REALM} \
-            -s "name=entra-role-${role_group}" \
-            -s identityProviderMapper=oidc-group-idp-mapper \
-            -s "{\"config\":{\"syncMode\":\"FORCE\",\"claim\":\"roles\",\"claim.value\":\"${role_group}\",\"group\":\"/${role_group}\"}}"
+        ensure_entra_mapper "entra-role-${role_group}" oidc-group-idp-mapper \
+            "{\"syncMode\":\"FORCE\",\"claim\":\"roles\",\"claim.value\":\"${role_group}\",\"group\":\"/${role_group}\"}"
     done
 
     log_info "Group mappers added: Entra ID App Role → Keycloak group (devops-admins, developers, viewers)"
