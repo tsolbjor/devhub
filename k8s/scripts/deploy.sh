@@ -350,6 +350,22 @@ EOSQL
             -h "${PG_HOST}" -p "${PG_PORT}" -U "${admin_login}" -d postgres \
             -v ON_ERROR_STOP=1 -c "$sql_arg"
 
+    # PostgreSQL 15 revoked PUBLIC's CREATE on schema public, so owning a
+    # database is not enough — without an explicit grant *inside each
+    # database*, Keycloak's first migration dies on "permission denied for
+    # schema public". Runs in its own pod because the grant must execute
+    # connected to the target database, not to postgres.
+    log_step "Granting schema rights inside each database..."
+    kubectl run "pg-grant-$$" \
+        --rm -i --restart=Never \
+        --image=postgres:16 \
+        --namespace=data-services \
+        --env="PGPASSWORD=${PG_ADMIN_PASSWORD}" \
+        --env="PGHOST=${PG_HOST}" \
+        --env="PGPORT=${PG_PORT}" \
+        --env="PGUSER=${admin_login}" \
+        --command -- sh -ce "psql -d keycloak -v ON_ERROR_STOP=1 -c 'GRANT ALL ON SCHEMA public TO keycloak;'; psql -d forgejo -v ON_ERROR_STOP=1 -c 'GRANT ALL ON SCHEMA public TO forgejo;'"
+
     # Marker for quickstart's detector: nothing else this step creates is
     # observable from outside (the users live in the managed database), and the
     # secret the old detector looked for is created by a later deploy step.
