@@ -30,3 +30,8 @@ variable "deployed_by" {
   type        = string
   default     = "unknown"
 }
+
+variable "domain" {
+  description = "Public DNS domain for this environment — a Route53 hosted zone for it must already exist (set by setup-env.sh)"
+  type        = string
+}

@@ -202,6 +202,11 @@ resource "azurerm_postgresql_flexible_server" "main" {
   private_dns_zone_id          = azurerm_private_dns_zone.postgresql.id
   tags                         = var.tags
 
+  # VNet integration (delegated subnet) and public access are mutually
+  # exclusive; azurerm v4 defaults this to true, and Azure then rejects the
+  # create with ConflictingPublicNetworkAccessAndVirtualNetworkConfiguration.
+  public_network_access_enabled = false
+
   dynamic "high_availability" {
     for_each = var.pg_ha_mode != "Disabled" ? [1] : []
     content {

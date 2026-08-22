@@ -7,3 +7,8 @@ prefix = "devhub-workload"
 
 # Who configured this deployment — used only in tags. setup-env.sh fills it in.
 deployed_by = "you@example.org"
+
+# Public domain — the Azure DNS zone for it must already exist.
+domain = "apps.example.org"
+# Resource group holding that DNS zone (omit to look in this deployment's RG).
+# dns_zone_resource_group = "my-dns-rg"
