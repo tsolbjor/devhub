@@ -228,9 +228,17 @@ det_init()       { [[ -z "$TOFU_DIR" ]] || [[ -f "${TOFU_DIR}/.terraform/terrafo
 # `tofu output -raw` on an empty state prints its "No outputs found" warning on
 # STDOUT and exits 0, so a -n test on the captured text called a never-applied
 # environment provisioned — and quickstart skipped apply. `-json` keeps the
-# stream clean; test the actual value.
-det_applied()    { [[ -z "$TOFU_DIR" ]] || (cd "$TOFU_DIR" && tofu output -json 2>/dev/null \
-                   | jq -e '.cluster_name.value // "" | length > 0' >/dev/null 2>&1); }
+# stream clean; test the actual values.
+#
+# cluster_name alone is not proof either: a partially failed apply that got as
+# far as the cluster left this ✓ while PostgreSQL was never created. Platform
+# tiers therefore also require pg_host; workload tiers have no database.
+det_applied() {
+    [[ -n "$TOFU_DIR" ]] || return 0
+    local want='(.cluster_name.value // "" | length > 0)'
+    [[ "$TIER" != "workload" ]] && want+=' and (.pg_host.value // "" | length > 0)'
+    (cd "$TOFU_DIR" && tofu output -json 2>/dev/null | jq -e "$want" >/dev/null 2>&1)
+}
 det_synced()     { [[ -z "$TOFU_DIR" ]] || [[ -f "${ENV_DIR}/tofu-outputs.env" ]]; }
 det_reachable()  { kc get --raw /readyz >/dev/null; }
 det_dbusers()    { [[ "$CLOUD" == "local" || "$CLOUD" == "upcloud" ]] || kc get secret keycloak-db-secret -n keycloak >/dev/null; }
