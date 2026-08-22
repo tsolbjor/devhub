@@ -5,10 +5,9 @@
 provider: azure
 
 # The Azure provider reads /etc/kubernetes/azure.json — the chart has no
-# `azure:` values key, so the file arrives as a Secret (created by deploy.sh's
-# install_external_dns: tenantId, subscriptionId, useWorkloadIdentityExtension;
-# no resourceGroup, so zones are found by the domain filter and access is
-# bounded by the identity's DNS Zone Contributor role).
+# `azure:` values key, so the file arrives as a Secret created by deploy.sh's
+# install_external_dns (tenantId, subscriptionId, the DNS zone's resourceGroup,
+# useWorkloadIdentityExtension). resourceGroup is mandatory for this provider.
 extraVolumes:
   - name: azure-config
     secret:
