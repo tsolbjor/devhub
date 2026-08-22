@@ -466,12 +466,20 @@ install_external_dns() {
 
     # The Azure provider insists on /etc/kubernetes/azure.json; the chart has
     # no values key for it, so the overlay mounts this Secret. resourceGroup is
-    # deliberately absent — external-dns then finds the zone by the domain
-    # filter, wherever it lives, and the identity's role bounds what it can touch.
+    # mandatory ("parameter resourceGroupName cannot be empty") and names where
+    # the DNS *zone* lives — found the same way preflight finds it.
     if [[ "$CLOUD" == "azure" ]]; then
+        local dns_rg
+        dns_rg="$(az network dns zone list --query "[?name=='${DOMAIN}'].resourceGroup" -o tsv 2>/dev/null | head -1)"
+        if [[ -z "$dns_rg" ]]; then
+            log_error "No Azure DNS zone found for ${DOMAIN} — external-dns needs the zone's resource group."
+            log_error "Create the zone (az network dns zone create -n ${DOMAIN} -g <rg>), then re-run:"
+            log_error "  ./deploy.sh --env ${ENV} external-dns"
+            return 1
+        fi
         kubectl create namespace external-dns 2>/dev/null || true
         kubectl create secret generic external-dns-azure-config -n external-dns \
-            --from-literal=azure.json="{\"tenantId\": \"${ENTRA_TENANT_ID}\", \"subscriptionId\": \"${AZURE_SUBSCRIPTION_ID}\", \"useWorkloadIdentityExtension\": true}" \
+            --from-literal=azure.json="{\"tenantId\": \"${ENTRA_TENANT_ID}\", \"subscriptionId\": \"${AZURE_SUBSCRIPTION_ID}\", \"resourceGroup\": \"${dns_rg}\", \"useWorkloadIdentityExtension\": true}" \
             --dry-run=client -o yaml | kubectl apply -f -
     fi
 
