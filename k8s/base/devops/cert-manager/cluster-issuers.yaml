@@ -14,9 +14,17 @@ spec:
     privateKeySecretRef:
       name: letsencrypt-staging-key
     solvers:
+      # Routing here is Gateway API — there is no ingress controller, so an
+      # ingress-class solver presents a challenge nothing ever serves and
+      # every certificate stays pending forever. cert-manager instead attaches
+      # a temporary HTTPRoute to the platform Gateway; its exact-path match
+      # outranks the blanket HTTP→HTTPS redirect for the challenge URL.
       - http01:
-          ingress:
-            class: nginx
+          gatewayHTTPRoute:
+            parentRefs:
+              - kind: Gateway
+                name: devhub
+                namespace: gateway
 ---
 # Production issuer - use for real certificates
 apiVersion: cert-manager.io/v1
@@ -30,6 +38,14 @@ spec:
     privateKeySecretRef:
       name: letsencrypt-prod-key
     solvers:
+      # Routing here is Gateway API — there is no ingress controller, so an
+      # ingress-class solver presents a challenge nothing ever serves and
+      # every certificate stays pending forever. cert-manager instead attaches
+      # a temporary HTTPRoute to the platform Gateway; its exact-path match
+      # outranks the blanket HTTP→HTTPS redirect for the challenge URL.
       - http01:
-          ingress:
-            class: nginx
+          gatewayHTTPRoute:
+            parentRefs:
+              - kind: Gateway
+                name: devhub
+                namespace: gateway
