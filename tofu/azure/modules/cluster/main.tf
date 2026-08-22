@@ -152,6 +152,28 @@ resource "azurerm_kubernetes_cluster_node_pool" "ci" {
   tags = var.tags
 }
 
+# Untainted overflow pool in a different VM family than the system pool: when
+# the subscription's quota for the system pool's family is exhausted (B-series
+# filled at 5×B2s on a default subscription), the autoscaler's scale-ups fail
+# silently and the tail of the platform sits Pending forever. A second family
+# draws from a separate quota bucket.
+resource "azurerm_kubernetes_cluster_node_pool" "worker" {
+  count = var.worker_node_max_count > 0 ? 1 : 0
+
+  name                  = "worker"
+  kubernetes_cluster_id = azurerm_kubernetes_cluster.main.id
+  vm_size               = var.worker_node_vm_size
+  vnet_subnet_id        = azurerm_subnet.aks.id
+
+  auto_scaling_enabled = true
+  min_count            = var.worker_node_min_count
+  max_count            = var.worker_node_max_count
+
+  node_labels = { role = "worker" }
+
+  tags = var.tags
+}
+
 # ─── PostgreSQL Flexible Server ───────────────────────────────────────
 
 # Private DNS zone: required for VNet-integrated Flexible Server
