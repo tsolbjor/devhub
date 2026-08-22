@@ -242,16 +242,25 @@ resource "azurerm_postgresql_flexible_server_database" "forgejo" {
 
 # ─── Azure Cache for Redis ────────────────────────────────────────────
 
-resource "azurerm_redis_cache" "main" {
-  name                 = "${var.prefix}-redis"
-  resource_group_name  = azurerm_resource_group.main.name
-  location             = azurerm_resource_group.main.location
-  sku_name             = var.redis_sku_name
-  family               = var.redis_family
-  capacity             = var.redis_capacity
-  non_ssl_port_enabled = false
-  minimum_tls_version  = "1.2"
-  tags                 = var.tags
+# Azure Managed Redis (the Redis-Enterprise-based successor to Azure Cache
+# for Redis), Entra-only: access keys are disabled, so there is no password to
+# leak or rotate — a client authenticates as a managed identity that has been
+# granted an azurerm_managed_redis_access_policy_assignment. Nothing on the
+# platform consumes Redis today (Forgejo runs its default memory/leveldb
+# backends); this is capacity for workloads, keyless from the start.
+resource "azurerm_managed_redis" "main" {
+  name                      = "${var.prefix}-redis"
+  resource_group_name       = azurerm_resource_group.main.name
+  location                  = azurerm_resource_group.main.location
+  sku_name                  = var.redis_sku_name
+  high_availability_enabled = var.redis_high_availability
+
+  default_database {
+    access_keys_authentication_enabled = false
+    client_protocol                    = "Encrypted"
+  }
+
+  tags = var.tags
 }
 
 # ─── Blob Storage ─────────────────────────────────────────────────────

@@ -58,20 +58,17 @@ output "pg_forgejo_password" {
 # ─── Redis ────────────────────────────────────────────────────────────
 
 output "redis_host" {
-  description = "Azure Cache for Redis hostname"
-  value       = azurerm_redis_cache.main.hostname
+  description = "Azure Managed Redis hostname"
+  value       = azurerm_managed_redis.main.hostname
 }
 
 output "redis_port" {
-  description = "Redis SSL port (6380)"
-  value       = azurerm_redis_cache.main.ssl_port
+  description = "Managed Redis TLS port"
+  value       = azurerm_managed_redis.main.default_database[0].port
 }
 
-output "redis_password" {
-  description = "Redis primary access key"
-  value       = azurerm_redis_cache.main.primary_access_key
-  sensitive   = true
-}
+# No redis_password output: access keys are disabled — clients authenticate as
+# managed identities via azurerm_managed_redis_access_policy_assignment.
 
 # ─── Blob Storage ─────────────────────────────────────────────────────
 

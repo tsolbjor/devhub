@@ -55,10 +55,7 @@ output "redis_port" {
   value = module.cluster.redis_port
 }
 
-output "redis_password" {
-  value     = module.cluster.redis_password
-  sensitive = true
-}
+# No redis_password: Managed Redis has access keys disabled (Entra-only auth).
 
 # ─── Blob Storage ─────────────────────────────────────────────────────
 

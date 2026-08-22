@@ -30,10 +30,9 @@ module "cluster" {
   pg_standby_zone          = "2"
   pg_geo_redundant_backup  = true
 
-  # Redis — Standard C1 (1 GB) with replication for production
-  redis_sku_name = "Standard"
-  redis_family   = "C"
-  redis_capacity = 1
+  # Managed Redis — balanced SKU with high availability, Entra-only auth
+  redis_sku_name          = "Balanced_B1"
+  redis_high_availability = true
 
   # Blob storage — geo-redundant for production
   storage_replication = "GRS"
