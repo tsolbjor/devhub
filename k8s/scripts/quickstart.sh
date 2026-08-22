@@ -217,7 +217,12 @@ det_config()     { [[ -z "$TOFU_DIR" ]] || { [[ -f "${TOFU_DIR}/backend.hcl" ]] 
 det_domain()     { local d; d="$(yaml_get "$CONFIG_FILE" domain)"; [[ -n "$d" && "$d" != *example.com ]]; }
 det_init()       { [[ -z "$TOFU_DIR" ]] || [[ -f "${TOFU_DIR}/.terraform/terraform.tfstate" ]] \
                    || (cd "$TOFU_DIR" && tofu output -json &>/dev/null); }
-det_applied()    { [[ -z "$TOFU_DIR" ]] || (cd "$TOFU_DIR" && [[ -n "$(tofu output -raw cluster_name 2>/dev/null)" ]]); }
+# `tofu output -raw` on an empty state prints its "No outputs found" warning on
+# STDOUT and exits 0, so a -n test on the captured text called a never-applied
+# environment provisioned — and quickstart skipped apply. `-json` keeps the
+# stream clean; test the actual value.
+det_applied()    { [[ -z "$TOFU_DIR" ]] || (cd "$TOFU_DIR" && tofu output -json 2>/dev/null \
+                   | jq -e '.cluster_name.value // "" | length > 0' >/dev/null 2>&1); }
 det_synced()     { [[ -z "$TOFU_DIR" ]] || [[ -f "${ENV_DIR}/tofu-outputs.env" ]]; }
 det_reachable()  { kc get --raw /readyz >/dev/null; }
 det_dbusers()    { [[ "$CLOUD" == "local" || "$CLOUD" == "upcloud" ]] || kc get secret keycloak-db-secret -n keycloak >/dev/null; }
