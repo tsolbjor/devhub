@@ -215,6 +215,14 @@ resource "azurerm_postgresql_flexible_server" "main" {
     }
   }
 
+  lifecycle {
+    # Azure picks an availability zone at creation when none is configured;
+    # without this, every later plan tries to "move" the server back to no
+    # zone and the apply fails ("zone can only be changed when exchanged
+    # with the standby zone").
+    ignore_changes = [zone]
+  }
+
   depends_on = [azurerm_private_dns_zone_virtual_network_link.postgresql]
 }
 
