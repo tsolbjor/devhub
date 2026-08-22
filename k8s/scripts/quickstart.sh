@@ -180,7 +180,10 @@ qs_cfg() {
 
 kc() {
     if [[ -f "$KUBECONFIG_FILE" ]]; then
-        KUBECONFIG="$KUBECONFIG_FILE" kubectl --request-timeout=8s "$@" 2>/dev/null
+        # `timeout` outranks --request-timeout: an exec auth plugin that wants
+        # an interactive login (AKS devicecode) blocks before any request is
+        # made, and froze the whole checklist.
+        KUBECONFIG="$KUBECONFIG_FILE" timeout 12 kubectl --request-timeout=8s "$@" 2>/dev/null
         return
     fi
 
