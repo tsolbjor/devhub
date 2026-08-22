@@ -76,8 +76,11 @@ resultsCache:
   allocatedMemory: 512
 
 # The canary is a per-node probe DaemonSet; on small tainted-node clusters it
-# leaves permanently-Pending pods and adds nothing a dev platform needs.
+# leaves permanently-Pending pods and adds nothing a dev platform needs. The
+# chart's helm test reads from the canary, so it goes with it.
 lokiCanary:
+  enabled: false
+test:
   enabled: false
 
 # Gateway (nginx)
