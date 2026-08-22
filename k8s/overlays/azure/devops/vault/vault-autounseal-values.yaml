@@ -19,7 +19,11 @@ server:
     annotations:
       azure.workload.identity/client-id: "${VAULT_IDENTITY_CLIENT_ID}"
 
-  podLabels:
+  # The vault chart calls pod labels extraLabels — podLabels is not a chart
+  # key and was silently ignored, so the workload-identity webhook never
+  # injected credentials and Vault called Key Vault as the kubelet identity
+  # (403 ForbiddenByRbac on the unseal key).
+  extraLabels:
     azure.workload.identity/use: "true"
 
   ha:
