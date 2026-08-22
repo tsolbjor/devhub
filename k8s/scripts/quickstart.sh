@@ -252,7 +252,12 @@ det_synced() {
     grep -qE '^PG_HOST=.+' "${ENV_DIR}/tofu-outputs.env"
 }
 det_reachable()  { kc get --raw /readyz >/dev/null; }
-det_dbusers()    { [[ "$CLOUD" == "local" || "$CLOUD" == "upcloud" ]] || kc get secret keycloak-db-secret -n keycloak >/dev/null; }
+# The marker configmap is what create_db_users leaves behind on success; the
+# previously checked keycloak-db-secret is created by a *later* deploy step,
+# so this step never detected as complete right after it ran.
+det_dbusers()    { [[ "$CLOUD" == "local" || "$CLOUD" == "upcloud" ]] \
+                   || kc get configmap devhub-db-users-created -n data-services >/dev/null \
+                   || kc get secret keycloak-db-secret -n keycloak >/dev/null; }
 det_certs()      { [[ "$ENV" != "local" ]] || [[ -f "${REPO_ROOT}/k8s/certs/domains/local-dev.crt" ]]; }
 # "Deployed" has to mean the components later steps depend on are present, not just
 # that something got installed. Checking only argocd-server let a half-finished
