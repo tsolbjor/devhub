@@ -7,3 +7,6 @@ prefix = "devhub-workload"
 
 # Who configured this deployment — used only in tags. setup-env.sh fills it in.
 deployed_by = "you@example.org"
+
+# Public domain — the Route53 hosted zone for it must already exist.
+domain = "apps.example.org"

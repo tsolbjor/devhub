@@ -44,6 +44,7 @@ REGION_IN=""
 PROJECT_IN=""
 AAD_GROUPS_IN=""
 AZURE_STATE_RG=""
+AZURE_DNS_RG=""
 OBJSTO_ENDPOINT=""
 MIRROR_URL_IN=""
 MIRROR_TOKEN_IN=""
@@ -141,10 +142,10 @@ CONFIG_FILE="${REPO_ROOT}/k8s/overlays/${ENV}/config.yaml"
 # Interview answers land here (gitignored), never in the committed overlay:
 # every reader goes through cfg_get, which prefers this file and falls back to
 # the overlay — so the repo keeps sample values and `git status` stays clean.
-LOCAL_CONFIG_FILE="${SCRIPT_DIR}/${ENV}/config.yaml"
+LOCAL_CONFIG_FILE="$(env_state_dir "$ENV")/config.yaml"
 BACKEND_FILE="${TOFU_DIR}/backend.hcl"
 TFVARS_FILE="${TOFU_DIR}/terraform.tfvars"
-MANUAL_SECRETS_FILE="${SCRIPT_DIR}/${ENV}/manual-secrets.env"
+MANUAL_SECRETS_FILE="$(env_state_dir "$ENV")/manual-secrets.env"
 
 [[ -d "$TOFU_DIR" ]]    || { log_error "No tofu module at ${TOFU_DIR}"; exit 1; }
 [[ -f "$CONFIG_FILE" ]] || { log_error "No overlay config at ${CONFIG_FILE}"; exit 1; }
@@ -267,6 +268,8 @@ load_existing() {
 
     PREFIX_IN="${PREFIX_IN:-$(hcl_value "$TFVARS_FILE" prefix)}"
     DEPLOYED_BY_IN="${DEPLOYED_BY_IN:-$(hcl_value "$TFVARS_FILE" deployed_by)}"
+    DOMAIN_IN="${DOMAIN_IN:-$(hcl_value "$TFVARS_FILE" domain)}"
+    AZURE_DNS_RG="${AZURE_DNS_RG:-$(hcl_value "$TFVARS_FILE" dns_zone_resource_group)}"
 }
 
 # ─── Gather values ────────────────────────────────────────────────────
@@ -426,6 +429,14 @@ case "$CLOUD" in
         ask REGION_IN "Azure location" "westeurope"
         ask STATE_BUCKET "Storage account for tofu state" "$(default_bucket)"
         ask AZURE_STATE_RG "Resource group for the state account" "$(state_base)-tfstate-rg"
+        # The tofu module looks the DNS zone up by name *and* resource group;
+        # find where the zone actually lives so the data source cannot guess
+        # wrong (defaulting to the cluster RG hung the apply until timeout).
+        if [[ -z "$AZURE_DNS_RG" ]] && command -v az &>/dev/null; then
+            AZURE_DNS_RG="$(az network dns zone list \
+                --query "[?name=='${DOMAIN_IN}'].resourceGroup" -o tsv 2>/dev/null | head -1)"
+            [[ -n "$AZURE_DNS_RG" ]] && echo "  DNS zone ${DOMAIN_IN} found in resource group: ${AZURE_DNS_RG}"
+        fi
         ask AAD_GROUPS_IN "Entra group object ids for cluster-admin (comma separated, empty to skip)" " "
         STATE_KEY_PREFIX="${STATE_KEY_PREFIX:-azure-${TIER}}"
         ;;
@@ -517,6 +528,9 @@ render_tfvars() {
         aws)
             echo ""
             echo "region = \"${REGION_IN}\""
+            echo ""
+            echo "# The Route53 hosted zone for this domain must already exist."
+            echo "domain = \"${DOMAIN_IN}\""
             ;;
         gcp)
             echo ""
@@ -536,6 +550,13 @@ render_tfvars() {
                 echo "# (a permanent cluster-admin certificate that cannot be attributed to a person):"
                 echo "# aad_admin_group_object_ids = [\"00000000-0000-0000-0000-000000000000\"]"
                 echo "aad_admin_group_object_ids = []"
+            fi
+            echo ""
+            echo "# The Azure DNS zone for this domain must already exist."
+            echo "domain = \"${DOMAIN_IN}\""
+            if [[ -n "${AZURE_DNS_RG:-}" ]]; then
+                echo "# Where that zone lives (detected via 'az network dns zone list')."
+                echo "dns_zone_resource_group = \"${AZURE_DNS_RG}\""
             fi
             ;;
     esac

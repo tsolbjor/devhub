@@ -223,7 +223,7 @@ cmd_bootstrap() {
         fi
 
         # Pull the tofu outputs and kubeconfig unless a previous sync already did.
-        if [[ ! -f "${SCRIPTS}/${ENV_ARG}/tofu-outputs.env" ]]; then
+        if [[ ! -f "$(env_state_dir "$ENV_ARG")/tofu-outputs.env" ]]; then
             log_phase "Syncing tofu outputs (no tofu-outputs.env yet)"
             "${SCRIPTS}/sync-tofu-outputs.sh" --env "$ENV_ARG"
         else
@@ -260,7 +260,7 @@ cmd_bootstrap() {
         # The Envoy data-plane Service, created by Envoy Gateway and named after
         # the Gateway it serves — ingress-nginx has not existed since the Gateway
         # API migration, so this printed nothing at all.
-        lb="$(KUBECONFIG="${SCRIPTS}/${ENV_ARG}/kubeconfig" kubectl get svc -n envoy-gateway-system \
+        lb="$(KUBECONFIG="$(env_state_dir "$ENV_ARG")/kubeconfig" kubectl get svc -n envoy-gateway-system \
               -l gateway.envoyproxy.io/owning-gateway-name=devhub \
               -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}{.items[0].status.loadBalancer.ingress[0].ip}' \
               2>/dev/null || true)"
@@ -349,13 +349,66 @@ cmd_validate() {
 #   eval "$(./devhub kubeconfig --env aws-dev)"
 cmd_kubeconfig() {
     check_env "$ENV_ARG"
-    local kc="${SCRIPTS}/${ENV_ARG}/kubeconfig"
+    local kc="$(env_state_dir "$ENV_ARG")/kubeconfig"
     if [[ ! -f "$kc" ]]; then
         log_error "No kubeconfig for ${ENV_ARG} at ${kc}"
         log_error "Run: ./devhub sync --env ${ENV_ARG}"
         exit 1
     fi
     echo "export KUBECONFIG=${kc}"
+}
+
+# Delete an environment's generated state (_setup/<env>/) so quickstart starts
+# over from the interview. Cloud resources and the remote tofu state are not
+# touched. Two files are irreplaceable or hand-made and survive without
+# --force: vault-init-keys.json (Vault unseal/recovery keys — deleting them
+# seals an existing Vault forever) and manual-secrets.env (tokens you created).
+cmd_reset() {
+    check_env "$ENV_ARG"
+    local dir force=false yes=false f answer
+    dir="$(env_state_dir "$ENV_ARG")"
+    for f in ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}; do
+        [[ "$f" == "--force" ]] && force=true
+        [[ "$f" == "--yes" || "$f" == "-y" ]] && yes=true
+    done
+
+    if [[ ! -d "$dir" ]]; then
+        log_info "Nothing to reset — no generated state at _setup/${ENV_ARG}/"
+        exit 0
+    fi
+
+    log_warn "This deletes the generated state for ${ENV_ARG} (_setup/${ENV_ARG}/)."
+    log_warn "Cloud resources and the remote tofu state are NOT touched."
+    if ! $yes && ! $force; then
+        if [[ -t 0 ]]; then
+            read -r -p "  Delete? [y/N]: " answer
+            [[ "$answer" =~ ^[Yy] ]] || { log_warn "Aborted"; exit 1; }
+        else
+            log_error "No terminal to confirm on — re-run with --yes"
+            exit 1
+        fi
+    fi
+
+    local keep=()
+    [[ -f "${dir}/vault-init-keys.json" ]] && keep+=("vault-init-keys.json")
+    [[ -f "${dir}/manual-secrets.env" ]]   && keep+=("manual-secrets.env")
+
+    rm -f "${dir}/config.yaml" "${dir}/tofu-outputs.env" "${dir}/secrets.env" \
+          "${dir}/kubeconfig" "${dir}/preflight.ok" "${dir}/oidc-secrets.env"
+    rm -rf "${dir}/logs"
+
+    if [[ ${#keep[@]} -gt 0 ]]; then
+        if $force; then
+            for f in "${keep[@]}"; do rm -f "${dir}/${f}"; done
+            log_warn "--force: also deleted ${keep[*]} — Vault unseal keys are unrecoverable"
+        else
+            log_warn "Kept: ${keep[*]}"
+            log_warn "  vault-init-keys.json holds Vault's unseal/recovery keys; deleting it"
+            log_warn "  seals an existing Vault forever. Add --force to delete them too."
+        fi
+    fi
+    rmdir "$dir" 2>/dev/null || true
+    log_info "Reset ${ENV_ARG}. Start over with: ./devhub quickstart --env ${ENV_ARG}"
 }
 
 # What state is each environment in? Answers "where did I get to" without
@@ -379,11 +432,11 @@ cmd_envs() {
         fi
 
         outputs="no"
-        [[ -f "${SCRIPTS}/${env}/tofu-outputs.env" ]] && outputs="yes"
+        [[ -f "$(env_state_dir "$env")/tofu-outputs.env" ]] && outputs="yes"
         [[ "$env" == "local" ]] && outputs="n/a"
 
         kubeconfig="no"
-        [[ -f "${SCRIPTS}/${env}/kubeconfig" ]] && kubeconfig="yes"
+        [[ -f "$(env_state_dir "$env")/kubeconfig" ]] && kubeconfig="yes"
         [[ "$env" == "local" ]] && kubeconfig="current-context"
 
         printf '%-18s %-8s %-9s %-8s %-8s %-10s %s\n' \
@@ -441,7 +494,7 @@ _devhub() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     commands="quickstart setup infra sync deploy bootstrap register vault keycloak
               ca cluster secrets gitops gitops-repo db-users status validate kubeconfig
-              envs doctor completion help preflight"
+              envs reset doctor completion help preflight"
     envs="local upcloud-dev upcloud-prod azure-dev azure-prod gcp-dev gcp-prod
           aws-dev aws-prod upcloud-workload azure-workload gcp-workload aws-workload"
 
@@ -517,6 +570,8 @@ Identity, secrets, GitOps
 Inspection
   status --env <env>              pods, Vault seal state, backups, GitOps state
   envs                            what state every environment is in
+  reset --env <env> [--force]     delete _setup/<env>/ (generated state) and start
+                                  over; keeps Vault keys/manual secrets unless --force
   validate [--helm] [env...]      static checks (no cluster needed)
   validate --e2e --env <env>      browser end-to-end: sign in with Keycloak and
                                   check every service returns real data
@@ -588,6 +643,7 @@ case "$COMMAND" in
     validate)       cmd_validate ;;
     kubeconfig)     cmd_kubeconfig ;;
     envs)           cmd_envs ;;
+    reset)          cmd_reset ;;
     doctor)         cmd_doctor ;;
     completion)     cmd_completion ;;
     help|-h|--help) cmd_help ;;

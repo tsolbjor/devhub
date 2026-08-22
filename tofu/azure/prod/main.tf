@@ -38,9 +38,9 @@ module "cluster" {
   # Blob storage — geo-redundant for production
   storage_replication = "GRS"
 
-  # DNS — must match an existing Azure DNS zone
-  domain = "example.com" # TODO: set to your actual domain
-  # dns_zone_resource_group = "my-dns-rg"  # uncomment if DNS zone is in a separate RG
+  # DNS — must match an existing Azure DNS zone (set in terraform.tfvars)
+  domain                  = var.domain
+  dns_zone_resource_group = var.dns_zone_resource_group
 
   enable_delete_lock = true
 

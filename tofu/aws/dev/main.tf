@@ -41,8 +41,8 @@ module "cluster" {
   backup_retention_days = 14
   log_retention_days    = 14
 
-  # DNS — must match an existing Route53 hosted zone
-  domain = "dev.example.com" # TODO: set to your actual domain
+  # DNS — must match an existing Route53 hosted zone (set in terraform.tfvars)
+  domain = var.domain
 
   # Cognito — the hosted-UI domain derives from the deployment prefix,
   # which is what keeps it globally unique

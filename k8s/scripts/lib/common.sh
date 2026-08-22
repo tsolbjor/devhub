@@ -154,9 +154,32 @@ yaml_get() {
 # setup-env.sh, gitignored under k8s/scripts/<env>/) wins; the committed
 # overlay config.yaml is the fallback and doubles as the sample. This is what
 # lets the wizard record your domain without ever editing a committed file.
+# All generated per-environment state lives under _setup/<env>/ at the repo
+# root — visible, gitignored, and deletable as a unit ('devhub reset').
+# See _setup/README.md for what is safe to delete and what never is.
+#
+# Anchored to this file's own location, not the caller's SCRIPT_DIR: devhub
+# and the k8s/scripts/*.sh scripts source this from different directories.
+_COMMON_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+setup_root() { echo "$(cd "${_COMMON_LIB_DIR}/../../.." && pwd)/_setup"; }
+
+# Path to an environment's state directory, migrating from the pre-_setup
+# location (k8s/scripts/<env>/) the first time it is asked for.
+env_state_dir() {
+    local env="$1" dir old
+    dir="$(setup_root)/${env}"
+    old="${_COMMON_LIB_DIR}/../${env}"
+    if [[ -d "$old" && ! -e "$dir" ]]; then
+        mkdir -p "$(dirname "$dir")"
+        mv "$old" "$dir"
+        echo "[INFO] Moved generated files k8s/scripts/${env}/ → _setup/${env}/" >&2
+    fi
+    echo "$dir"
+}
+
 cfg_get() {
     local key="$1" v=""
-    v="$(yaml_get "${SCRIPT_DIR}/${ENV}/config.yaml" "$key")"
+    v="$(yaml_get "$(setup_root)/${ENV}/config.yaml" "$key")"
     if [[ -n "$v" ]]; then
         echo "$v"
     else
@@ -502,7 +525,7 @@ setup_paths() {
     ARGOCD_DIR="${K8S_DIR}/argocd"
     OVERLAY_DIR="${K8S_DIR}/overlays/${ENV}"
     CERTS_DIR="${K8S_DIR}/certs"
-    SCRIPT_ENV_DIR="${SCRIPT_DIR}/${ENV}"
+    SCRIPT_ENV_DIR="$(env_state_dir "$ENV")"
 
     # Ensure generated-files directory exists
     mkdir -p "${SCRIPT_ENV_DIR}"

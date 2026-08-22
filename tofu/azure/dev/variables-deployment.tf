@@ -25,3 +25,14 @@ variable "deployed_by" {
   type        = string
   default     = "unknown"
 }
+
+variable "domain" {
+  description = "Public DNS domain for this environment — an Azure DNS zone for it must already exist (set by setup-env.sh)"
+  type        = string
+}
+
+variable "dns_zone_resource_group" {
+  description = "Resource group holding the Azure DNS zone (empty = this deployment's own resource group)"
+  type        = string
+  default     = ""
+}
