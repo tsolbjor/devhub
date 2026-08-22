@@ -16,6 +16,13 @@ loki:
 
   storage:
     type: azure
+    # The chart's statefulset template hard-requires bucketNames.chunks for
+    # every object-storage type ("Please define loki.storage.bucketNames..."),
+    # even though on Azure the container below is what is actually used.
+    bucketNames:
+      chunks: ${LOKI_CONTAINER}
+      ruler: ${LOKI_CONTAINER}
+      admin: ${LOKI_CONTAINER}
     azure:
       accountName: ${AZURE_STORAGE_ACCOUNT}
       containerName: ${LOKI_CONTAINER}
