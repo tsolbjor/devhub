@@ -242,7 +242,15 @@ det_applied() {
     [[ "$TIER" != "workload" ]] && want+=' and (.pg_host.value // "" | length > 0)'
     (cd "$TOFU_DIR" && tofu output -json 2>/dev/null | jq -e "$want" >/dev/null 2>&1)
 }
-det_synced()     { [[ -z "$TOFU_DIR" ]] || [[ -f "${ENV_DIR}/tofu-outputs.env" ]]; }
+# The file existing is not enough: a sync that ran against a partially applied
+# state wrote it without PG_HOST, and everything downstream then dialed a local
+# socket. Managed platform environments must have the database host in it.
+det_synced() {
+    [[ -n "$TOFU_DIR" ]] || return 0
+    [[ -f "${ENV_DIR}/tofu-outputs.env" ]] || return 1
+    [[ "$TIER" == "workload" ]] && return 0
+    grep -qE '^PG_HOST=.+' "${ENV_DIR}/tofu-outputs.env"
+}
 det_reachable()  { kc get --raw /readyz >/dev/null; }
 det_dbusers()    { [[ "$CLOUD" == "local" || "$CLOUD" == "upcloud" ]] || kc get secret keycloak-db-secret -n keycloak >/dev/null; }
 det_certs()      { [[ "$ENV" != "local" ]] || [[ -f "${REPO_ROOT}/k8s/certs/domains/local-dev.crt" ]]; }
@@ -550,6 +558,9 @@ run_step() {
         "$DEVHUB" apply --env "$ENV" "$planfile" 2>&1 | tee -a "$logfile"
         local rc=$?
         rm -f "$planfile"
+        # The apply changed what tofu knows; any previously synced outputs are
+        # now stale, so retire them and let the sync step run again.
+        [[ $rc -eq 0 ]] && rm -f "${ENV_DIR}/tofu-outputs.env"
         return $rc
     fi
 

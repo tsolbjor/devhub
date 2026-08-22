@@ -304,6 +304,9 @@ create_db_users() {
 
     [[ -f "$SECRETS_FILE" ]] || { log_error "No ${SECRETS_FILE}; run sync-tofu-outputs.sh first"; exit 1; }
     [[ -n "${PG_ADMIN_PASSWORD:-}" ]] || { log_error "PG_ADMIN_PASSWORD missing from ${SECRETS_FILE}"; exit 1; }
+    # Without a host psql silently dials the pod-local socket and the error that
+    # comes back ("is the server running locally?") points everywhere but here.
+    [[ -n "${PG_HOST:-}" ]] || { log_error "PG_HOST is empty — the synced outputs predate the database; run: ./devhub sync --env ${ENV}"; exit 1; }
 
     local admin_login="${PG_ADMIN_LOGIN:-pgadmin}"
 
