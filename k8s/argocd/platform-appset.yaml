@@ -36,6 +36,7 @@ spec:
     - list:
         elements:
           - component: cert-manager
+            release: cert-manager
             chart: cert-manager
             repo: https://charts.jetstack.io
             version: v1.21.1
@@ -43,6 +44,7 @@ spec:
             baseValues: k8s/base/devops/cert-manager/values.yaml
             overlayValues: devops/cert-manager/values.yaml
           - component: external-dns
+            release: external-dns
             chart: external-dns
             repo: https://kubernetes-sigs.github.io/external-dns/
             version: 1.21.1
@@ -50,6 +52,7 @@ spec:
             baseValues: k8s/base/devops/external-dns/values.yaml
             overlayValues: devops/external-dns/values.yaml
           - component: external-secrets
+            release: external-secrets
             chart: external-secrets
             repo: https://charts.external-secrets.io
             version: 2.9.0
@@ -57,6 +60,7 @@ spec:
             baseValues: k8s/base/devops/external-secrets/values.yaml
             overlayValues: devops/external-secrets/values.yaml
           - component: monitoring
+            release: prometheus
             chart: kube-prometheus-stack
             repo: https://prometheus-community.github.io/helm-charts
             version: 88.3.0
@@ -64,6 +68,7 @@ spec:
             baseValues: k8s/base/devops/monitoring/prometheus-stack-values.yaml
             overlayValues: devops/monitoring/values.yaml
           - component: loki
+            release: loki
             chart: loki
             repo: https://grafana.github.io/helm-charts
             version: 7.3.0
@@ -71,6 +76,7 @@ spec:
             baseValues: k8s/base/devops/monitoring/loki-values.yaml
             overlayValues: devops/monitoring/loki-values.yaml
           - component: tempo
+            release: tempo
             chart: tempo
             repo: https://grafana.github.io/helm-charts
             version: 1.24.4
@@ -78,6 +84,7 @@ spec:
             baseValues: k8s/base/devops/monitoring/tempo-values.yaml
             overlayValues: devops/monitoring/tempo-values.yaml
           - component: alloy
+            release: alloy
             chart: alloy
             repo: https://grafana.github.io/helm-charts
             version: 1.11.1
@@ -85,6 +92,7 @@ spec:
             baseValues: k8s/base/devops/monitoring/alloy-values.yaml
             overlayValues: devops/monitoring/alloy-values.yaml
           - component: headlamp
+            release: headlamp
             chart: headlamp
             repo: https://kubernetes-sigs.github.io/headlamp/
             version: 0.44.0
@@ -92,6 +100,7 @@ spec:
             baseValues: k8s/base/devops/headlamp/values.yaml
             overlayValues: devops/headlamp/values.yaml
           - component: homepage
+            release: homepage
             chart: homepage
             repo: https://jameswynn.github.io/helm-charts
             version: 2.1.0
@@ -99,6 +108,7 @@ spec:
             baseValues: k8s/base/devops/homepage/values.yaml
             overlayValues: devops/homepage/values.yaml
           - component: kyverno
+            release: kyverno
             chart: kyverno
             repo: https://kyverno.github.io/kyverno
             version: 3.8.2
@@ -106,6 +116,7 @@ spec:
             baseValues: k8s/base/devops/kyverno/values.yaml
             overlayValues: devops/kyverno/values.yaml
           - component: reloader
+            release: reloader
             chart: reloader
             repo: https://stakater.github.io/stakater-charts
             version: 2.2.16
@@ -113,6 +124,7 @@ spec:
             baseValues: k8s/base/devops/reloader/values.yaml
             overlayValues: devops/reloader/values.yaml
           - component: woodpecker
+            release: woodpecker
             chart: woodpecker
             repo: https://woodpecker-ci.org/
             version: 3.7.0
@@ -120,6 +132,7 @@ spec:
             baseValues: k8s/base/devops/woodpecker/values.yaml
             overlayValues: devops/woodpecker/values.yaml
           - component: velero
+            release: velero
             chart: velero
             repo: https://vmware-tanzu.github.io/helm-charts
             version: 12.1.0
@@ -145,7 +158,12 @@ spec:
           chart: '{{.chart}}'
           targetRevision: '{{.version}}'
           helm:
-            releaseName: '{{.component}}'
+            # Explicit: the bootstrap installs (deploy.sh) already created these
+            # helm releases, and the name must match or ArgoCD deploys a second
+            # copy of the chart next to the first (monitoring's release is
+            # historically "prometheus"; its Service names are referenced by
+            # HTTPRoutes and dashboards, so the name stays).
+            releaseName: '{{.release}}'
             ignoreMissingValueFiles: true
             valueFiles:
               - $values/{{.baseValues}}
