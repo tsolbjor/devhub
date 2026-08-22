@@ -335,6 +335,12 @@ EOSQL
 
     # The pod runs inside the cluster, which is the only network with a route to
     # the private database endpoint.
+    #
+    # The kubelet expands $(VAR) references in a container's command and args,
+    # and reduces every literal $$ to $ — which turned the SQL's `DO $$` into
+    # `DO $` inside the pod. Doubling each $ makes the kubelet reconstruct the
+    # string exactly (this also protects passwords that contain a dollar sign).
+    local sql_arg="${sql//$/\$\$}"
     kubectl run "pg-init-$$" \
         --rm -i --restart=Never \
         --image=postgres:16 \
@@ -342,7 +348,7 @@ EOSQL
         --env="PGPASSWORD=${PG_ADMIN_PASSWORD}" \
         --command -- psql \
             -h "${PG_HOST}" -p "${PG_PORT}" -U "${admin_login}" -d postgres \
-            -v ON_ERROR_STOP=1 -c "$sql"
+            -v ON_ERROR_STOP=1 -c "$sql_arg"
 
     log_info "Database users created"
 }
