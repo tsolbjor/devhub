@@ -116,6 +116,8 @@ gitea:
       HOST: ${PG_HOST}:${PG_PORT}
       NAME: forgejo
       USER: forgejo
+      # Managed PostgreSQL requires TLS; the local in-cluster one has none.
+      SSL_MODE: ${PG_SSL_MODE}
       # PASSWD comes from forgejo-db-secret via extraEnvFrom below
 
     security:
