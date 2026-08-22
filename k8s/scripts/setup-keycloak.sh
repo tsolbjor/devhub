@@ -38,16 +38,15 @@ done
 REALM="devops"
 KCADM="/opt/keycloak/bin/kcadm.sh"
 
-# Determine Keycloak internal URL for server-side OIDC endpoints.
-# *.localhost resolves to 127.0.0.1 inside glibc-based containers (RFC 6761),
-# so we must use internal K8s service URLs for server-side calls.
-if [[ "$DOMAIN" == "localhost" || "$DOMAIN" == *.localhost ]]; then
-    KEYCLOAK_INTERNAL_URL="http://keycloak-service.keycloak.svc.cluster.local:8080"
-    USE_DISCOVERY=false
-else
-    KEYCLOAK_INTERNAL_URL="https://keycloak.${DOMAIN}"
-    USE_DISCOVERY=true
-fi
+# Server-side OIDC calls always go through the in-cluster Service:
+#   - on local, *.localhost resolves to 127.0.0.1 inside glibc containers
+#     (RFC 6761), so the external name dials the pod itself
+#   - on clouds, pods cannot hairpin through their own public load balancer
+#     IP (Forgejo's discovery fetch timed out against keycloak.<domain>)
+# KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true on the Keycloak CR makes the internal
+# discovery document carry matching internal token/jwks endpoints, while
+# browser-facing URLs stay on KC_HOSTNAME.
+KEYCLOAK_INTERNAL_URL="http://keycloak-service.keycloak.svc.cluster.local:8080"
 
 # Execute kcadm command in Keycloak pod
 kcadm() {
