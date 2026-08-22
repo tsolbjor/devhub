@@ -60,8 +60,8 @@ fi
 setup_paths          # paths for the workload env
 parse_config         # workload config.yaml + tofu-outputs.env
 
-WORKLOAD_KUBECONFIG="${SCRIPT_DIR}/${ENV}/kubeconfig"
-PLATFORM_KUBECONFIG="${PLATFORM_KUBECONFIG:-${SCRIPT_DIR}/${PLATFORM_ENV}/kubeconfig}"
+WORKLOAD_KUBECONFIG="$(env_state_dir "$ENV")/kubeconfig"
+PLATFORM_KUBECONFIG="${PLATFORM_KUBECONFIG:-$(env_state_dir "$PLATFORM_ENV")/kubeconfig}"
 
 if [[ ! -f "$WORKLOAD_KUBECONFIG" ]]; then
     log_error "Workload kubeconfig not found: ${WORKLOAD_KUBECONFIG}"

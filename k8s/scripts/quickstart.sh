@@ -162,7 +162,7 @@ esac
 TOFU_DIR=""
 [[ "$CLOUD" != "local" ]] && TOFU_DIR="${REPO_ROOT}/tofu/${CLOUD}/${TIER}"
 CONFIG_FILE="${REPO_ROOT}/k8s/overlays/${ENV}/config.yaml"
-ENV_DIR="${SCRIPT_DIR}/${ENV}"
+ENV_DIR="$(env_state_dir "$ENV")"
 KUBECONFIG_FILE="${ENV_DIR}/kubeconfig"
 
 # Config lookup: the wizard's answers file wins, the committed overlay is the
@@ -509,6 +509,13 @@ run_step() {
 
     banner "${STEP_LABEL[$i]}"
 
+    # Every step's full output also lands in _setup/<env>/logs/, so what
+    # scrolled past during a long run can still be read afterwards.
+    # (pipefail is set, so tee does not mask the step's exit code.)
+    local logdir="${ENV_DIR}/logs" logfile
+    mkdir -p "$logdir"
+    logfile="${logdir}/$(date +%Y%m%d-%H%M%S)-${key}.log"
+
     # preflight interviews the operator (confirmations no command can check);
     # in unattended mode answer for them, as --auto promises.
     $AUTO && [[ "$action" == preflight* ]] && action="$action --yes"
@@ -521,7 +528,7 @@ run_step() {
         local planfile
         planfile="$(mktemp)"
         log_info "Reviewing the plan before applying"
-        if ! "$DEVHUB" plan --env "$ENV" -out="$planfile"; then
+        if ! "$DEVHUB" plan --env "$ENV" -out="$planfile" 2>&1 | tee -a "$logfile"; then
             rm -f "$planfile"
             return 1
         fi
@@ -529,14 +536,14 @@ run_step() {
         log_warn "Review the plan above. Creating cloud resources costs money;"
         log_warn "changes to private-cluster settings can replace an existing cluster."
         confirm "Apply this plan?" || { rm -f "$planfile"; log_warn "Not applied"; return 1; }
-        "$DEVHUB" apply --env "$ENV" "$planfile"
+        "$DEVHUB" apply --env "$ENV" "$planfile" 2>&1 | tee -a "$logfile"
         local rc=$?
         rm -f "$planfile"
         return $rc
     fi
 
     # shellcheck disable=SC2086
-    "$DEVHUB" $action
+    "$DEVHUB" $action 2>&1 | tee -a "$logfile"
 }
 
 run_all_pending() {

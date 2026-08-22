@@ -25,10 +25,14 @@ backend.hcl
 # Generated per-environment files: kubeconfig, tofu-outputs.env, secrets.env,
 # manual-secrets.env, vault-init-keys.json, oidc-secrets.env.
 #
-# Ignore every environment directory rather than listing them: the previous
-# explicit list covered aws/azure/gcp dev+prod and local, but not upcloud-dev,
-# upcloud-prod, or any of the four *-workload environments — so their credentials
-# were one `git add -A` away from being committed.
+# Generated per-environment state (interview answers, tofu outputs, kubeconfigs,
+# secrets, Vault keys, logs). Everything except the README is machine-written
+# and holds credentials. See _setup/README.md for the lifecycle.
+_setup/*
+!_setup/README.md
+
+# The pre-_setup location of the same files; kept ignored so an old checkout
+# that has not migrated yet still cannot commit credentials.
 k8s/scripts/*/
 !k8s/scripts/lib/
 !k8s/scripts/windows/

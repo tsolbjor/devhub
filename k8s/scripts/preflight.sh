@@ -50,7 +50,7 @@ fi
 
 CLOUD="$([[ "$ENV" == "local" ]] && echo local || echo "${ENV%%-*}")"
 TIER="${ENV##*-}"   # dev | prod | workload (local has no tier)
-ENV_DIR="${SCRIPT_DIR}/${ENV}"
+ENV_DIR="$(env_state_dir "$ENV")"
 CONFIG_FILE="${REPO_ROOT}/k8s/overlays/${ENV}/config.yaml"
 MARKER="${ENV_DIR}/preflight.ok"
 mkdir -p "$ENV_DIR"

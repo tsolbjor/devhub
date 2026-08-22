@@ -173,7 +173,7 @@ stage_repo() {
     # live in the gitignored k8s/scripts/<env>/config.yaml (see cfg_get). The
     # published repo has no wizard and owns its history, so the effective
     # values are baked into its committed config.yaml here.
-    local local_cfg="${REPO_ROOT}/k8s/scripts/${ENV}/config.yaml"
+    local local_cfg="$(setup_root)/${ENV}/config.yaml"
     if [[ -f "$local_cfg" ]]; then
         local staged_cfg="${dest}/k8s/overlays/${ENV}/config.yaml"
         local key val

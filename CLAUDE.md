@@ -125,7 +125,7 @@ tofu plan && tofu apply
 ### K8s Scripts
 
 All scripts are in `k8s/scripts/`. Run from that directory. Each targets the
-cluster in `k8s/scripts/<env>/kubeconfig` and refuses to run if the active context
+cluster in `_setup/<env>/kubeconfig` and refuses to run if the active context
 does not match the environment.
 
 ```bash
@@ -185,10 +185,10 @@ tofu apply
     → K8s cluster + managed data services + platform IAM/KMS/buckets
     ↓
 sync-tofu-outputs.sh --env <env>
-    → k8s/scripts/<env>/tofu-outputs.env    (hosts, ARNs, buckets, KMS keys)
-    → k8s/scripts/<env>/secrets.env         (DB/cache passwords, IdP secrets)
-    → k8s/scripts/<env>/manual-secrets.env  (values tofu cannot create)
-    → k8s/scripts/<env>/kubeconfig
+    → _setup/<env>/tofu-outputs.env    (hosts, ARNs, buckets, KMS keys)
+    → _setup/<env>/secrets.env         (DB/cache passwords, IdP secrets)
+    → _setup/<env>/manual-secrets.env  (values tofu cannot create)
+    → _setup/<env>/kubeconfig
     ↓
 deploy.sh --env <env>
     → reads config.yaml (human-owned) + the generated env files
@@ -205,8 +205,8 @@ Three files, one owner each:
 | File | Owner | Contents |
 |------|-------|----------|
 | `k8s/overlays/<env>/config.yaml` | humans, committed | sample/fallback: TLS mode, `dataServices.type`, service subdomains — and the defaults for everything below |
-| `k8s/scripts/<env>/config.yaml` | `setup-env.sh`, gitignored | the interview's answers: domain, `acmeEmail`, `gitops.repoUrl`, workload `platformVaultUrl`/`platformLokiUrl` |
-| `k8s/scripts/<env>/*.env` | `sync-tofu-outputs.sh`, gitignored | everything tofu knows |
+| `_setup/<env>/config.yaml` | `setup-env.sh`, gitignored | the interview's answers: domain, `acmeEmail`, `gitops.repoUrl`, workload `platformVaultUrl`/`platformLokiUrl` |
+| `_setup/<env>/*.env` | `sync-tofu-outputs.sh`, gitignored | everything tofu knows |
 
 Reads are layered through `cfg_get` in `lib/common.sh`: the answers file wins,
 the committed overlay is the fallback — so no script ever edits a committed
@@ -410,7 +410,7 @@ devhub/
   detector + row in `quickstart.sh`'s step table (otherwise the checklist lies)
 - Bash scripts use `set -euo pipefail` with colored logging (`[INFO]`, `[WARN]`, `[ERROR]`, `[STEP]`, `[PHASE]`)
 - Config parsing goes through `yaml_get` in `lib/common.sh` (awk, indentation-aware); no `yq` dependency
-- Scripts never edit committed files — no exceptions; generated output (including `setup-env.sh`'s answers file `config.yaml`) goes to `k8s/scripts/<env>/` (gitignored, mode 600)
+- Scripts never edit committed files — no exceptions; generated output (including `setup-env.sh`'s answers file `config.yaml`) goes to `_setup/<env>/` at the repo root (gitignored, mode 600/700). `./devhub reset --env <env>` deletes the regenerable ones to start over; `vault-init-keys.json` and `manual-secrets.env` survive unless `--force` (see `_setup/README.md`)
 - Every script calls `use_env_kubeconfig` + `require_cluster_match` before touching a cluster
 - Rendered Helm values go to a per-run `mktemp -d` directory, not fixed `/tmp` paths
 - Helm chart versions are pinned in three places (deploy scripts, `platform-appset.yaml`, docs) — Renovate groups them into one PR
