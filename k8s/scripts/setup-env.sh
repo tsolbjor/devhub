@@ -393,11 +393,19 @@ ask DEPLOYED_BY_IN "Deployed by (identity written to resource tags)" "$(detect_d
 echo ""
 echo "State storage and cloud settings"
 
-# A bucket name that is unlikely to collide but still recognisable.
+# State-store names derive from the deployment prefix with the tier stripped,
+# so dev and prod of one deployment share a store (the key prefix separates
+# them) while two deployments never collide on the globally-unique names —
+# a constant default here is how "devhubtfstate" ends up owned by a stranger
+# and tofu init dies with a cross-tenant 401.
+state_base() {
+    echo "${PREFIX_IN%-${TIER}}"
+}
+
 default_bucket() {
     case "$CLOUD" in
-        azure) echo "devhubtfstate" ;;   # storage account: lowercase alphanumeric, <=24
-        *)     echo "devhub-tfstate" ;;
+        azure) local base; base="$(state_base)"; echo "${base//-/}tfstate" ;;   # storage account: lowercase alphanumeric, <=24
+        *)     echo "$(state_base)-tfstate" ;;
     esac
 }
 
@@ -405,13 +413,13 @@ case "$CLOUD" in
     aws)
         ask REGION_IN "AWS region" "eu-west-1"
         ask STATE_BUCKET "S3 bucket for tofu state" "$(default_bucket)"
-        ask LOCK_TABLE "DynamoDB table for state locking" "devhub-tfstate-lock"
+        ask LOCK_TABLE "DynamoDB table for state locking" "$(state_base)-tfstate-lock"
         STATE_KEY_PREFIX="${STATE_KEY_PREFIX:-aws/${TIER}}"
         ;;
     azure)
         ask REGION_IN "Azure location" "westeurope"
         ask STATE_BUCKET "Storage account for tofu state" "$(default_bucket)"
-        ask AZURE_STATE_RG "Resource group for the state account" "devhub-tfstate-rg"
+        ask AZURE_STATE_RG "Resource group for the state account" "$(state_base)-tfstate-rg"
         ask AAD_GROUPS_IN "Entra group object ids for cluster-admin (comma separated, empty to skip)" " "
         STATE_KEY_PREFIX="${STATE_KEY_PREFIX:-azure-${TIER}}"
         ;;
@@ -667,15 +675,42 @@ create_state_store() {
             ;;
         azure)
             command -v az &>/dev/null || { log_error "az CLI not found"; return 1; }
-            log_step "Creating resource group ${AZURE_STATE_RG}..."
-            az group create -n "$AZURE_STATE_RG" -l "$REGION_IN" >/dev/null
+            if [[ "$(az group exists -n "$AZURE_STATE_RG" 2>/dev/null)" != "true" ]]; then
+                log_step "Creating resource group ${AZURE_STATE_RG}..."
+                az group create -n "$AZURE_STATE_RG" -l "$REGION_IN" >/dev/null || return 1
+            fi
             log_step "Creating storage account ${STATE_BUCKET}..."
             az storage account create -n "$STATE_BUCKET" -g "$AZURE_STATE_RG" -l "$REGION_IN" \
                 --sku Standard_LRS --encryption-services blob --min-tls-version TLS1_2 \
-                --allow-blob-public-access false >/dev/null
+                --allow-blob-public-access false >/dev/null || return 1
+
+            # The backend uses use_azuread_auth, and Owner/Contributor on the
+            # subscription carries no data-plane rights — without this role,
+            # both the container create below and every tofu init get a 403
+            # AuthorizationPermissionMismatch.
+            log_step "Granting yourself 'Storage Blob Data Contributor' on ${STATE_BUCKET}..."
+            local scope me
+            scope="$(az storage account show -n "$STATE_BUCKET" -g "$AZURE_STATE_RG" --query id -o tsv)"
+            me="$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)"
+            if [[ -n "$me" && -n "$scope" ]] && az role assignment create \
+                    --assignee-object-id "$me" --assignee-principal-type User \
+                    --role "Storage Blob Data Contributor" --scope "$scope" >/dev/null; then
+                : # role granted; propagation can still take a minute
+            else
+                log_warn "Could not grant the role (service principal login, or no rights to assign roles)."
+                log_warn "Grant it before 'init', or tofu cannot reach the state:"
+                log_warn "  az role assignment create --assignee <you> --role 'Storage Blob Data Contributor' --scope ${scope:-<account-id>}"
+            fi
+
             log_step "Creating container tfstate..."
-            az storage container create -n tfstate --account-name "$STATE_BUCKET" \
-                --auth-mode login >/dev/null
+            # Data-plane RBAC propagates asynchronously; retry briefly before giving up.
+            local attempt
+            for attempt in 1 2 3 4 5; do
+                az storage container create -n tfstate --account-name "$STATE_BUCKET" \
+                    --auth-mode login >/dev/null 2>&1 && break
+                [[ "$attempt" == 5 ]] && { log_error "Could not create the tfstate container"; return 1; }
+                sleep 10
+            done
             ;;
         gcp)
             command -v gcloud &>/dev/null || { log_error "gcloud not found"; return 1; }
