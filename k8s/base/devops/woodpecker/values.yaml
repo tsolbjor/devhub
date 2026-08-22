@@ -23,7 +23,12 @@ server:
 
   # Forgejo is Gitea-API compatible, so the Gitea integration is the correct one.
   env:
-    WOODPECKER_OPEN: "false"
+    # Open registration: with WOODPECKER_OPEN=false and no admin list, the
+    # first login dies on "registration is closed" — nobody can ever get in.
+    # Open is safe here: Forgejo has no self-registration (accounts only come
+    # from Keycloak SSO), so Keycloak bounds who can reach Woodpecker at all.
+    WOODPECKER_OPEN: "true"
+    WOODPECKER_ADMIN: "platform-admin,devhub-admin"
     WOODPECKER_GITEA: "true"
     WOODPECKER_AUTHENTICATE_PUBLIC_REPOS: "true"
     WOODPECKER_LOG_LEVEL: info
