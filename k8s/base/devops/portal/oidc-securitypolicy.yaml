@@ -1,0 +1,42 @@
+# Authentication for the Portal.
+#
+# The portal holds a Forgejo token that can create repositories, so serving it
+# anonymously would hand repo creation to anyone who found the hostname. Like
+# Homepage, the portal has no authentication of its own: Envoy Gateway runs the
+# whole OIDC code flow against Keycloak and only forwards authenticated
+# requests. The NetworkPolicy that admits only the gateway namespace is what
+# makes this enforcement rather than convention.
+#
+# Endpoints are split on purpose:
+#   authorizationEndpoint  the browser is redirected there — public hostname
+#   tokenEndpoint          Envoy calls it from inside the cluster — Keycloak
+#                          Service (also the only thing that works on local,
+#                          where glibc answers *.localhost with 127.0.0.1)
+#
+# The client secret comes from portal-oidc-secret, which setup-keycloak.sh
+# creates. Envoy Gateway requires the key to be named "client-secret".
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: portal-oidc
+  namespace: portal
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: portal
+  oidc:
+    provider:
+      issuer: "https://keycloak.${DOMAIN}/realms/devops"
+      authorizationEndpoint: "https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/auth"
+      tokenEndpoint: "http://keycloak-service.keycloak.svc.cluster.local:8080/realms/devops/protocol/openid-connect/token"
+    clientID: portal
+    clientSecret:
+      name: portal-oidc-secret
+    scopes:
+      - openid
+      - email
+      - profile
+      - groups
+    redirectURL: "https://portal.${DOMAIN}/oauth2/callback"
+    logoutPath: "/logout"

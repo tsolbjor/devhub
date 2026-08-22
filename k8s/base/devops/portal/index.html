@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DevHub Portal — new application</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1a1d21; --muted: #5c6570;
+    --line: #dde2e8; --accent: #2563eb; --accent-text: #ffffff;
+    --ok: #15803d; --err: #b91c1c; --code-bg: #eef1f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a; --panel: #1d2126; --text: #e8eaed; --muted: #9aa4af;
+      --line: #30363d; --accent: #3b82f6; --accent-text: #ffffff;
+      --ok: #4ade80; --err: #f87171; --code-bg: #262c33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 40px 20px 80px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 28px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 24px;
+  }
+  label { display: block; font-weight: 600; margin: 18px 0 6px; }
+  label:first-child { margin-top: 0; }
+  .hint { font-weight: 400; color: var(--muted); font-size: 13px; }
+  input[type=text], select {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--line);
+    border-radius: 7px; background: var(--bg); color: var(--text); font: inherit;
+  }
+  .check { display: flex; gap: 9px; align-items: baseline; margin: 10px 0; font-weight: 400; }
+  .check input { accent-color: var(--accent); }
+  button {
+    margin-top: 22px; padding: 10px 18px; border: 0; border-radius: 7px;
+    background: var(--accent); color: var(--accent-text); font: inherit;
+    font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: .55; cursor: default; }
+  code { background: var(--code-bg); border-radius: 4px; padding: 1px 5px; font-size: 13px; }
+  .error { color: var(--err); margin-top: 14px; }
+  .steps { list-style: none; padding: 0; margin: 0 0 18px; }
+  .steps li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .steps li::before { content: "✓ "; color: var(--ok); font-weight: 700; }
+  .steps .detail { color: var(--muted); font-size: 13px; display: block; }
+  .links a { display: block; padding: 6px 0; color: var(--accent); text-decoration: none; }
+  .links a:hover { text-decoration: underline; }
+  .next { color: var(--muted); font-size: 14px; margin-top: 18px; }
+  #result { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>New application</h1>
+  <p class="sub">One wizard: git repository, CI pipeline, container publishing, work items,
+     and a namespace on every workload cluster — all from the platform's app template.</p>
+
+  <div class="panel" id="form-panel">
+    <form id="wizard">
+      <label for="name">Name <span class="hint">— becomes the repo, the image, the namespace
+        <code>devhub-&lt;name&gt;</code> and the hostname</span></label>
+      <input type="text" id="name" name="name" required pattern="[a-z][a-z0-9-]{0,37}[a-z0-9]"
+             placeholder="my-service" autocomplete="off" spellcheck="false">
+
+      <label for="description">Description <span class="hint">— shown in Forgejo</span></label>
+      <input type="text" id="description" name="description" placeholder="What this service does" maxlength="255">
+
+      <label for="template">Template</label>
+      <select id="template" name="template"></select>
+
+      <label>Data services <span class="hint">— dev-grade, in the app's own namespace</span></label>
+      <div class="check"><input type="checkbox" id="postgres" name="postgres">
+        <span><b>PostgreSQL</b> — single instance with a persistent volume</span></div>
+      <div class="check"><input type="checkbox" id="redis" name="redis">
+        <span><b>Redis</b> — cache, no persistence</span></div>
+
+      <label>Work items</label>
+      <div class="check"><input type="checkbox" id="issues" name="issues" checked>
+        <span>Create starter issues for the manual steps (CI activation, gateway listener, credentials)</span></div>
+
+      <button type="submit" id="submit">Create application</button>
+      <div class="error" id="error" role="alert"></div>
+    </form>
+  </div>
+
+  <div class="panel" id="result">
+    <ul class="steps" id="steps"></ul>
+    <div class="links" id="links"></div>
+    <p class="next" id="next"></p>
+  </div>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  var form = document.getElementById('wizard');
+  var errorEl = document.getElementById('error');
+  var submit = document.getElementById('submit');
+
+  fetch('/api/config').then(function (r) { return r.json(); }).then(function (cfg) {
+    var sel = document.getElementById('template');
+    var templates = (cfg.templates && cfg.templates.length)
+      ? cfg.templates
+      : [{ name: 'app-template', description: '' }];
+    templates.forEach(function (t) {
+      var o = document.createElement('option');
+      o.value = t.name;
+      o.textContent = t.description ? t.name + ' — ' + t.description : t.name;
+      sel.appendChild(o);
+    });
+  }).catch(function () { /* template list is a convenience; the default still works */ });
+
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    errorEl.textContent = '';
+    submit.disabled = true;
+    submit.textContent = 'Creating…';
+
+    var body = {
+      name: document.getElementById('name').value.trim(),
+      description: document.getElementById('description').value.trim(),
+      template: document.getElementById('template').value,
+      postgres: document.getElementById('postgres').checked,
+      redis: document.getElementById('redis').checked,
+      issues: document.getElementById('issues').checked
+    };
+
+    fetch('/api/apps', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().then(function (data) {
+        if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+        return data;
+      });
+    }).then(function (result) {
+      var steps = document.getElementById('steps');
+      result.steps.forEach(function (s) {
+        var li = document.createElement('li');
+        li.textContent = s.title;
+        var d = document.createElement('span');
+        d.className = 'detail';
+        d.textContent = s.detail;
+        li.appendChild(d);
+        steps.appendChild(li);
+      });
+      var links = document.getElementById('links');
+      [['Repository', result.repo],
+       ['Work items', result.issues],
+       [result.ciActivated ? 'CI pipelines (activated)' : 'Activate CI in Woodpecker', result.ci],
+       ['ArgoCD applications', result.argocd]].forEach(function (pair) {
+        var a = document.createElement('a');
+        a.href = pair[1];
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = pair[0] + ' → ' + pair[1];
+        links.appendChild(a);
+      });
+      document.getElementById('next').textContent =
+        'Image: ' + result.image + '. The app deploys to every registered workload cluster as ' +
+        result.url + ' once CI has pushed a first image and the gateway listener exists.';
+      document.getElementById('form-panel').style.display = 'none';
+      document.getElementById('result').style.display = 'block';
+    }).catch(function (err) {
+      errorEl.textContent = err.message;
+      submit.disabled = false;
+      submit.textContent = 'Create application';
+    });
+  });
+})();
+</script>
+</body>
+</html>

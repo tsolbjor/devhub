@@ -1,0 +1,143 @@
+# Portal — a wizard that turns "I need a new service" into a Forgejo repository
+# the platform already knows how to build, publish and run.
+#
+# It is deliberately thin. Everything heavy already exists as convention:
+#   repo appears in the devhub org  → forgejo-appset deploys it to every
+#                                     registered workload cluster
+#   repo contains .woodpecker.yml   → Woodpecker builds it once activated
+#   namespace devhub-<app> appears  → Kyverno generates quota, limits and
+#                                     NetworkPolicies
+# So the portal's whole job is a handful of Forgejo API calls: copy the
+# template repository, substitute APP_NAME/DOMAIN, create starter issues.
+#
+# One design rule: the portal writes git, never the cluster. It holds a Forgejo
+# token and no Kubernetes RBAC at all — every provision it makes is a commit
+# ArgoCD reconciles, auditable in git history and covered by the push mirror.
+#
+# Authentication is the gateway's job, exactly as for Homepage: the OIDC
+# SecurityPolicy in this directory runs the Keycloak flow in front of the
+# HTTPRoute, and the NetworkPolicy only admits the gateway, so the pod never
+# sees an anonymous request.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: portal
+  namespace: portal
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portal
+  namespace: portal
+  labels:
+    app: portal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: portal
+  template:
+    metadata:
+      labels:
+        app: portal
+    spec:
+      serviceAccountName: portal
+      automountServiceAccountToken: false
+      priorityClassName: platform-standard
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: portal
+          # Stock runtime image; the application is the mounted ConfigMap. Node
+          # because it needs exactly one capability beyond serving HTTP: calling
+          # the Forgejo JSON API, which global fetch covers without dependencies.
+          image: docker.io/library/node:22-alpine
+          command: ["node", "/app/server.js"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DOMAIN
+              value: "${DOMAIN}"
+            # In-cluster Forgejo API endpoint. Never the public hostname: on
+            # local, glibc resolves *.localhost to the pod's own loopback.
+            - name: FORGEJO_URL
+              value: "http://forgejo-http.forgejo.svc.cluster.local:3000"
+            - name: APPS_ORG
+              value: "devhub"
+            # Templates live in their own org: forgejo-appset deploys every
+            # devhub-org repo with a k8s/ directory, and a template repo must
+            # never itself land on a workload cluster.
+            - name: TEMPLATES_ORG
+              value: "devhub-templates"
+            - name: FORGEJO_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: portal-forgejo-token
+                  key: token
+            # Woodpecker, for activating scaffolded repos at creation time.
+            # Optional: Woodpecker only mints user tokens in its UI, so this
+            # secret exists once someone ran `deploy.sh <env> ci-secrets`.
+            # Without it the wizard still works and leaves activation as a
+            # starter issue.
+            - name: WOODPECKER_URL
+              value: "http://woodpecker-server.woodpecker.svc.cluster.local"
+            - name: WOODPECKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: portal-woodpecker-token
+                  key: token
+                  optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          volumeMounts:
+            - name: app
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: app
+          configMap:
+            name: portal-app
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: portal
+  namespace: portal
+  labels:
+    app: portal
+spec:
+  selector:
+    app: portal
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

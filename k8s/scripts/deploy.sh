@@ -909,6 +909,253 @@ install_homepage() {
     log_info "Homepage installed"
 }
 
+# Portal — the developer wizard (see k8s/base/devops/portal/README.md).
+# Raw manifests + a kustomize configMapGenerator rather than a chart: the app
+# is a dependency-free Node file served from a ConfigMap on a stock image, so
+# it installs before the platform's own registry and CI exist. After the
+# GitOps handover, k8s/argocd/apps/portal.yaml makes ArgoCD own it.
+
+# Mint the Forgejo token the portal calls the API with. Scoped to what the
+# wizard does: create repos in the devhub org, read templates, open issues.
+ensure_portal_forgejo_token() {
+    kubectl create namespace portal 2>/dev/null || true
+
+    local existing
+    existing="$(kubectl get secret portal-forgejo-token -n portal \
+        -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)"
+    if [[ -n "$existing" && "$existing" != "placeholder" ]]; then
+        log_info "Portal Forgejo token already exists"
+        return 0
+    fi
+
+    local pod
+    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    if [[ -z "$pod" ]]; then
+        log_warn "Forgejo is not running — seeding a placeholder token. Later, run:"
+        log_warn "  ./deploy.sh --env ${ENV} portal-token"
+        kubectl create secret generic portal-forgejo-token -n portal \
+            --from-literal=token=placeholder \
+            --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        return 0
+    fi
+
+    local admin_user token
+    admin_user="$(kubectl get secret forgejo-admin-secret -n forgejo \
+        -o jsonpath='{.data.username}' | base64 -d)"
+    token="$(kubectl exec -n forgejo "$pod" -- forgejo admin user generate-access-token \
+        --username "$admin_user" --token-name "portal-$(date +%s)" \
+        --scopes write:organization,write:repository,write:issue --raw 2>/dev/null \
+        | tr -d '\r' | tail -1)"
+    if [[ -z "$token" ]]; then
+        log_warn "Could not mint a Forgejo token for the portal — re-run: ./deploy.sh --env ${ENV} portal-token"
+        return 0
+    fi
+
+    kubectl create secret generic portal-forgejo-token -n portal \
+        --from-literal=token="$token" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    kubectl rollout restart deployment/portal -n portal >/dev/null 2>&1 || true
+    log_info "Portal Forgejo token created"
+}
+
+# Publish k8s/templates/app-template into Forgejo as devhub-templates/app-template.
+#
+# Its own org, never devhub: forgejo-appset deploys every devhub-org repo that
+# has a k8s/ directory, and a template must not itself land on a workload
+# cluster.
+#
+# A force-push of a fresh single-commit tree, so re-running after editing the
+# template republishes it — the Forgejo copy is exactly this directory, always.
+# Anyone preferring to evolve the template in Forgejo directly (the portal reads
+# HEAD) just stops re-running this. History is not worth keeping here: the
+# template's history lives in this repository.
+publish_app_templates() {
+    log_step "Publishing the app template to Forgejo..."
+
+    local pod
+    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    if [[ -z "$pod" ]]; then
+        log_warn "Forgejo is not running — publish later with: ./deploy.sh --env ${ENV} portal-templates"
+        return 0
+    fi
+
+    local admin_user token
+    admin_user="$(kubectl get secret forgejo-admin-secret -n forgejo \
+        -o jsonpath='{.data.username}' | base64 -d)"
+    token="$(kubectl exec -n forgejo "$pod" -- forgejo admin user generate-access-token \
+        --username "$admin_user" --token-name "portal-templates-$(date +%s)" \
+        --scopes write:organization,write:repository --raw 2>/dev/null | tr -d '\r' | tail -1)"
+    if [[ -z "$token" ]]; then
+        log_warn "Could not mint a Forgejo admin token — publish later with: ./deploy.sh --env ${ENV} portal-templates"
+        return 0
+    fi
+
+    local api="http://localhost:3000/api/v1"
+    fapi() { # method path (body on stdin)
+        kubectl exec -i -n forgejo "$pod" -- curl -fsS -X "$1" "${api}$2" \
+            -H "Authorization: token ${token}" -H "Content-Type: application/json" \
+            --data-binary @- 2>/dev/null
+    }
+    fget() {
+        kubectl exec -n forgejo "$pod" -- curl -fsS "${api}$1" \
+            -H "Authorization: token ${token}" 2>/dev/null || true
+    }
+
+    # Both orgs: devhub-templates for the template, devhub for the apps the
+    # portal will create into it (usually the gitops repo made it already).
+    local org
+    for org in devhub devhub-templates; do
+        if [[ -z "$(fget "/orgs/${org}" | jq -r '.id // empty')" ]]; then
+            echo "{\"username\":\"${org}\"}" | fapi POST /orgs >/dev/null \
+                && log_info "Created Forgejo organisation: ${org}" \
+                || log_warn "Could not create Forgejo organisation ${org}"
+        fi
+    done
+
+    if [[ -z "$(fget "/repos/devhub-templates/app-template" | jq -r '.id // empty')" ]]; then
+        echo '{"name":"app-template","description":"Scaffold used by the portal wizard","private":false,"auto_init":false,"default_branch":"main"}' \
+            | fapi POST /orgs/devhub-templates/repos >/dev/null \
+            || { log_warn "Could not create devhub-templates/app-template"; return 0; }
+    fi
+
+    # Fresh single-commit tree, force-pushed over the public URL — same
+    # reachability assumption (and same local-CA handling) as setup-gitops-repo.
+    local staging
+    staging="$(mktemp -d "${TMPDIR:-/tmp}/devhub-template.XXXXXX")"
+    cp -r "${K8S_DIR}/templates/app-template/." "$staging/"
+    git -C "$staging" init -q -b main
+    git -C "$staging" -c user.name=devhub -c user.email="devhub@${DOMAIN}" add -A
+    git -C "$staging" -c user.name=devhub -c user.email="devhub@${DOMAIN}" \
+        commit -q -m "Publish app-template from devhub"
+
+    local -a git_env=()
+    if [[ "$TLS_TYPE" == "local-ca" && -f "${CERTS_DIR}/ca/ca.crt" ]]; then
+        git_env=(env "GIT_SSL_CAINFO=${CERTS_DIR}/ca/ca.crt")
+    fi
+    local push_url="https://${admin_user}:${token}@git.${DOMAIN}/devhub-templates/app-template.git"
+    if "${git_env[@]+"${git_env[@]}"}" git -C "$staging" push -q --force "$push_url" main; then
+        log_info "Published devhub-templates/app-template (re-run this command to republish)"
+    else
+        log_warn "Push failed. Is git.${DOMAIN} reachable from this machine?"
+        log_warn "Retry with: ./deploy.sh --env ${ENV} portal-templates"
+    fi
+    rm -rf "$staging"
+}
+
+# Registry credentials for CI as Woodpecker *organisation* secrets: every repo
+# in the devhub org inherits registry_user/registry_token, so a scaffolded
+# pipeline can push to the registry with no per-repo secret setup.
+#
+# Woodpecker only mints user API tokens in its UI (there is no CLI/exec path),
+# so that one paste is the single manual step:
+#   WOODPECKER_TOKEN=<token from https://ci.<domain>/user> \
+#     ./deploy.sh --env <env> ci-secrets
+# The token is kept in portal-forgejo-token's sibling secret so the portal can
+# also activate repositories at scaffold time.
+configure_woodpecker_ci_secrets() {
+    log_step "Configuring Woodpecker org-level registry secrets..."
+
+    # Token: the environment wins; otherwise reuse the stored secret.
+    local wp_token="${WOODPECKER_TOKEN:-}"
+    if [[ -z "$wp_token" ]]; then
+        wp_token="$(kubectl get secret portal-woodpecker-token -n portal \
+            -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)"
+    fi
+    if [[ -z "$wp_token" || "$wp_token" == "placeholder" ]]; then
+        log_error "No Woodpecker API token. Create one at https://ci.${DOMAIN}/user, then:"
+        log_error "  WOODPECKER_TOKEN=<token> ./deploy.sh --env ${ENV} ci-secrets"
+        exit 1
+    fi
+
+    # Store it for the portal (repo activation at scaffold time).
+    kubectl create namespace portal 2>/dev/null || true
+    kubectl create secret generic portal-woodpecker-token -n portal \
+        --from-literal=token="$wp_token" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    kubectl rollout restart deployment/portal -n portal >/dev/null 2>&1 || true
+
+    # A Forgejo token that can push packages — the credential CI publishes with.
+    local pod
+    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    [[ -n "$pod" ]] || { log_error "Forgejo is not running"; exit 1; }
+    local admin_user registry_token
+    admin_user="$(kubectl get secret forgejo-admin-secret -n forgejo \
+        -o jsonpath='{.data.username}' | base64 -d)"
+    registry_token="$(kubectl exec -n forgejo "$pod" -- forgejo admin user generate-access-token \
+        --username "$admin_user" --token-name "registry-ci-$(date +%s)" \
+        --scopes write:package,write:repository --raw 2>/dev/null | tr -d '\r' | tail -1)"
+    [[ -n "$registry_token" ]] || { log_error "Could not mint a Forgejo registry token"; exit 1; }
+
+    # Woodpecker API over the public URL — the same reachability assumption as
+    # every other from-this-machine call; trust the local CA when there is one.
+    local -a curl_ca=()
+    [[ "$TLS_TYPE" == "local-ca" && -f "${CERTS_DIR}/ca/ca.crt" ]] \
+        && curl_ca=(--cacert "${CERTS_DIR}/ca/ca.crt")
+    wpapi() { # method path [json-body]
+        curl -fsS "${curl_ca[@]+"${curl_ca[@]}"}" -X "$1" "https://ci.${DOMAIN}$2" \
+            -H "Authorization: Bearer ${wp_token}" -H "Content-Type: application/json" \
+            ${3:+-d "$3"} 2>/dev/null
+    }
+
+    local org_id
+    org_id="$(wpapi GET "/api/orgs/lookup/devhub" | jq -r '.id // empty')"
+    if [[ -z "$org_id" ]]; then
+        log_error "Woodpecker does not know the devhub org yet."
+        log_error "Sign in to https://ci.${DOMAIN} once (that syncs orgs from Forgejo) and re-run."
+        exit 1
+    fi
+
+    # events: push only — a pull request runs code from anyone who can open
+    # one, and must not be able to read the registry-write credential. PR
+    # builds still build; they just cannot push (which they never do anyway).
+    local name value body
+    for name in registry_user registry_token; do
+        [[ "$name" == "registry_user" ]] && value="$admin_user" || value="$registry_token"
+        body="$(jq -n --arg n "$name" --arg v "$value" \
+            '{name: $n, value: $v, events: ["push"]}')"
+        if ! wpapi POST "/api/orgs/${org_id}/secrets" "$body" >/dev/null; then
+            wpapi PATCH "/api/orgs/${org_id}/secrets/${name}" "$body" >/dev/null \
+                || { log_error "Could not create or update org secret ${name}"; exit 1; }
+        fi
+    done
+
+    log_info "Woodpecker org secrets set: registry_user, registry_token (devhub org, push events)"
+    log_info "The portal will now also auto-activate scaffolded repositories in Woodpecker."
+}
+
+install_portal() {
+    log_step "Installing Portal..."
+
+    kubectl create namespace portal 2>/dev/null || true
+
+    # Placeholder so the SecurityPolicy resolves before Keycloak SSO is set up;
+    # setup-keycloak.sh replaces it. Envoy Gateway requires the key name.
+    if ! kubectl get secret portal-oidc-secret -n portal &>/dev/null; then
+        kubectl create secret generic portal-oidc-secret -n portal \
+            --from-literal=client-secret="placeholder"
+    fi
+
+    ensure_portal_forgejo_token
+    publish_app_templates
+
+    # kubectl -k renders the kustomization (the app ConfigMap comes from a
+    # configMapGenerator), so template the copy, not the source.
+    local dir; dir="$(render_dir)"
+    rm -rf "${dir}/portal" && mkdir -p "${dir}/portal"
+    cp "${BASE_DIR}/devops/portal/"* "${dir}/portal/"
+    local f
+    for f in "${dir}/portal/"*.yaml; do
+        template_values "$f" "${f}.rendered"
+        mv "${f}.rendered" "$f"
+    done
+    kubectl apply -k "${dir}/portal"
+
+    log_info "Portal installed — https://portal.${DOMAIN}"
+}
+
 # =============================================================================
 # GitOps handover
 # =============================================================================
@@ -1162,6 +1409,7 @@ deploy_devops() {
     install_argocd
     install_headlamp
     install_homepage
+    install_portal
     install_velero
     install_kyverno
     install_reloader
@@ -1180,6 +1428,8 @@ delete_devops() {
     helm uninstall headlamp -n headlamp 2>/dev/null || true
     helm uninstall homepage -n homepage 2>/dev/null || true
     kubectl delete securitypolicy homepage-oidc -n homepage 2>/dev/null || true
+    kubectl delete deployment,service,serviceaccount,configmap -n portal -l app=portal 2>/dev/null || true
+    kubectl delete securitypolicy portal-oidc -n portal 2>/dev/null || true
     kubectl delete -f "${BASE_DIR}/devops/headlamp/rbac.yaml" 2>/dev/null || true
     helm uninstall argocd -n argocd 2>/dev/null || true
     helm uninstall external-dns -n external-dns 2>/dev/null || true
@@ -1217,7 +1467,7 @@ status_devops() {
     log_step "DevOps Platform Status:"
     echo ""
     for ns in data-services keycloak vault forgejo woodpecker woodpecker-ci argocd monitoring \
-              external-secrets cert-manager external-dns headlamp homepage velero kyverno envoy-gateway-system; do
+              external-secrets cert-manager external-dns headlamp homepage portal velero kyverno envoy-gateway-system; do
         echo "=== ${ns} ==="
         kubectl get pods -n "$ns" 2>/dev/null || echo "  Namespace not found"
         echo ""
@@ -1255,6 +1505,7 @@ print_summary() {
     echo "  - ArgoCD:     https://argocd.${DOMAIN}"
     echo "  - Headlamp:   https://headlamp.${DOMAIN}"
     echo "  - Homepage:   https://home.${DOMAIN}   (start here)"
+    echo "  - Portal:     https://portal.${DOMAIN}   (scaffold a new app)"
     echo ""
     echo "Credentials:"
     echo "  Keycloak:  kubectl get secret keycloak-admin-secret -n keycloak -o jsonpath='{.data.password}' | base64 -d"
@@ -1282,8 +1533,12 @@ usage() {
     echo "Components:"
     echo "  all | devops       Deploy the entire platform"
     echo "  data-services, keycloak, vault, monitoring, forgejo, woodpecker, argocd,"
-    echo "  headlamp, homepage, external-dns, external-secrets, velero,"
+    echo "  headlamp, homepage, portal, external-dns, external-secrets, velero,"
     echo "  cluster-autoscaler, storage, policies, ingress"
+    echo "  portal-token       (Re)mint the portal's Forgejo API token"
+    echo "  portal-templates   (Re)publish the app template into Forgejo"
+    echo "  ci-secrets         Woodpecker org registry secrets + portal CI activation"
+    echo "                     (WOODPECKER_TOKEN=<token from https://ci.<domain>/user>)"
     echo "  db-users           Create managed-PostgreSQL users (once per database)"
     echo "  loki-auth          (Re)generate Loki ingest credentials + ingress"
     echo "  platform-secrets   Move platform credentials into Vault + ExternalSecrets"
@@ -1325,6 +1580,10 @@ main() {
                 argocd)              add_helm_repos && install_argocd ;;
                 headlamp)            add_helm_repos && install_headlamp ;;
                 homepage)            add_helm_repos && install_homepage ;;
+                portal)              install_portal ;;
+                portal-token)        ensure_portal_forgejo_token ;;
+                portal-templates)    publish_app_templates ;;
+                ci-secrets)          configure_woodpecker_ci_secrets ;;
                 external-dns)        add_helm_repos && install_external_dns ;;
                 external-secrets)    add_helm_repos && install_external_secrets ;;
                 velero)              add_helm_repos && install_velero ;;

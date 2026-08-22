@@ -25,6 +25,7 @@ const services = {
   prometheus: host('prometheus'),
   headlamp: host('headlamp'),
   homepage: host('home'),
+  portal: host('portal'),
 };
 
 const credentials = {

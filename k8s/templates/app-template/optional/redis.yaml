@@ -1,0 +1,116 @@
+# Optional add-on: dev-grade Redis in this app's own namespace.
+#
+# The portal copies this file to k8s/redis.yaml when Redis is selected in the
+# wizard; it is not deployed from optional/ (ArgoCD only syncs k8s/).
+#
+# A cache, so no persistence: an emptyDir that vanishes with the pod is the
+# honest behaviour. The password is generated in-cluster by External Secrets'
+# Password generator — nothing secret is committed. The app reads the same
+# Secret: secretKeyRef {name: APP_NAME-redis, key: password}. Production
+# caching belongs on the managed Redis/Valkey the platform provisions per cloud.
+---
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: APP_NAME-redis-password
+  namespace: devhub-APP_NAME
+spec:
+  length: 32
+  digits: 8
+  # No symbols: redis-cli and URL-style REDIS_URLs both choke on them.
+  symbols: 0
+  symbolCharacters: ""
+  noUpper: false
+  allowRepeat: true
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: APP_NAME-redis
+  namespace: devhub-APP_NAME
+spec:
+  # "0" = generate once; a refresh would rotate the password under the running
+  # server, which reads it only at start.
+  refreshInterval: "0"
+  target:
+    name: APP_NAME-redis
+    creationPolicy: Owner
+    template:
+      data:
+        password: "{{ .password }}"
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: Password
+          name: APP_NAME-redis-password
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: APP_NAME-redis
+  namespace: devhub-APP_NAME
+  labels:
+    app: APP_NAME-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: APP_NAME-redis
+  template:
+    metadata:
+      labels:
+        app: APP_NAME-redis
+    spec:
+      priorityClassName: workload-default
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: docker.io/library/redis:7-alpine
+          args: ["--requirepass", "$(REDIS_PASSWORD)", "--maxmemory", "192mb", "--maxmemory-policy", "allkeys-lru"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: APP_NAME-redis, key: password }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: APP_NAME-redis
+  namespace: devhub-APP_NAME
+spec:
+  selector:
+    app: APP_NAME-redis
+  ports:
+    - port: 6379
+      targetPort: 6379

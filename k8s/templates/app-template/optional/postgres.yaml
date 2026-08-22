@@ -1,0 +1,136 @@
+# Optional add-on: dev-grade PostgreSQL in this app's own namespace.
+#
+# The portal copies this file to k8s/postgres.yaml when PostgreSQL is selected
+# in the wizard; it is not deployed from optional/ (ArgoCD only syncs k8s/).
+#
+# Dev-grade means: one instance, one volume. The password is generated
+# in-cluster by External Secrets' Password generator, so nothing secret is ever
+# committed — the workload cluster runs ESO already (see
+# k8s/registry-pull-secret.yaml). The app reads the same Secret:
+#   secretKeyRef {name: APP_NAME-postgres, key: username|password|database}
+# Production loads belong on the managed PostgreSQL the platform provisions
+# per cloud.
+#
+# Image is docker.io/library/* on purpose: Kyverno's registry allow-list for
+# devhub-* namespaces admits the platform registry and a short public list.
+---
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: APP_NAME-postgres-password
+  namespace: devhub-APP_NAME
+spec:
+  length: 32
+  digits: 8
+  # No symbols: they end up percent-encoded (or broken) in connection strings.
+  symbols: 0
+  symbolCharacters: ""
+  noUpper: false
+  allowRepeat: true
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: APP_NAME-postgres
+  namespace: devhub-APP_NAME
+spec:
+  # "0" = generate once and stop: a refresh would mint a new password under a
+  # database initialised with the old one.
+  refreshInterval: "0"
+  target:
+    name: APP_NAME-postgres
+    creationPolicy: Owner
+    template:
+      data:
+        username: APP_NAME
+        database: APP_NAME
+        password: "{{ .password }}"
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: Password
+          name: APP_NAME-postgres-password
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: APP_NAME-postgres
+  namespace: devhub-APP_NAME
+  labels:
+    app: APP_NAME-postgres
+spec:
+  serviceName: APP_NAME-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: APP_NAME-postgres
+  template:
+    metadata:
+      labels:
+        app: APP_NAME-postgres
+    spec:
+      priorityClassName: workload-default
+      securityContext:
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: docker.io/library/postgres:16-alpine
+          securityContext:
+            runAsUser: 70
+            runAsGroup: 70
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: APP_NAME-postgres, key: username }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: APP_NAME-postgres, key: password }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: APP_NAME-postgres, key: database }
+            # A subdirectory, because the volume root holds lost+found.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "APP_NAME"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: APP_NAME-postgres
+  namespace: devhub-APP_NAME
+spec:
+  selector:
+    app: APP_NAME-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
