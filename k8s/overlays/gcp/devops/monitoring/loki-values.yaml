@@ -37,6 +37,7 @@ serviceAccount:
     iam.gke.io/gcp-service-account: "${LOKI_GSA_EMAIL}"
 
 
-singleBinary:
-  persistence:
-    enabled: false
+# Chunks live in GCS, but the base overlay's PVC stays: the compactor, WAL and
+# tsdb index cache all write under /var/loki, and the chart's root filesystem
+# is read-only — with the PVC disabled Loki crash-loops on
+# "mkdir /var/loki: read-only file system".

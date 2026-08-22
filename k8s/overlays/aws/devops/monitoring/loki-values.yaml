@@ -38,8 +38,8 @@ serviceAccount:
   annotations:
     eks.amazonaws.com/role-arn: "${LOKI_IRSA_ROLE_ARN}"
 
-# Switch from filesystem to S3 — disable local PVC
-singleBinary:
-  persistence:
-    enabled: false
+# Chunks live in S3, but the base overlay's PVC stays: the compactor, WAL and
+# tsdb index cache all write under /var/loki, and the chart's root filesystem
+# is read-only — with the PVC disabled Loki crash-loops on
+# "mkdir /var/loki: read-only file system".
 

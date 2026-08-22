@@ -44,9 +44,9 @@ serviceAccount:
     azure.workload.identity/client-id: "${LOKI_IDENTITY_CLIENT_ID}"
 
 
+# Chunks live in Blob Storage; the base overlay's PVC stays (compactor, WAL
+# and tsdb index cache write under /var/loki on a read-only root filesystem).
 singleBinary:
   # Pod label required for Azure Workload Identity webhook to inject credentials
   podLabels:
     azure.workload.identity/use: "true"
-  persistence:
-    enabled: false

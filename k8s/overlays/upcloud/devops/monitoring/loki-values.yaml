@@ -41,10 +41,10 @@ loki:
           prefix: loki_index_
           period: 24h
 
-# Switch from filesystem to S3 — disable the local PVC, feed the credentials in
+# Chunks live in object storage; the base overlay's PVC stays (compactor, WAL
+# and tsdb index cache write under /var/loki on a read-only root filesystem).
+# The credentials are fed in from the Secret deploy.sh creates.
 singleBinary:
-  persistence:
-    enabled: false
   extraEnvFrom:
     - secretRef:
         name: loki-objstore-credentials
