@@ -501,14 +501,25 @@ run_step() {
     $AUTO && [[ "$action" == preflight* ]] && action="$action --yes"
 
     # `apply` costs money and can be destructive: always show the plan first.
+    # The plan is saved and that exact file is applied — tofu then asks no
+    # second "yes" (which double-prompted, and EOF-killed unattended runs),
+    # and what was confirmed is exactly what happens, even if the world moved.
     if [[ "$key" == "applied" ]]; then
+        local planfile
+        planfile="$(mktemp)"
         log_info "Reviewing the plan before applying"
-        # shellcheck disable=SC2086
-        "$DEVHUB" plan --env "$ENV" || return 1
+        if ! "$DEVHUB" plan --env "$ENV" -out="$planfile"; then
+            rm -f "$planfile"
+            return 1
+        fi
         echo ""
         log_warn "Review the plan above. Creating cloud resources costs money;"
         log_warn "changes to private-cluster settings can replace an existing cluster."
-        confirm "Apply this plan?" || { log_warn "Not applied"; return 1; }
+        confirm "Apply this plan?" || { rm -f "$planfile"; log_warn "Not applied"; return 1; }
+        "$DEVHUB" apply --env "$ENV" "$planfile"
+        local rc=$?
+        rm -f "$planfile"
+        return $rc
     fi
 
     # shellcheck disable=SC2086
@@ -592,8 +603,15 @@ EOF
 }
 
 run_apply_now() {
-    "$DEVHUB" plan --env "$ENV" || return 1
-    confirm "Apply?" && "$DEVHUB" apply --env "$ENV"
+    local planfile
+    planfile="$(mktemp)"
+    "$DEVHUB" plan --env "$ENV" -out="$planfile" || { rm -f "$planfile"; return 1; }
+    local rc=0
+    if confirm "Apply?"; then
+        "$DEVHUB" apply --env "$ENV" "$planfile" || rc=$?
+    fi
+    rm -f "$planfile"
+    return $rc
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────
