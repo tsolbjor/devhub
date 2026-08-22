@@ -18,6 +18,13 @@ module "cluster" {
   aks_node_min_count = 2
   aks_node_max_count = 8
 
+  # Overflow pool in the DSv3 family: default subscriptions cap the B-series
+  # at 10 vCPUs (5×B2s), and the platform needs more than that. A different
+  # family draws from a separate quota bucket.
+  worker_node_vm_size   = "Standard_D2s_v3"
+  worker_node_min_count = 0
+  worker_node_max_count = 3
+
   # CI node pool — spot, scales to zero, tainted workload=ci
   ci_node_vm_size   = "Standard_D4s_v3"
   ci_node_min_count = 0

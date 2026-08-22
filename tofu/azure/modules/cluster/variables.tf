@@ -218,3 +218,21 @@ variable "entra_require_assignment" {
   type        = bool
   default     = false # Set true for production to restrict access to assigned users only
 }
+
+variable "worker_node_vm_size" {
+  description = "VM size for the overflow worker pool — pick a different family than the system pool so it draws from a separate vCPU quota bucket"
+  type        = string
+  default     = "Standard_D2s_v3"
+}
+
+variable "worker_node_min_count" {
+  description = "Minimum overflow worker nodes"
+  type        = number
+  default     = 0
+}
+
+variable "worker_node_max_count" {
+  description = "Maximum overflow worker nodes (0 disables the pool)"
+  type        = number
+  default     = 0
+}
