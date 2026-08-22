@@ -496,6 +496,10 @@ run_step() {
 
     banner "${STEP_LABEL[$i]}"
 
+    # preflight interviews the operator (confirmations no command can check);
+    # in unattended mode answer for them, as --auto promises.
+    $AUTO && [[ "$action" == preflight* ]] && action="$action --yes"
+
     # `apply` costs money and can be destructive: always show the plan first.
     if [[ "$key" == "applied" ]]; then
         log_info "Reviewing the plan before applying"

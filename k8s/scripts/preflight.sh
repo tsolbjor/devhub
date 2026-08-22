@@ -49,6 +49,7 @@ if [[ " ${PLATFORM_ENVS} ${WORKLOAD_ENVS} " != *" ${ENV} "* ]]; then
 fi
 
 CLOUD="$([[ "$ENV" == "local" ]] && echo local || echo "${ENV%%-*}")"
+TIER="${ENV##*-}"   # dev | prod | workload (local has no tier)
 ENV_DIR="${SCRIPT_DIR}/${ENV}"
 CONFIG_FILE="${REPO_ROOT}/k8s/overlays/${ENV}/config.yaml"
 MARKER="${ENV_DIR}/preflight.ok"
@@ -182,6 +183,10 @@ EOF
      - tofu state goes in Managed Object Storage (S3-compatible); create the
        instance and an access key first, and export them as
        AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
+     - No KMS seal: Vault prints 3-of-5 unseal keys once at setup and needs
+       them after every restart. Have offline storage for them ready.
+     - Velero backs volumes up with file-system backup here, so the GitOps
+       repository's off-cluster mirror matters more than on other clouds.
 
 EOF
             ;;
@@ -340,8 +345,27 @@ check_dns() {
             fi
             ;;
         upcloud)
-            warn "UpCloud has no DNS product — this platform expects Cloudflare"
-            note "Create the zone in Cloudflare, delegate to it, then create the token secret:"
+            # No UpCloud DNS product — the platform expects the zone on
+            # Cloudflare, and that much *is* observable from here: Cloudflare
+            # zones answer with *.ns.cloudflare.com nameservers.
+            if command -v dig &>/dev/null; then
+                local cf_ns
+                cf_ns="$(dig +short NS "${DOMAIN}" 2>/dev/null | sed 's/\.$//')"
+                if echo "$cf_ns" | grep -qi 'cloudflare'; then
+                    ok "zone is on Cloudflare ($(echo "$cf_ns" | head -1))"
+                    zone_ns="$cf_ns"
+                elif [[ -n "$cf_ns" ]]; then
+                    warn "public NS records are not Cloudflare's: $(echo "$cf_ns" | head -1)"
+                    note "Move the zone to Cloudflare, or adapt overlays/upcloud/devops/external-dns"
+                    note "to your DNS provider."
+                else
+                    warn "no public NS records for ${DOMAIN} — create the zone in Cloudflare"
+                    note "and point your registrar's nameservers at it."
+                fi
+            else
+                warn "dig not installed — cannot check for a Cloudflare zone"
+            fi
+            note "Once the cluster exists, store the API token as the external-dns-cloudflare secret:"
             note "  kubectl create secret generic external-dns-cloudflare -n external-dns \\"
             note "    --from-literal=api-token=<token with DNS:Edit>"
             ;;
@@ -373,29 +397,86 @@ check_dns() {
     fi
 }
 
-# Things no command can determine.
+# The interview: things no command can determine, asked of the person who will
+# actually run the deployment. Every answer is recorded in the marker file, so
+# --recheck shows what was claimed last time and by implication what changed.
+CONFIRMED=()
+
+record() { CONFIRMED+=("confirmed.$1=$2"); }
+
+# A 'no' here blocks: the deployment will fail or be unusable without it.
+ask_required() {
+    local key="$1" question="$2"
+    if confirm "$question"; then
+        ok "$question"
+        record "$key" yes
+    else
+        bad "not confirmed: ${question}"
+        record "$key" no
+    fi
+}
+
+# A 'no' here is recorded and explained, not fatal — for prerequisites that can
+# be added later, at a known cost.
+ask_optional() {
+    local key="$1" question="$2"
+    shift 2
+    if confirm "$question"; then
+        ok "$question"
+        record "$key" yes
+    else
+        warn "not yet: ${question}"
+        local n
+        for n in "$@"; do note "$n"; done
+        record "$key" no
+    fi
+}
+
 ask_confirmations() {
     [[ "$CLOUD" == "local" ]] && return 0
     echo ""
-    echo "Confirmations"
+    echo "Confirmations — what no command can check"
 
-    local q=(
+    ask_required registrar \
         "Do you control the domain at its registrar (able to change nameservers)?"
+    ask_required billing \
         "Is billing enabled on this ${CLOUD} account, and are you happy to create billable resources?"
-    )
+
     case "$CLOUD" in
-        azure) q+=("Do you have Entra directory permissions to create app registrations?") ;;
-        gcp)   q+=("Is the target project created with billing enabled?") ;;
+        azure)
+            ask_required entra_appreg \
+                "Do you have Entra directory permissions to create app registrations (Application.ReadWrite.All)?"
+            ask_required entra_groups \
+                "Do you know the object ids of the Entra groups that should hold cluster-admin?"
+            ;;
+        gcp)
+            ask_required project \
+                "Is the target project created with billing enabled?"
+            if [[ "$TIER" != "workload" ]]; then
+                ask_optional oauth_client \
+                    "Have you created the Google OAuth client for Keycloak's Google login? (manual — no Terraform resource exists)" \
+                    "Create it in the Cloud Console before 'deploy'; the id and secret go in manual-secrets.env."
+            fi
+            ;;
+        upcloud)
+            ask_required cloudflare_token \
+                "Do you have a Cloudflare API token with DNS:Edit for this zone? (external-dns and wildcard certificates need it)"
+            if [[ "$TIER" != "workload" ]]; then
+                ask_required unseal_storage \
+                    "UpCloud has no KMS seal: Vault prints 3-of-5 unseal keys once at setup. Do you have offline storage ready for them (password manager, printed copy)?"
+            fi
+            ;;
     esac
 
-    local item
-    for item in "${q[@]}"; do
-        if confirm "$item"; then
-            ok "confirmed"
-        else
-            bad "not confirmed: ${item}"
-        fi
-    done
+    # The GitOps repository lives in the environment's own Forgejo; an
+    # off-cluster mirror is the copy that survives losing the cluster.
+    if [[ "$TIER" != "workload" ]]; then
+        local mirror_q="Have you prepared an off-cluster mirror repository + write token for the GitOps repo? (recommended)"
+        [[ "$CLOUD" == "upcloud" ]] && mirror_q="Have you prepared an off-cluster mirror repository + write token for the GitOps repo? (strongly recommended on UpCloud: without it the repo has no copy outside the cluster's own backups)"
+        ask_optional mirror "$mirror_q" \
+            "'./devhub setup' asks for the mirror URL and token; it can also be added later" \
+            "by re-running setup before './devhub gitops-repo'."
+    fi
 }
 
 write_marker() {
@@ -406,6 +487,7 @@ write_marker() {
         echo "cloud=${CLOUD}"
         echo "domain=${DOMAIN:-<unset>}"
         echo "warnings=${WARNED}"
+        printf '%s\n' "${CONFIRMED[@]+"${CONFIRMED[@]}"}"
     } > "$MARKER"
     chmod 600 "$MARKER"
 }
