@@ -325,6 +325,14 @@ det_keycloak() {
 }
 det_secrets()    { kc get externalsecret forgejo-db-secret -n forgejo >/dev/null; }
 det_appofapps()  { kc get application devhub-apps -n argocd >/dev/null; }
+# CI secrets: the stored Woodpecker token is the marker (ci-secrets stores it
+# for the portal's scaffold-time repo activation), and "placeholder" is the
+# pre-setup value install_portal seeds — present but not done.
+det_cisecrets() {
+    local t
+    t="$(kc get secret portal-woodpecker-token -n portal -o jsonpath='{.data.token}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+    [[ -n "$t" && "$t" != "placeholder" ]]
+}
 det_gitops()     { kc get applicationset platform-components -n argocd >/dev/null; }
 det_registered() { kc get secret loki-ingest-credentials -n monitoring >/dev/null; }
 # The environment's own GitOps repository, published into its Forgejo. Detected
@@ -362,6 +370,7 @@ if [[ "$ENV" == "local" ]]; then
     step vault     "Vault initialised and unsealed"          det_vault     "vault --env ${ENV}"
     step keycloak  "Keycloak realm and OIDC clients"         det_keycloak  "keycloak --env ${ENV}"
     step secrets   "Credentials moved into Vault"            det_secrets   "secrets --env ${ENV}"
+    step cisecrets "Woodpecker CI secrets (auto-activation)"  det_cisecrets "deploy --env ${ENV} ci-secrets"
     step appofapps "ArgoCD app-of-apps"                      det_appofapps "deploy --env ${ENV} bootstrap"
     step gitops    "Platform handed to ArgoCD"               det_gitops    "gitops --env ${ENV}"
     step gitopsrepo "GitOps repository published"            det_gitopsrepo "gitops-repo --env ${ENV}"
@@ -394,6 +403,7 @@ else
     step vault     "Vault initialised and unsealed"          det_vault     "vault --env ${ENV}"
     step keycloak  "Keycloak realm and OIDC clients"         det_keycloak  "keycloak --env ${ENV}"
     step secrets   "Credentials moved into Vault"            det_secrets   "secrets --env ${ENV}"
+    step cisecrets "Woodpecker CI secrets (auto-activation)"  det_cisecrets "deploy --env ${ENV} ci-secrets"
     step appofapps "ArgoCD app-of-apps"                      det_appofapps "deploy --env ${ENV} bootstrap"
     step gitops    "Platform handed to ArgoCD"               det_gitops    "gitops --env ${ENV}"
     step gitopsrepo "GitOps repository published"            det_gitopsrepo "gitops-repo --env ${ENV}"

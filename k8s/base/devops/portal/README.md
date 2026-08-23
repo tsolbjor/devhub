@@ -70,16 +70,21 @@ exactly this repository's. Teams that prefer to evolve them in Forgejo directly
 it. Republishing the chart is a fleet-wide change: every chart-based app
 renders through HEAD on its next sync.
 
-## The one manual step: `ci-secrets`
+## CI secrets: `ci-secrets` (automatic)
 
-Woodpecker mints user API tokens only in its UI. Once per environment:
+Woodpecker mints user API tokens only for a signed-in browser session — so
+`ci-secrets` signs in: with no `WOODPECKER_TOKEN` provided it drives the SSO
+chain (Keycloak → Forgejo → Woodpecker) headlessly as platform-admin with the
+e2e suite's Playwright and asks Woodpecker's own token endpoint
+(`mint-woodpecker-token.sh`). `setup-all.sh` runs it during bootstrap and
+quickstart shows it as a checked step, so a fresh environment gets
+scaffold-time repo activation with no manual step.
 
 ```bash
-# token from https://ci.<domain>/user
-WOODPECKER_TOKEN=<token> ./deploy.sh --env <env> ci-secrets
+./deploy.sh --env <env> ci-secrets                      # mints the token itself
+WOODPECKER_TOKEN=<token> ./deploy.sh --env <env> ci-secrets   # or bring your own
 ```
 
-That stores the token for the portal (repo auto-activation at scaffold time)
-and sets the org-level registry secrets. Everything the wizard does is fully
-automatic from then on. Without it, activation and the registry secrets fall
-back to starter issues.
+That stores the token for the portal (repo auto-activation before the scaffold
+commit, so the first push already builds) and sets the org-level registry
+secrets. Until it has run, activation falls back to a starter issue.

@@ -221,7 +221,18 @@ create_admin_user() {
     # Create platform-admin (permanent password for testing/admin access)
     if kcadm get users -r ${REALM} -q username=platform-admin 2>/dev/null | grep -q '"username"' || \
        kcadm get users -r ${REALM} -q email=platform-admin@${DOMAIN} 2>/dev/null | grep -q '"email"'; then
-        log_warn "User platform-admin already exists"
+        if grep -q '^PLATFORM_ADMIN_PASSWORD=' "${secrets_file}" 2>/dev/null; then
+            log_warn "User platform-admin already exists"
+        else
+            # The user exists but the stored password is gone (the file was
+            # regenerated). Keycloak cannot read a password back, so reset it
+            # and store the new one — same end state as a fresh create.
+            local user_id=$(kcadm get users -r ${REALM} -q username=platform-admin 2>/dev/null | grep '"id"' | head -1 | cut -d'"' -f4)
+            local admin_password="Admin$(openssl rand -hex 4)"
+            kcadm set-password -r ${REALM} --userid "${user_id}" --new-password "${admin_password}"
+            echo "PLATFORM_ADMIN_PASSWORD=${admin_password}" >> "${secrets_file}"
+            log_info "User platform-admin existed with no stored password — password reset and stored"
+        fi
     else
         local admin_password="Admin$(openssl rand -hex 4)"
 
@@ -259,7 +270,17 @@ configure_clients() {
     log_step "Configuring OIDC clients..."
 
     local secrets_file="${SCRIPT_ENV_DIR}/oidc-secrets.env"
-    : > "${secrets_file}"
+    # Rewrite only the client-secret lines. The *_ADMIN_PASSWORD lines written
+    # by the user step must survive a clients re-run — losing them silently
+    # breaks everything that signs in with the stored password (validate-e2e,
+    # mint-woodpecker-token), while the passwords themselves stay valid in
+    # Keycloak with no way to read them back.
+    if [[ -f "$secrets_file" ]]; then
+        grep '_ADMIN_PASSWORD=' "$secrets_file" > "${secrets_file}.tmp" || true
+        mv "${secrets_file}.tmp" "$secrets_file"
+    else
+        : > "${secrets_file}"
+    fi
     chmod 600 "${secrets_file}"
 
     # Grafana

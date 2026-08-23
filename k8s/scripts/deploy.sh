@@ -1182,11 +1182,54 @@ publish_app_templates() {
 configure_woodpecker_ci_secrets() {
     log_step "Configuring Woodpecker org-level registry secrets..."
 
+    # Everything Woodpecker does — listing repos, creating activation webhooks,
+    # syncing orgs — happens with platform-admin's forge OAuth identity, so
+    # platform-admin must be able to administer the devhub org's repositories.
+    # Make it an org owner (idempotent) BEFORE any Woodpecker login: the login
+    # is what syncs org membership into Woodpecker.
+    local fj_pod fj_admin fj_token
+    fj_pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    [[ -n "$fj_pod" ]] || { log_error "Forgejo is not running"; exit 1; }
+    fj_admin="$(kubectl get secret forgejo-admin-secret -n forgejo \
+        -o jsonpath='{.data.username}' | base64 -d)"
+    fj_token="$(kubectl exec -n forgejo "$fj_pod" -- forgejo admin user generate-access-token \
+        --username "$fj_admin" --token-name "ci-secrets-$(date +%s)" \
+        --scopes write:organization,write:package,write:repository --raw 2>/dev/null | tr -d '\r' | tail -1)"
+    [[ -n "$fj_token" ]] || { log_error "Could not mint a Forgejo admin token"; exit 1; }
+    fjapi() { # method path
+        kubectl exec -n forgejo "$fj_pod" -- curl -fsS -X "$1" "http://localhost:3000/api/v1$2" \
+            -H "Authorization: token ${fj_token}" 2>/dev/null
+    }
+    local owners_id
+    owners_id="$(fjapi GET "/orgs/devhub/teams" | jq -r '.[] | select(.name=="Owners") | .id')"
+    if [[ -n "$owners_id" ]]; then
+        if kubectl exec -n forgejo "$fj_pod" -- curl -fsS -X PUT \
+            "http://localhost:3000/api/v1/teams/${owners_id}/members/platform-admin" \
+            -H "Authorization: token ${fj_token}" >/dev/null 2>&1; then
+            log_info "platform-admin is an owner of the devhub org"
+        else
+            log_warn "Could not add platform-admin to the devhub org owners (has it signed in to Forgejo yet?)"
+        fi
+    else
+        log_warn "devhub org has no Owners team visible — skipping org membership"
+    fi
+
     # Token: the environment wins; otherwise reuse the stored secret.
     local wp_token="${WOODPECKER_TOKEN:-}"
     if [[ -z "$wp_token" ]]; then
         wp_token="$(kubectl get secret portal-woodpecker-token -n portal \
             -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)"
+    fi
+    if [[ -z "$wp_token" || "$wp_token" == "placeholder" ]]; then
+        # No token given and none stored: mint one headlessly (Playwright walks
+        # the SSO chain as platform-admin — see mint-woodpecker-token.sh). This
+        # is what makes CI setup automatic all the way from quickstart.
+        log_info "No token provided — minting one via the SSO chain..."
+        wp_token="$("${SCRIPT_DIR}/mint-woodpecker-token.sh" --env "${ENV}" 2> >(sed 's/^/    /' >&2) | tail -1 || true)"
+        # A Woodpecker token is a JWT; anything else means log noise leaked
+        # onto stdout and must not be stored as a credential.
+        [[ "$wp_token" == *.*.* && "$wp_token" != *' '* ]] || wp_token=""
     fi
     if [[ -z "$wp_token" || "$wp_token" == "placeholder" ]]; then
         log_error "No Woodpecker API token. Create one at https://ci.${DOMAIN}/user, then:"
@@ -1225,14 +1268,12 @@ configure_woodpecker_ci_secrets() {
             ${3:+-d "$3"} 2>/dev/null
     }
 
-    local org_id
-    org_id="$(wpapi GET "/api/orgs/lookup/devhub" | jq -r '.id // empty')"
-    if [[ -z "$org_id" ]]; then
-        log_error "Woodpecker does not know the devhub org yet."
-        log_error "Sign in to https://ci.${DOMAIN} once (that syncs orgs from Forgejo) and re-run."
-        exit 1
-    fi
-
+    # Instance-global secrets, not org secrets: Woodpecker only materialises an
+    # org record once a repository in it is activated, so on a fresh platform
+    # there is nothing to scope an org secret to yet. This Woodpecker serves
+    # exactly one forge and every repo it can build lives in the devhub org,
+    # so global and org-scoped are the same trust boundary here.
+    #
     # events: push only — a pull request runs code from anyone who can open
     # one, and must not be able to read the registry-write credential. PR
     # builds still build; they just cannot push (which they never do anyway).
@@ -1241,13 +1282,13 @@ configure_woodpecker_ci_secrets() {
         [[ "$name" == "registry_user" ]] && value="$admin_user" || value="$registry_token"
         body="$(jq -n --arg n "$name" --arg v "$value" \
             '{name: $n, value: $v, events: ["push"]}')"
-        if ! wpapi POST "/api/orgs/${org_id}/secrets" "$body" >/dev/null; then
-            wpapi PATCH "/api/orgs/${org_id}/secrets/${name}" "$body" >/dev/null \
-                || { log_error "Could not create or update org secret ${name}"; exit 1; }
+        if ! wpapi POST "/api/secrets" "$body" >/dev/null; then
+            wpapi PATCH "/api/secrets/${name}" "$body" >/dev/null \
+                || { log_error "Could not create or update global secret ${name}"; exit 1; }
         fi
     done
 
-    log_info "Woodpecker org secrets set: registry_user, registry_token (devhub org, push events)"
+    log_info "Woodpecker secrets set: registry_user, registry_token (push events only)"
     log_info "The portal will now also auto-activate scaffolded repositories in Woodpecker."
 }
 

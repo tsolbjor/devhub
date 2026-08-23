@@ -257,6 +257,16 @@ phase_platform_secrets() {
         log_warn "Platform secret handover incomplete — run it again later:"
         log_warn "  ./deploy.sh --env ${ENV} platform-secrets"
     }
+
+    # CI secrets: mints a Woodpecker token headlessly (SSO chain as
+    # platform-admin) and stores the org registry secrets — what lets the
+    # portal activate repositories at scaffold time, so a scaffolded app's
+    # first commit already builds. Best-effort: everything else works without
+    # it, and the quickstart checklist keeps showing the step until it's done.
+    "${SCRIPT_DIR}/deploy.sh" --env "${ENV}" ci-secrets deploy || {
+        log_warn "Woodpecker CI secrets incomplete — run it again later:"
+        log_warn "  ./deploy.sh --env ${ENV} ci-secrets"
+    }
 }
 
 # =============================================================================

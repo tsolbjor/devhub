@@ -252,11 +252,13 @@ what makes Kyverno fence it. Design rule: **the portal writes git, never the
 cluster** — one Forgejo token, no Kubernetes RBAC. Templates live in the
 `devhub-templates` org because every `devhub`-org repo with `k8s/` gets
 deployed. `deploy.sh --env <env> portal` installs it (and publishes the
-template + mints the token); `portal-templates` republishes the template after
-an edit (force-push of a fresh tree); `WOODPECKER_TOKEN=<ui-token> deploy.sh
---env <env> ci-secrets` — the one manual step — stores the Woodpecker token so
-the portal auto-activates repos, and sets `registry_user`/`registry_token` as
-Woodpecker org secrets (push events only). See
+templates + mints the token); `portal-templates` republishes every
+`k8s/templates/` directory after an edit (force-push of a fresh tree);
+`deploy.sh --env <env> ci-secrets` stores a Woodpecker token so the portal
+auto-activates repos, and sets `registry_user`/`registry_token` as Woodpecker
+org secrets (push events only) — with no `WOODPECKER_TOKEN` given it mints the
+token itself, headlessly through the SSO chain (`mint-woodpecker-token.sh`,
+Playwright), so bootstrap and quickstart run it automatically. See
 `k8s/base/devops/portal/README.md`.
 
 ### Cloud-Specific Managed Services
