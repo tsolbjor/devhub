@@ -1,7 +1,12 @@
 # Portal — the platform's developer wizard
 
-A small internal-developer-platform front door: one form that turns "I need a
-new service" into everything the platform already knows how to run.
+A small internal-developer-platform front door, three views behind one nav:
+
+- **New application** — the wizard: one form turns "I need a new service" into
+  everything the platform already knows how to run
+- **Your applications** — the signed-in user's admin repos, with deprovisioning
+- **Add-ons** — optional organisation-wide features (dependency-update bot, …),
+  enabled and disabled as git operations (see `k8s/docs/ADDONS.md`)
 
 ## What one wizard run produces
 
@@ -34,6 +39,21 @@ volumes — swept by `deploy.sh --env <env> cleanup-apps` (dry-run; add `apply`)
 or `deploy-workload.sh --env <env> cleanup-apps [apply]` on workload clusters
 — plus the container images under the org's packages, and Velero backups
 until retention expires.
+
+## Add-ons
+
+The third curated action. A template repo named `addon-*` in
+`devhub-templates` is offered on the Add-ons view instead of the wizard's
+template picker; enabling it copies the template into the `devhub` org under
+the same name, so `forgejo-appset` deploys it to every registered workload
+cluster like any app — Kyverno guardrails included. The enabling user becomes
+repository admin (that authorises disabling), the template's `SETUP.md` is
+opened as an issue carrying the remaining manual steps, and CI is only
+activated when the template ships a `.woodpecker.yml` — most add-ons run a
+stock upstream image. Disable = the same repo deletion as deprovisioning.
+The `addon-` name prefix is reserved: the wizard rejects it for apps.
+Convention, authoring guide and the retrofit story for handed-over
+environments: `k8s/docs/ADDONS.md`.
 
 ## Design rules
 

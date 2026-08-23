@@ -113,6 +113,11 @@ async function userRepoPermission(username, name) {
 
 const CAN_DEPROVISION = (perm) => perm === 'admin' || perm === 'owner';
 
+// Template repos named addon-* are platform add-ons (see /api/addons), not
+// scaffolding templates; enabled add-ons live in the apps org under the same
+// name, so the prefix is reserved on both sides.
+const ADDON_PREFIX = 'addon-';
+
 // One answer for both the live check (/api/validate-name) and the create path:
 // syntactically a DNS label, not a platform hostname, not an existing repo.
 async function validateName(name) {
@@ -121,6 +126,9 @@ async function validateName(name) {
       available: false,
       reason: 'Must be a DNS label: lowercase letters, digits and dashes, max 39 chars, starting with a letter.',
     };
+  }
+  if (name.startsWith(ADDON_PREFIX)) {
+    return { available: false, reason: `The "${ADDON_PREFIX}" prefix is reserved for platform add-ons.` };
   }
   if (RESERVED.has(name)) {
     return { available: false, reason: `"${name}.${DOMAIN}" is a platform hostname — pick another name.` };
@@ -256,6 +264,11 @@ async function createApp({ name, description, template, options, creator }) {
   }
   step('Template read', `${files.length} files from ${TEMPLATES_ORG}/${template}`);
 
+  // Only templates that ship a pipeline get activated in Woodpecker — a repo
+  // without .woodpecker.yml (e.g. one deploying a stock upstream image) has
+  // nothing to build.
+  const hasCI = paths.includes('.woodpecker.yml');
+
   const created = await forgejo('POST', `/orgs/${APPS_ORG}/repos`, {
     name,
     description: description || `${name} — scaffolded by the devhub portal`,
@@ -287,7 +300,7 @@ async function createApp({ name, description, template, options, creator }) {
   // wizard. Falls back to a starter issue.
   let ciActivated = false;
   let wpRepo = null;
-  if (CAN_ACTIVATE_CI) {
+  if (CAN_ACTIVATE_CI && hasCI) {
     try {
       wpRepo = await woodpeckerActivate(created.id);
       ciActivated = true;
@@ -321,7 +334,7 @@ async function createApp({ name, description, template, options, creator }) {
       console.error(`milestone for ${name}: ${err.message}`);
     }
     let count = 0;
-    for (const issue of STARTER_ISSUES(name, options, ciActivated)) {
+    for (const issue of STARTER_ISSUES(name, options, ciActivated || !hasCI)) {
       await forgejo('POST', `/repos/${APPS_ORG}/${name}/issues`,
         milestoneId ? { ...issue, milestone: milestoneId } : issue);
       count += 1;
@@ -341,6 +354,142 @@ async function createApp({ name, description, template, options, creator }) {
     argocd: `https://argocd.${DOMAIN}/applications`,
     image: `git.${DOMAIN}/${APPS_ORG}/${name}`,
     url: `https://${name}.${DOMAIN}`,
+  };
+}
+
+// ── Add-ons ─────────────────────────────────────────────────────────────────
+//
+// A platform add-on is a template repository named addon-* in the templates
+// org (published by `deploy.sh <env> portal-templates`, like every template).
+// Enabling one copies it into the apps org under the same name — and the
+// existing conventions do all the work from there: forgejo-appset deploys the
+// repo to every registered workload cluster, Kyverno fences its devhub-<name>
+// namespace. Disabling is the same repo deletion the apps list uses. Still
+// git-only: enable is a commit, disable is a deletion, both auditable and both
+// covered by the push mirror. See k8s/docs/ADDONS.md for the convention.
+
+async function listAddons(username) {
+  const repos = await forgejo('GET', `/orgs/${TEMPLATES_ORG}/repos`).catch(() => []);
+  const addons = [];
+  for (const t of repos || []) {
+    if (!t.name.startsWith(ADDON_PREFIX)) continue;
+    let enabled = false;
+    let canDisable = false;
+    try {
+      await forgejo('GET', `/repos/${APPS_ORG}/${t.name}`);
+      enabled = true;
+      if (username) canDisable = CAN_DEPROVISION(await userRepoPermission(username, t.name));
+    } catch (e) {
+      if (e.status !== 404) throw e;
+    }
+    addons.push({
+      name: t.name,
+      description: t.description || '',
+      enabled,
+      canDisable,
+      repo: enabled ? `https://git.${DOMAIN}/${APPS_ORG}/${t.name}` : null,
+      issues: enabled ? `https://git.${DOMAIN}/${APPS_ORG}/${t.name}/issues` : null,
+      template: `https://git.${DOMAIN}/${TEMPLATES_ORG}/${t.name}`,
+    });
+  }
+  return addons;
+}
+
+async function enableAddon({ name, creator }) {
+  const steps = [];
+  const step = (title, detail) => steps.push({ title, detail });
+
+  if (!NAME_RE.test(name || '') || !name.startsWith(ADDON_PREFIX)) {
+    throw Object.assign(new Error('Not an add-on name.'), { status: 400 });
+  }
+  // The templates org is the catalog: only add-ons the platform published can
+  // be enabled — this is never a way to create an arbitrary repo.
+  let template;
+  try {
+    template = await forgejo('GET', `/repos/${TEMPLATES_ORG}/${name}`);
+  } catch (e) {
+    if (e.status === 404) throw Object.assign(new Error(`No such add-on: ${name}.`), { status: 404 });
+    throw e;
+  }
+  try {
+    await forgejo('GET', `/repos/${APPS_ORG}/${name}`);
+    throw Object.assign(new Error(`${name} is already enabled.`), { status: 409 });
+  } catch (e) {
+    if (e.status !== 404) throw e;
+  }
+
+  // Copy everything except optional/ (that mechanism is the app wizard's).
+  // Same APP_NAME/DOMAIN substitution as the scaffold — an add-on template
+  // mostly needs DOMAIN, e.g. for the platform's public git hostname.
+  const paths = await templateFiles(name);
+  const files = [];
+  for (const p of paths) {
+    if (p.startsWith('optional/')) continue;
+    const raw = await fileContent(name, p);
+    files.push({
+      operation: 'create',
+      path: substitute(p, name, {}),
+      content: Buffer.from(substitute(raw, name, {}), 'utf8').toString('base64'),
+    });
+  }
+  step('Template read', `${files.length} files from ${TEMPLATES_ORG}/${name}`);
+
+  const created = await forgejo('POST', `/orgs/${APPS_ORG}/repos`, {
+    name,
+    description: template.description || `${name} — platform add-on, enabled via the devhub portal`,
+    private: false,
+    auto_init: false,
+    default_branch: 'main',
+  });
+  step('Add-on enabled', `${APPS_ORG}/${name} — forgejo-appset deploys it to every registered workload cluster`);
+
+  // Whoever enabled it administers it — and is thereby authorised to disable it.
+  if (creator) {
+    try {
+      await forgejo('PUT',
+        `/repos/${APPS_ORG}/${name}/collaborators/${encodeURIComponent(creator.username)}`,
+        { permission: 'admin' });
+      step('Owner recorded', `${creator.username} is repository admin — and may disable the add-on here`);
+    } catch (err) {
+      console.error(`collaborator ${creator.username} on ${name}: ${err.message}`);
+      step('Owner not recorded', `${err.message} — sign in to Forgejo once, then ask an admin to add you`);
+    }
+  }
+
+  // Add-ons that build their own image ship a .woodpecker.yml; most run a
+  // stock upstream image and skip CI entirely.
+  if (CAN_ACTIVATE_CI && paths.includes('.woodpecker.yml')) {
+    try {
+      await woodpeckerActivate(created.id);
+      step('CI activated', 'enabled in Woodpecker before the first commit');
+    } catch (err) {
+      console.error(`woodpecker activation for ${name}: ${err.message}`);
+      step('CI activation failed', `${err.message} — activate manually at https://ci.${DOMAIN}/repos/add`);
+    }
+  }
+
+  await forgejo('POST', `/repos/${APPS_ORG}/${name}/contents`, {
+    message: `Enable ${name} from ${TEMPLATES_ORG}/${name}`,
+    files,
+  });
+  step('Files committed', `${files.length} files on main`);
+
+  // The template's SETUP.md is the handover: whatever a human must still do
+  // (tokens into Vault, upstream accounts, tuning) becomes the one open issue.
+  const setup = files.find((f) => f.path === 'SETUP.md');
+  if (setup) {
+    await forgejo('POST', `/repos/${APPS_ORG}/${name}/issues`, {
+      title: `Finish setting up ${name}`,
+      body: Buffer.from(setup.content, 'base64').toString('utf8'),
+    });
+    step('Setup issue created', 'the remaining manual steps, from the template\'s SETUP.md');
+  }
+
+  return {
+    steps,
+    repo: `https://git.${DOMAIN}/${APPS_ORG}/${name}`,
+    issues: `https://git.${DOMAIN}/${APPS_ORG}/${name}/issues`,
+    argocd: `https://argocd.${DOMAIN}/applications`,
   };
 }
 
@@ -384,8 +533,9 @@ const server = http.createServer(async (req, res) => {
         domain: DOMAIN,
         appsOrg: APPS_ORG,
         templates: (repos || [])
-          // *-chart repos are what scaffolds render THROUGH, not FROM.
-          .filter((r) => !r.name.endsWith('-chart'))
+          // *-chart repos are what scaffolds render THROUGH, not FROM; addon-*
+          // repos are platform add-ons, offered on /api/addons instead.
+          .filter((r) => !r.name.endsWith('-chart') && !r.name.startsWith(ADDON_PREFIX))
           .map((r) => ({ name: r.name, description: r.description || '' })),
       });
     }
@@ -402,6 +552,8 @@ const server = http.createServer(async (req, res) => {
       const apps = [];
       for (const r of repos || []) {
         if (r.name === 'devhub') continue;
+        // Enabled add-ons are managed on the add-ons view, not as apps.
+        if (r.name.startsWith(ADDON_PREFIX)) continue;
         if (CAN_DEPROVISION(await userRepoPermission(user.username, r.name))) {
           apps.push({
             name: r.name,
@@ -447,6 +599,21 @@ const server = http.createServer(async (req, res) => {
           'The namespace, its volumes and the container images remain until a platform admin runs ' +
           'cleanup-apps / deletes the packages — backups expire on their own.',
       });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/addons') {
+      const user = userFromRequest(req);
+      return send(res, 200, {
+        user: user ? user.username : null,
+        addons: await listAddons(user ? user.username : null),
+      });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/addons') {
+      const body = await readBody(req);
+      const result = await enableAddon({
+        name: String(body.name || '').trim(),
+        creator: userFromRequest(req),
+      });
+      return send(res, 201, result);
     }
     if (req.method === 'POST' && url.pathname === '/api/apps') {
       const body = await readBody(req);

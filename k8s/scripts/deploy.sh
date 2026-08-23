@@ -1140,6 +1140,7 @@ publish_app_templates() {
         case "$name" in
             app-template)     descr="Scaffold used by the portal wizard" ;;
             devhub-app-chart) descr="Opinionated chart rendering every app's k8s/values.yaml" ;;
+            addon-renovate)   descr="Dependency update PRs for every devhub repo (self-hosted Dependabot)" ;;
             *)                descr="Published from devhub k8s/templates/${name}" ;;
         esac
 

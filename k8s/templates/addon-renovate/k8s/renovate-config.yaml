@@ -1,0 +1,27 @@
+# Renovate's own configuration. The literal DOMAIN below is substituted by the
+# portal when the add-on is enabled (same convention as the app template).
+#
+# platform "gitea": Forgejo implements the Gitea API, and this is the provider
+# Renovate speaks to it with — same choice the ArgoCD ApplicationSets make.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: renovate-config
+  labels:
+    app: renovate
+data:
+  config.json: |
+    {
+      "platform": "gitea",
+      "endpoint": "https://git.DOMAIN/api/v1",
+      "autodiscover": true,
+      "autodiscoverFilter": ["devhub/*"],
+      "onboarding": true,
+      "onboardingConfig": {
+        "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+        "extends": ["config:recommended"]
+      },
+      "gitAuthor": "Renovate Bot <renovate@DOMAIN>",
+      "prHourlyLimit": 5,
+      "dependencyDashboard": true
+    }

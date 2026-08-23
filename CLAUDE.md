@@ -258,8 +258,12 @@ templates + mints the token); `portal-templates` republishes every
 auto-activates repos, and sets `registry_user`/`registry_token` as Woodpecker
 org secrets (push events only) — with no `WOODPECKER_TOKEN` given it mints the
 token itself, headlessly through the SSO chain (`mint-woodpecker-token.sh`,
-Playwright), so bootstrap and quickstart run it automatically. See
-`k8s/base/devops/portal/README.md`.
+Playwright), so bootstrap and quickstart run it automatically. The portal's
+**Add-ons** view enables optional org-wide features (e.g. `addon-renovate`,
+dependency-update PRs): a template repo named `addon-*` is copied into the
+`devhub` org, deployed by `forgejo-appset` like any app, disabled by deleting
+the repo; the `addon-` name prefix is reserved for this (see
+`k8s/docs/ADDONS.md`). See `k8s/base/devops/portal/README.md`.
 
 ### Cloud-Specific Managed Services
 
@@ -400,6 +404,7 @@ devhub/
 |------|----------|
 | `k8s/docs/CLOUD_CAPABILITIES.md` | What each cloud actually delivers, and the known gaps |
 | `k8s/docs/ADDING_A_CLOUD.md` | Checklist for adding a provider (worked example: Scaleway) |
+| `k8s/docs/ADDONS.md` | Platform add-ons: the `addon-*` convention, authoring guide, retrofit for handed-over environments |
 | `k8s/docs/OPERATIONS.md` | **Day two**: state, secrets/rotation, backups/restore, GitOps, access, alerting, cost |
 | `k8s/docs/LOCAL_SETUP.md` | Local dev with Rancher Desktop / WSL2 |
 | `k8s/e2e/README.md` | What `validate --e2e` asserts per service, and how to add a check |

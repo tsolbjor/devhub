@@ -1,0 +1,83 @@
+# Renovate as a daily batch job: wake, scan every devhub-org repository, open
+# or update dependency PRs, exit. Stock upstream image — ghcr.io is on the
+# Kyverno registry allow-list, so nothing to build and no CI to activate.
+#
+# Egress: the generated app-egress NetworkPolicy allows the internet (for
+# registries and changelogs) and blocks the cloud metadata endpoint. Forgejo is
+# reached over its public hostname git.DOMAIN — from a workload cluster the
+# in-cluster Service URL does not exist.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: renovate
+  labels:
+    app: renovate
+spec:
+  schedule: "0 5 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      # A hung run must not block tomorrow's (concurrencyPolicy: Forbid).
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            app: renovate
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            # The image's built-in unprivileged user ("ubuntu", containerbase).
+            runAsUser: 12021
+            runAsGroup: 0
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: renovate
+              # Major tag on purpose: after onboarding, Renovate manages this
+              # repository too and will PR the pin forward itself.
+              image: ghcr.io/renovatebot/renovate:41
+              env:
+                - name: RENOVATE_CONFIG_FILE
+                  value: /etc/renovate/config.json
+                - name: RENOVATE_BASE_DIR
+                  value: /tmp/renovate
+                - name: LOG_LEVEL
+                  value: info
+                - name: RENOVATE_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: renovate-token
+                      key: token
+              securityContext:
+                allowPrivilegeEscalation: false
+                # Renovate writes caches and clones under its base dir and /tmp;
+                # both are the emptyDir below, but the tool also touches $HOME,
+                # so the root filesystem stays writable inside the container.
+                readOnlyRootFilesystem: false
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 200m
+                  memory: 512Mi
+                limits:
+                  cpu: "1"
+                  memory: 2Gi
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/renovate
+                  readOnly: true
+                - name: workdir
+                  mountPath: /tmp
+          volumes:
+            - name: config
+              configMap:
+                name: renovate-config
+            - name: workdir
+              emptyDir:
+                sizeLimit: 2Gi

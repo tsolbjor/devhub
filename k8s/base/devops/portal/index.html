@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DevHub Portal — new application</title>
+<title>DevHub Portal</title>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --text: #1a1d21; --muted: #5c6570;
@@ -22,7 +22,21 @@
     margin: 0; background: var(--bg); color: var(--text);
     font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
   }
-  main { max-width: 640px; margin: 0 auto; padding: 40px 20px 80px; }
+  header.top { background: var(--panel); border-bottom: 1px solid var(--line); }
+  .topwrap {
+    max-width: 720px; margin: 0 auto; padding: 0 20px;
+    display: flex; align-items: center; gap: 24px; flex-wrap: wrap;
+  }
+  .brand { font-weight: 400; padding: 14px 0; white-space: nowrap; }
+  .brand b { font-weight: 700; }
+  nav { display: flex; gap: 4px; }
+  nav a {
+    display: block; padding: 14px 12px; color: var(--muted); text-decoration: none;
+    border-bottom: 2px solid transparent; margin-bottom: -1px; font-weight: 500;
+  }
+  nav a:hover { color: var(--text); }
+  nav a[aria-current] { color: var(--text); border-bottom-color: var(--accent); }
+  main { max-width: 720px; margin: 0 auto; padding: 36px 20px 80px; }
   h1 { font-size: 22px; margin: 0 0 4px; }
   .sub { color: var(--muted); margin: 0 0 28px; }
   .panel {
@@ -39,21 +53,22 @@
   .check { display: flex; gap: 9px; align-items: baseline; margin: 10px 0; font-weight: 400; }
   .check input { accent-color: var(--accent); }
   button {
-    margin-top: 22px; padding: 10px 18px; border: 0; border-radius: 7px;
+    padding: 10px 18px; border: 0; border-radius: 7px;
     background: var(--accent); color: var(--accent-text); font: inherit;
     font-weight: 600; cursor: pointer;
   }
   button:disabled { opacity: .55; cursor: default; }
+  #submit { margin-top: 22px; }
+  button.danger { padding: 5px 12px; background: transparent; color: var(--err); border: 1px solid var(--err); font-weight: 500; }
   code { background: var(--code-bg); border-radius: 4px; padding: 1px 5px; font-size: 13px; }
   .error { color: var(--err); margin-top: 14px; }
-  .apps-panel { margin-top: 24px; }
-  .apps-panel h2 { font-size: 16px; margin: 0 0 6px; }
-  .apps { list-style: none; padding: 0; margin: 12px 0 0; }
-  .apps li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .empty { color: var(--muted); }
+  .empty a { color: var(--accent); }
+  .apps { list-style: none; padding: 0; margin: 0; }
+  .apps li { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
   .apps li:last-child { border-bottom: 0; }
   .apps .app-name a { color: var(--accent); text-decoration: none; font-weight: 600; }
   .apps .app-desc { color: var(--muted); font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .apps button { margin: 0; padding: 5px 12px; background: transparent; color: var(--err); border: 1px solid var(--err); font-weight: 500; }
   .name-check { font-size: 13px; min-height: 20px; margin-top: 4px; }
   .name-check.ok { color: var(--ok); }
   .name-check.bad { color: var(--err); }
@@ -66,10 +81,37 @@
   .links a:hover { text-decoration: underline; }
   .next { color: var(--muted); font-size: 14px; margin-top: 18px; }
   #result { display: none; }
+  .addon { padding: 18px 0; border-bottom: 1px solid var(--line); }
+  .addon:last-child { border-bottom: 0; padding-bottom: 0; }
+  .addon:first-child { padding-top: 0; }
+  .addon-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .addon-head .addon-name { font-weight: 600; }
+  .badge {
+    font-size: 12px; font-weight: 600; border-radius: 20px; padding: 2px 10px;
+    border: 1px solid var(--line); color: var(--muted);
+  }
+  .badge.on { color: var(--ok); border-color: var(--ok); }
+  .addon-desc { color: var(--muted); font-size: 14px; margin: 6px 0 10px; }
+  .addon-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .addon-actions a { color: var(--accent); text-decoration: none; font-size: 14px; }
+  .addon-actions a:hover { text-decoration: underline; }
+  .addon-actions button { padding: 6px 14px; }
 </style>
 </head>
 <body>
+<header class="top">
+  <div class="topwrap">
+    <span class="brand">DevHub <b>Portal</b></span>
+    <nav id="nav">
+      <a href="#/new">New application</a>
+      <a href="#/apps">Your applications</a>
+      <a href="#/addons">Add-ons</a>
+    </nav>
+  </div>
+</header>
 <main>
+
+<section id="view-new" data-route="#/new">
   <h1>New application</h1>
   <p class="sub">One wizard: git repository, CI pipeline, container publishing, work items,
      and a namespace on every workload cluster — all from the platform's app template.</p>
@@ -109,20 +151,55 @@
     <div class="links" id="links"></div>
     <p class="next" id="next"></p>
   </div>
+</section>
 
-  <div class="panel apps-panel" id="apps-panel" hidden>
-    <h2>Your applications</h2>
-    <p class="hint">Applications you administer. Deprovisioning deletes the repository;
-      ArgoCD then removes the deployed workloads. Volumes and images are swept by a
-      platform admin afterwards.</p>
+<section id="view-apps" data-route="#/apps" hidden>
+  <h1>Your applications</h1>
+  <p class="sub">Applications you administer. Deprovisioning deletes the repository;
+    ArgoCD then removes the deployed workloads. Volumes and images are swept by a
+    platform admin afterwards.</p>
+  <div class="panel">
     <ul class="apps" id="apps-list"></ul>
+    <p class="empty" id="apps-empty" hidden></p>
     <div class="error" id="apps-error" role="alert"></div>
   </div>
+</section>
+
+<section id="view-addons" data-route="#/addons" hidden>
+  <h1>Add-ons</h1>
+  <p class="sub">Optional platform features that work across every application — enabled for the
+    whole organisation, deployed to the registered workload clusters. Enabling one creates a
+    repository ArgoCD reconciles; any remaining manual setup lands as an issue on it.</p>
+  <div class="panel">
+    <div id="addons-list"></div>
+    <p class="empty" id="addons-empty" hidden>No add-ons published. A platform admin publishes the
+      catalog with <code>deploy.sh &lt;env&gt; portal-templates</code>.</p>
+    <div class="error" id="addons-error" role="alert"></div>
+  </div>
+</section>
+
 </main>
 
 <script>
 (function () {
   'use strict';
+
+  // ── Router: three views, hash-addressed, data loaded on entry ─────────────
+  var routes = { '#/new': null, '#/apps': loadApps, '#/addons': loadAddons };
+  function show(hash) {
+    if (!(hash in routes)) hash = '#/new';
+    document.querySelectorAll('main > section').forEach(function (s) {
+      s.hidden = s.getAttribute('data-route') !== hash;
+    });
+    document.querySelectorAll('#nav a').forEach(function (a) {
+      if (a.getAttribute('href') === hash) a.setAttribute('aria-current', 'page');
+      else a.removeAttribute('aria-current');
+    });
+    if (routes[hash]) routes[hash]();
+  }
+  window.addEventListener('hashchange', function () { show(location.hash); });
+
+  // ── New application ────────────────────────────────────────────────────────
   var form = document.getElementById('wizard');
   var errorEl = document.getElementById('error');
   var submit = document.getElementById('submit');
@@ -238,16 +315,27 @@
     });
   });
 
-  // Deprovisioning: the list is the signed-in user's admin repos; delete is
+  // ── Your applications ──────────────────────────────────────────────────────
+  // The list is the signed-in user's admin repos; delete is
   // type-the-name-to-confirm, and the server re-checks the permission.
-  var appsPanel = document.getElementById('apps-panel');
   var appsList = document.getElementById('apps-list');
+  var appsEmpty = document.getElementById('apps-empty');
   var appsError = document.getElementById('apps-error');
   function loadApps() {
     fetch('/api/apps').then(function (r) { return r.json(); }).then(function (data) {
-      if (!data.user || !data.apps || !data.apps.length) { appsPanel.hidden = true; return; }
-      appsPanel.hidden = false;
       appsList.textContent = '';
+      if (!data.user) {
+        appsEmpty.textContent = 'No identity on this session — sign out and back in, then retry.';
+        appsEmpty.hidden = false;
+        return;
+      }
+      if (!data.apps || !data.apps.length) {
+        appsEmpty.innerHTML = 'Nothing here yet — applications you create appear here. ' +
+          '<a href="#/new">Scaffold one</a>.';
+        appsEmpty.hidden = false;
+        return;
+      }
+      appsEmpty.hidden = true;
       data.apps.forEach(function (app) {
         var li = document.createElement('li');
         var name = document.createElement('span');
@@ -261,6 +349,7 @@
         desc.textContent = app.description;
         var btn = document.createElement('button');
         btn.type = 'button';
+        btn.className = 'danger';
         btn.textContent = 'Deprovision';
         btn.addEventListener('click', function () {
           var typed = window.prompt(
@@ -278,9 +367,112 @@
         li.appendChild(name); li.appendChild(desc); li.appendChild(btn);
         appsList.appendChild(li);
       });
-    }).catch(function () { appsPanel.hidden = true; });
+    }).catch(function (err) {
+      appsList.textContent = '';
+      appsEmpty.hidden = true;
+      appsError.textContent = err.message;
+    });
   }
-  loadApps();
+
+  // ── Add-ons ────────────────────────────────────────────────────────────────
+  var addonsList = document.getElementById('addons-list');
+  var addonsEmpty = document.getElementById('addons-empty');
+  var addonsError = document.getElementById('addons-error');
+  function loadAddons() {
+    fetch('/api/addons').then(function (r) { return r.json(); }).then(function (data) {
+      addonsList.textContent = '';
+      var addons = data.addons || [];
+      addonsEmpty.hidden = addons.length > 0;
+      addons.forEach(function (addon) {
+        var card = document.createElement('div');
+        card.className = 'addon';
+
+        var head = document.createElement('div');
+        head.className = 'addon-head';
+        var name = document.createElement('span');
+        name.className = 'addon-name';
+        name.textContent = addon.name;
+        var badge = document.createElement('span');
+        badge.className = 'badge' + (addon.enabled ? ' on' : '');
+        badge.textContent = addon.enabled ? 'Enabled' : 'Available';
+        head.appendChild(name); head.appendChild(badge);
+
+        var desc = document.createElement('p');
+        desc.className = 'addon-desc';
+        desc.textContent = addon.description;
+
+        var actions = document.createElement('div');
+        actions.className = 'addon-actions';
+        function link(text, href) {
+          var a = document.createElement('a');
+          a.href = href; a.target = '_blank'; a.rel = 'noopener';
+          a.textContent = text;
+          actions.appendChild(a);
+        }
+        if (addon.enabled) {
+          if (addon.repo) link('Repository', addon.repo);
+          if (addon.issues) link('Setup & issues', addon.issues);
+          if (addon.canDisable) {
+            var off = document.createElement('button');
+            off.type = 'button';
+            off.className = 'danger';
+            off.textContent = 'Disable';
+            off.addEventListener('click', function () {
+              var typed = window.prompt(
+                'This deletes the repository ' + addon.name + ' and ArgoCD removes the add-on ' +
+                'from every workload cluster.\nType the add-on name to confirm:');
+              if (typed !== addon.name) { if (typed !== null) addonsError.textContent = 'Name did not match — nothing disabled.'; return; }
+              addonsError.textContent = '';
+              off.disabled = true;
+              off.textContent = 'Disabling…';
+              fetch('/api/apps/' + encodeURIComponent(addon.name), { method: 'DELETE' })
+                .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status)); return d; }); })
+                .then(function () { loadAddons(); })
+                .catch(function (err) { addonsError.textContent = err.message; off.disabled = false; off.textContent = 'Disable'; });
+            });
+            actions.appendChild(off);
+          }
+        } else {
+          link('What it installs', addon.template);
+          var on = document.createElement('button');
+          on.type = 'button';
+          on.textContent = 'Enable';
+          on.addEventListener('click', function () {
+            if (!window.confirm('Enable ' + addon.name + ' for the whole organisation? ' +
+              'This creates a repository that ArgoCD deploys to every registered workload cluster.')) return;
+            addonsError.textContent = '';
+            on.disabled = true;
+            on.textContent = 'Enabling…';
+            fetch('/api/addons', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: addon.name })
+            }).then(function (r) {
+              return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status)); return d; });
+            }).then(function (result) {
+              // Setup usually continues in the repo's issues; go straight there.
+              window.alert('Enabled. Any remaining setup is an issue on the new repository.');
+              loadAddons();
+            }).catch(function (err) {
+              addonsError.textContent = err.message;
+              on.disabled = false;
+              on.textContent = 'Enable';
+            });
+          });
+          actions.appendChild(on);
+        }
+
+        card.appendChild(head); card.appendChild(desc); card.appendChild(actions);
+        addonsList.appendChild(card);
+      });
+    }).catch(function (err) {
+      addonsList.textContent = '';
+      addonsEmpty.hidden = true;
+      addonsError.textContent = err.message;
+    });
+  }
+
+  show(location.hash);
 })();
 </script>
 </body>

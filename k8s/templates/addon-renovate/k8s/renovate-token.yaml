@@ -1,0 +1,26 @@
+# The bot's Forgejo token, delivered from the platform Vault by External
+# Secrets. A human puts it there once — see SETUP.md (the portal opens it as an
+# issue when the add-on is enabled):
+#
+#   vault kv put secret/apps/addon-renovate token=<forgejo token>
+#
+# The workload cluster's ClusterSecretStore authenticates to Vault with a
+# policy limited to apps/*, which this path is inside.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: renovate-token
+  labels:
+    app: renovate
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: vault-backend
+  target:
+    name: renovate-token
+  data:
+    - secretKey: token
+      remoteRef:
+        key: apps/addon-renovate
+        property: token

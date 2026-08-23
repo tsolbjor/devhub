@@ -28,9 +28,10 @@ test.describe('portal', () => {
   test('renders the wizard once signed in', async ({ page }) => {
     await signIn(page, services.portal);
 
-    // The form itself: name field, template picker, submit.
+    // The wizard is the default view; the nav carries the other two.
     await expect(page.locator('#name')).toBeVisible({ timeout: 60_000 });
     await expect(page.locator('#submit')).toBeVisible();
+    await expect(page.locator('#nav a')).toHaveCount(3);
 
     // The template <select> is filled from /api/config, which the backend
     // answers after asking Forgejo — so one option existing means the pod is
@@ -59,7 +60,29 @@ test.describe('portal', () => {
     expect((await check('grafana')).available).toBe(false);
     // Not a DNS label.
     expect((await check('Bad_Name')).available).toBe(false);
+    // The addon- prefix belongs to platform add-ons, not apps.
+    expect((await check('addon-anything')).available).toBe(false);
     // Read-only: validated, never created.
     expect((await check('e2e-name-probe')).available).toBe(true);
+  });
+
+  test('add-ons view lists the published catalog', async ({ page }) => {
+    await signIn(page, services.portal);
+    await expect(page.locator('#name')).toBeVisible({ timeout: 60_000 });
+
+    // Read-only: render the catalog, never enable anything. addon-renovate
+    // ships with the platform templates, so an empty catalog means
+    // portal-templates was not published (or the addon- filter broke).
+    await page.click('#nav a[href="#/addons"]');
+    await expect(page.locator('#view-addons')).toBeVisible();
+    await expect(page.locator('#addons-list .addon')).not.toHaveCount(0, { timeout: 30_000 });
+    await expect(page.locator('#addons-list')).toContainText('addon-renovate');
+    // Each card resolves to exactly one state.
+    const badges = page.locator('#addons-list .badge');
+    await expect(badges.first()).toHaveText(/Enabled|Available/);
+
+    // And the wizard's template picker must NOT offer add-ons.
+    await page.click('#nav a[href="#/new"]');
+    await expect(page.locator('#template option[value^="addon-"]')).toHaveCount(0);
   });
 });
