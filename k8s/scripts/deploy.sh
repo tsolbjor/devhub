@@ -935,22 +935,27 @@ install_headlamp() {
 
     kubectl apply -f "${BASE_DIR}/devops/headlamp/rbac.yaml"
 
-    # Placeholder OIDC secret so Headlamp can start before Keycloak SSO is configured.
-    # Internal service URL for issuerURL so the backend can reach Keycloak
-    # (glibc resolves *.localhost to 127.0.0.1 before DNS).
+    # Placeholder so the SecurityPolicy resolves before Keycloak SSO is set up;
+    # setup-keycloak.sh replaces it with the real client secret. Envoy Gateway
+    # requires the key to be called "client-secret".
     if ! kubectl get secret headlamp-oidc-secret -n headlamp &>/dev/null; then
-        local oidc_issuer
-        if [[ "$DOMAIN" == "localhost" || "$DOMAIN" == *.localhost ]]; then
-            oidc_issuer="http://keycloak-service.keycloak.svc.cluster.local:8080/realms/devops"
-        else
-            oidc_issuer="https://keycloak.${DOMAIN}/realms/devops"
-        fi
         kubectl create secret generic headlamp-oidc-secret -n headlamp \
-            --from-literal=clientID="headlamp" \
-            --from-literal=clientSecret="placeholder" \
-            --from-literal=issuerURL="${oidc_issuer}" \
-            --from-literal=scopes="openid,profile,email,groups"
+            --from-literal=client-secret="placeholder"
     fi
+
+    # Long-lived token for the read-only ServiceAccount — what users paste at
+    # Headlamp's token screen. Access control happens at the gateway (Keycloak
+    # SSO via the SecurityPolicy); this token only ever grants headlamp-view.
+    kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: headlamp-view-token
+  namespace: headlamp
+  annotations:
+    kubernetes.io/service-account.name: headlamp
+type: kubernetes.io/service-account-token
+EOF
 
     local values_args=$(get_values_args "headlamp")
 
@@ -960,7 +965,27 @@ install_headlamp() {
         $values_args \
         --atomic --timeout 5m
 
-    log_info "Headlamp installed"
+    # Applied after the chart so the HTTPRoute's backend resolves.
+    local dir
+    dir="$(render_dir)"
+    template_values "${BASE_DIR}/devops/headlamp/oidc-securitypolicy.yaml" \
+        "${dir}/headlamp-oidc-securitypolicy.yaml"
+    kubectl apply -f "${dir}/headlamp-oidc-securitypolicy.yaml"
+
+    log_info "Headlamp installed — sign in via SSO, then paste the token from:"
+    log_info "  ./deploy.sh --env ${ENV} headlamp-token"
+}
+
+# Print the read-only token users paste at Headlamp's token screen.
+print_headlamp_token() {
+    local token
+    token="$(kubectl get secret headlamp-view-token -n headlamp \
+        -o jsonpath='{.data.token}' 2>/dev/null | base64 -d)"
+    if [[ -z "$token" ]]; then
+        log_error "No headlamp-view-token yet — run: ./deploy.sh --env ${ENV} headlamp"
+        exit 1
+    fi
+    echo "$token"
 }
 
 install_homepage() {
@@ -1711,6 +1736,7 @@ main() {
                 reloader)            add_helm_repos && install_reloader ;;
                 argocd)              add_helm_repos && install_argocd ;;
                 headlamp)            add_helm_repos && install_headlamp ;;
+                headlamp-token)      print_headlamp_token ;;
                 homepage)            add_helm_repos && install_homepage ;;
                 portal)              install_portal ;;
                 portal-token)        ensure_portal_forgejo_token ;;
