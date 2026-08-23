@@ -456,8 +456,8 @@ configure_entra_idp() {
         -s "config.pkceEnabled=false" \
         -s "config.clientAuthMethod=client_secret_post" \
         -s "config.defaultScope=openid profile email" \
-        -s "config.authorizationUrl=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0/authorize" \
-        -s "config.tokenUrl=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0/token" \
+        -s "config.authorizationUrl=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/authorize" \
+        -s "config.tokenUrl=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/token" \
         -s "config.jwksUrl=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/discovery/v2.0/keys" \
         -s "config.issuer=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0" \
         -s "config.clientId=${ENTRA_KEYCLOAK_CLIENT_ID}" \
