@@ -325,11 +325,15 @@ configure_clients() {
         headlamp_issuer="https://keycloak.${DOMAIN}/realms/devops"
     fi
 
+    # Key names are environment variable names: the chart's externalSecret
+    # option loads this secret with envFrom, and the container args reference
+    # $(OIDC_CLIENT_ID) etc. — with other keys the args reach the binary as
+    # unexpanded literals ("unsupported protocol scheme").
     kubectl create secret generic headlamp-oidc-secret -n headlamp \
-        --from-literal=clientID="headlamp" \
-        --from-literal=clientSecret="${headlamp_secret}" \
-        --from-literal=issuerURL="${headlamp_issuer}" \
-        --from-literal=scopes="openid,profile,email,groups" \
+        --from-literal=OIDC_CLIENT_ID="headlamp" \
+        --from-literal=OIDC_CLIENT_SECRET="${headlamp_secret}" \
+        --from-literal=OIDC_ISSUER_URL="${headlamp_issuer}" \
+        --from-literal=OIDC_SCOPES="openid,profile,email,groups" \
         --dry-run=client -o yaml | kubectl apply -f -
 
     # Homepage
