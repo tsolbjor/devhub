@@ -8,8 +8,10 @@ the platform's idea of a well-behaved workload:
   `workload-default` priority), health probes, conservative resources
 - ClusterIP Service and a Gateway API HTTPRoute on the platform gateway's
   wildcard `apps` listener — TLS, DNS and certificates are the platform's job
-- PodDisruptionBudget (when replicas > 1) and baseline NetworkPolicies
-  (mirroring what Kyverno generates for every `devhub-*` namespace)
+- PodDisruptionBudget (when replicas > 1). NetworkPolicies are deliberately
+  NOT in the chart: Kyverno generates them for every `devhub-*` namespace with
+  `synchronize: true`, so a chart-rendered copy under the same names would
+  fight ArgoCD forever (permanent OutOfSync)
 - registry pull secret via External Secrets from the platform Vault
 - opt-in dev-grade PostgreSQL (`postgres.enabled`) and Redis (`redis.enabled`):
   password generated in-cluster, connection env vars (`POSTGRES_*`, `REDIS_*`)

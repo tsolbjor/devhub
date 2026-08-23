@@ -1307,6 +1307,51 @@ bootstrap_argocd_apps() {
 
 # Hand the non-bootstrap platform components over to ArgoCD. From here on their
 # desired state is this repository, and drift is corrected automatically.
+# ArgoCD credentials for the developer-app repositories. Forgejo requires
+# sign-in for every view (REQUIRE_SIGNIN_VIEW), so ArgoCD cannot clone app
+# repos or the devhub-app chart anonymously: register org-prefix repo-creds
+# backed by a freshly minted read-only token. Idempotent — re-running replaces
+# the token. Covers:
+#   https://git.<domain>/devhub                     the app repos (both appsets)
+#   http://forgejo-http...:3000/devhub-templates    the devhub-app chart source
+ensure_argocd_repo_creds() {
+    log_step "Registering ArgoCD credentials for app repositories..."
+
+    local pod admin_user token
+    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    if [[ -z "$pod" ]]; then
+        log_warn "Forgejo is not running — register later with: ./deploy.sh --env ${ENV} app-repo-creds"
+        return 0
+    fi
+    admin_user="$(kubectl get secret forgejo-admin-secret -n forgejo \
+        -o jsonpath='{.data.username}' | base64 -d)"
+    token="$(kubectl exec -n forgejo "$pod" -- forgejo admin user generate-access-token \
+        --username "$admin_user" --token-name "argocd-apps-$(date +%s)" \
+        --scopes read:organization,read:repository --raw 2>/dev/null | tr -d '\r' | tail -1)"
+    if [[ -z "$token" ]]; then
+        log_warn "Could not mint a Forgejo token — register later with: ./deploy.sh --env ${ENV} app-repo-creds"
+        return 0
+    fi
+
+    local name url
+    for name in apps templates; do
+        case "$name" in
+            apps)      url="https://git.${DOMAIN}/devhub" ;;
+            templates) url="http://forgejo-http.forgejo.svc.cluster.local:3000/devhub-templates" ;;
+        esac
+        kubectl create secret generic "repo-creds-forgejo-${name}" -n argocd \
+            --from-literal=type=git \
+            --from-literal=url="$url" \
+            --from-literal=username="$admin_user" \
+            --from-literal=password="$token" \
+            --dry-run=client -o yaml \
+            | kubectl label --local -f - argocd.argoproj.io/secret-type=repo-creds -o yaml \
+            | kubectl apply -f - >/dev/null
+        log_info "repo-creds registered: ${url}"
+    done
+}
+
 enable_gitops_platform() {
     log_step "Handing platform components over to ArgoCD..."
 
@@ -1323,6 +1368,10 @@ enable_gitops_platform() {
     local dir; dir="$(render_dir)"
     template_values "${ARGOCD_DIR}/platform-appset.yaml" "${dir}/platform-appset.yaml"
     kubectl apply -f "${dir}/platform-appset.yaml"
+
+    # The app appsets clone through these; without them every generated
+    # Application sits at ComparisonError against the signed-in-only Forgejo.
+    ensure_argocd_repo_creds
 
     log_info "ApplicationSet 'platform-components' applied"
     log_warn "ArgoCD now owns: cert-manager, external-dns, external-secrets,"
@@ -1754,6 +1803,7 @@ main() {
                 portal)              install_portal ;;
                 portal-token)        ensure_portal_forgejo_token ;;
                 portal-templates)    publish_app_templates ;;
+                app-repo-creds)      ensure_argocd_repo_creds ;;
                 ci-secrets)          configure_woodpecker_ci_secrets ;;
                 external-dns)        add_helm_repos && install_external_dns ;;
                 external-secrets)    add_helm_repos && install_external_secrets ;;
