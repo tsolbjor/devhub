@@ -117,8 +117,11 @@ config:
 
     - Platform:
         - Keycloak:
-            href: https://keycloak.${DOMAIN}
-            description: Single sign-on, realms, identity federation
+            # The realm-scoped console: signs in through the realm's own IdPs
+            # (Entra), and devops-admins hold realm-admin there. The bare
+            # hostname would land on the master realm — local break-glass only.
+            href: https://keycloak.${DOMAIN}/admin/devops/console/
+            description: Realm administration — sign in with SSO (devops-admins)
             icon: keycloak.png
         - Vault:
             href: https://vault.${DOMAIN}
