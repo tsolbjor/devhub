@@ -1393,6 +1393,113 @@ ensure_argocd_repo_creds() {
     done
 }
 
+# Single-cluster workload mode: let THIS platform cluster double as the
+# workload target, the way local runs — for dev environments without a
+# separate workload cluster. Provides what register-workload-cluster.sh gives
+# a real one:
+#   - an ArgoCD cluster registration labelled devhub.io/role=workload, so the
+#     app ApplicationSets generate Applications with the in-cluster destination
+#   - the registry pull token in Vault (secret/forgejo/registry-pull-token),
+#     which every app namespace's ExternalSecret turns into a pull secret
+#   - the letsencrypt-dns01 ClusterIssuer, so the gateway's wildcard apps
+#     listener (overlays/<cloud>/devops/gateway.yaml) gets its certificate
+# Everything is idempotent; undo the registration with:
+#   kubectl delete secret cluster-<env>-workload -n argocd
+enable_workload_target() {
+    log_step "Enabling this cluster as a workload target..."
+
+    # 1. ArgoCD cluster registration. The name matches the workloads
+    # AppProject's destination pattern (*-workload).
+    kubectl create secret generic "cluster-${ENV}-workload" -n argocd \
+        --from-literal=name="${ENV}-workload" \
+        --from-literal=server="https://kubernetes.default.svc" \
+        --dry-run=client -o yaml \
+        | kubectl label --local -f - \
+            argocd.argoproj.io/secret-type=cluster devhub.io/role=workload -o yaml \
+        | kubectl apply -f - >/dev/null
+    log_info "ArgoCD target registered: ${ENV}-workload (in-cluster)"
+
+    # 2. Registry pull token → Vault. Same flow as register-workload-cluster.sh:
+    # a dedicated read-only Forgejo user, its token stored where the platform
+    # ESO policy already grants read.
+    local pod token_out registry_token
+    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    if [[ -n "$pod" ]]; then
+        token_out="$(kubectl exec -n forgejo "$pod" -- sh -c "
+            forgejo admin user create --username workload-registry-pull --random-password \
+                --email workload-registry-pull@${DOMAIN} --must-change-password=false 2>/dev/null || true
+            forgejo admin user generate-access-token --username workload-registry-pull \
+                --token-name single-cluster-$(date +%s) --scopes read:package --raw 2>&1 | tail -1
+        " 2>&1 | tr -d '\r' | tail -1)"
+        local vault_token
+        vault_token="$(jq -r '.admin_token // .root_token // empty' "${SCRIPT_ENV_DIR}/vault-init-keys.json" 2>/dev/null)"
+        if [[ -n "$token_out" && "$token_out" != *rror* && -n "$vault_token" ]]; then
+            if kubectl exec -n vault vault-0 -- env VAULT_ADDR=http://127.0.0.1:8200 \
+                VAULT_TOKEN="$vault_token" vault kv put secret/forgejo/registry-pull-token \
+                username="workload-registry-pull" token="$token_out" registry="git.${DOMAIN}" >/dev/null; then
+                log_info "Registry pull token stored: secret/forgejo/registry-pull-token"
+            else
+                log_warn "Vault write failed — renew the admin token (setup-vault.sh renew-admin) and re-run"
+            fi
+        else
+            log_warn "Could not mint/store the registry pull token (forgejo: ${token_out:0:40}...)"
+        fi
+    else
+        log_warn "Forgejo is not running — registry pull token skipped"
+    fi
+
+    # 3. DNS-01 issuer for the wildcard apps certificate (same solver
+    # deploy-workload.sh uses; the cloud DNS identity is external-dns's, which
+    # tofu also federates to cert-manager's service account).
+    local solver=""
+    case "$CLOUD" in
+        aws)
+            solver="      - dns01:
+          route53:
+            region: ${AWS_REGION:-eu-west-1}" ;;
+        azure)
+            solver="      - dns01:
+          azureDNS:
+            resourceGroupName: ${AZURE_RESOURCE_GROUP:-}
+            subscriptionID: ${AZURE_SUBSCRIPTION_ID:-}
+            hostedZoneName: ${DOMAIN}
+            environment: AzurePublicCloud
+            managedIdentity:
+              clientID: ${EXTERNAL_DNS_IDENTITY_CLIENT_ID:-}" ;;
+        gcp)
+            solver="      - dns01:
+          cloudDNS:
+            project: ${GCS_PROJECT_ID:-}" ;;
+        *)
+            log_warn "No DNS-01 solver for '${CLOUD}' — create the letsencrypt-dns01 ClusterIssuer manually"
+            ;;
+    esac
+    if [[ -n "$solver" ]]; then
+        cat <<EOF | kubectl apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-dns01
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ${ACME_EMAIL}
+    privateKeySecretRef:
+      name: letsencrypt-dns01
+    solvers:
+${solver}
+EOF
+        log_info "letsencrypt-dns01 ClusterIssuer applied"
+    fi
+
+    # 4. The apps listener and wildcard Certificate live in the overlay's
+    # gateway.yaml — re-apply so they exist.
+    apply_gateway_routes
+
+    log_info "Workload target enabled. Apps deploy here; sweep deleted ones with: ./deploy.sh --env ${ENV} cleanup-apps"
+}
+
 enable_gitops_platform() {
     log_step "Handing platform components over to ArgoCD..."
 
@@ -1852,6 +1959,7 @@ main() {
                 portal-token)        ensure_portal_forgejo_token ;;
                 portal-templates)    publish_app_templates ;;
                 app-repo-creds)      ensure_argocd_repo_creds ;;
+                workload-target)     enable_workload_target ;;
                 ci-secrets)          configure_woodpecker_ci_secrets ;;
                 external-dns)        add_helm_repos && install_external_dns ;;
                 external-secrets)    add_helm_repos && install_external_secrets ;;

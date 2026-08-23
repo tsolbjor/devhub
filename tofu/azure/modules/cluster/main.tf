@@ -449,3 +449,16 @@ resource "azurerm_federated_identity_credential" "external_dns" {
   issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
   subject             = "system:serviceaccount:external-dns:external-dns"
 }
+
+# cert-manager shares the DNS identity: its DNS-01 solver writes the same
+# zone's TXT records. Without this federated credential no wildcard
+# certificate can ever be issued (Let's Encrypt requires DNS-01 for
+# wildcards), which the apps listener needs.
+resource "azurerm_federated_identity_credential" "cert_manager" {
+  name                = "${var.prefix}-cert-manager-fedcred"
+  resource_group_name = azurerm_resource_group.main.name
+  parent_id           = azurerm_user_assigned_identity.external_dns.id
+  audience            = ["api://AzureADTokenExchange"]
+  issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
+  subject             = "system:serviceaccount:cert-manager:cert-manager"
+}

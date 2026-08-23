@@ -1,3 +1,15 @@
 # cert-manager Azure overlay values
 # Merged with base/devops/cert-manager/values.yaml
-# No Azure-specific overrides needed; cert-manager works the same via HTTP-01 challenge
+#
+# Workload identity for the DNS-01 solver: cert-manager writes TXT records in
+# the platform's DNS zone with the same managed identity external-dns uses
+# (the tofu module adds a federated credential for the cert-manager service
+# account). HTTP-01 keeps working unchanged; DNS-01 is what makes wildcard
+# certificates — and with them the apps listener — possible.
+
+serviceAccount:
+  labels:
+    azure.workload.identity/use: "true"
+
+podLabels:
+  azure.workload.identity/use: "true"
