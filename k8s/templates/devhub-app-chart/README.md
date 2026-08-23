@@ -28,6 +28,13 @@ the platform's idea of a well-behaved workload:
   stays auth-unaware. `auth.exceptPaths` flips the rule per path — public
   exceptions on a protected app (`/healthz`, webhooks), or protected
   exceptions on a public app (`/admin`)
+- opt-in MCP endpoint (`mcp.enabled`): the gateway validates Bearer JWTs
+  (issuer + `aud: mcp`) on `mcp.path` and serves the RFC 9728 discovery
+  document at `/.well-known/oauth-protected-resource`, so MCP clients (Claude
+  Code, VS Code) find Keycloak, sign in through the brokered IdP and — via the
+  advertised `offline_access` scope — keep a long-lived connection. Requires
+  the one-time realm prep `setup-keycloak.sh mcp`. Independent of
+  `auth.enabled`: browser sign-in and token clients coexist on one hostname
 
 ## Minimal values.yaml
 

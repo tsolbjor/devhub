@@ -329,6 +329,18 @@ check_devhub_app_chart() {
         fi
     done
 
+    # MCP endpoint together with browser auth — the two must coexist on one
+    # hostname (separate routes, separate SecurityPolicies).
+    if ! helm template demo "$chart" \
+        --set app.name=demo --set app.host=demo.example.com \
+        --set app.image.repository=git.example.com/devhub/demo \
+        --set registry.host=git.example.com \
+        --set auth.enabled=true --set mcp.enabled=true \
+        --set auth.issuer=https://keycloak.example.com/realms/devops \
+        >/dev/null 2>"${render_dir}/mcp.err"; then
+        fail "devhub-app chart: helm template failed (mcp.enabled + auth.enabled) — $(head -3 "${render_dir}/mcp.err" | tr '\n' ' ')"
+    fi
+
     # extraWorkloads: an off-the-shelf container per shape — routed, routed
     # with gateway auth, and in-cluster only.
     cat > "${render_dir}/workloads.yaml" <<'WLEOF'

@@ -320,6 +320,14 @@ kubectl get quota,limitrange,networkpolicy -n devhub-<app>
   either — an Envoy Gateway `SecurityPolicy` runs the Keycloak OIDC flow before
   the request reaches the pod, which is what keeps the platform's hostnames off
   the public internet.
+- **MCP clients** (Claude Code, VS Code) reach an app's `/mcp` endpoint with
+  Bearer tokens the gateway validates against Keycloak (`mcp.enabled` in the
+  app's `values.yaml`; realm prep is `./devhub keycloak --env <env> mcp`).
+  Long-lived connections use **offline tokens** (`offline_access`): they slide
+  on a 30-day idle window and — being Keycloak's own — are **not** revoked by
+  offboarding the user in Entra/Google/Cognito. To cut one off, delete the
+  user's offline sessions in the realm console (Users → Sessions) or disable
+  the Keycloak user.
 
 ---
 

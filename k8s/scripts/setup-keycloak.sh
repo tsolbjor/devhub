@@ -181,6 +181,129 @@ configure_groups_scope() {
     log_info "Groups scope added to all OIDC clients"
 }
 
+# MCP authorization-server prep — realm-wide, one-time, idempotent.
+#
+# Keycloak brokers MCP clients (Claude Code, VS Code, MCP Inspector) through
+# the same realm and IdP federation as browsers. Three pieces:
+#
+#   1. An optional `mcp` client scope whose audience mapper stamps `aud: mcp`
+#      into access tokens. The devhub-app chart's gateway JWT policy requires
+#      that audience on /mcp routes — one shared audience for every app,
+#      mirroring the shared `apps` browser client. Per-app audiences (their
+#      own scope + mapper) are a later hardening step.
+#   2. Offline sessions: MCP clients request `offline_access` (advertised in
+#      each app's RFC 9728 metadata) so the connection outlives the 10h SSO
+#      session cap. The idle window is set explicitly rather than inherited.
+#      Note: offline tokens are Keycloak's own — offboarding a user in the
+#      upstream IdP does not revoke them; see the realm console's Sessions view.
+#   3. A client policy accepting OAuth Client ID Metadata Documents: MCP
+#      clients identify themselves with a client_id URL, no registration.
+#      Needs `features: cimd` in keycloak-cr.yaml (experimental) — without it
+#      the profile PUT fails, which is warned about rather than fatal so the
+#      scope and session pieces still apply.
+configure_mcp() {
+    log_step "Configuring MCP authorization support..."
+
+    # 1. `mcp` client scope with a static audience, realm-wide optional so any
+    #    client (including CIMD ones) may request it without being pre-wired.
+    local scope_id=$(kcadm get client-scopes -r ${REALM} --fields id,name 2>/dev/null | grep -B 1 "\"name\" : \"mcp\"" | grep "\"id\"" | cut -d'"' -f4 || echo "")
+    if [[ -z "$scope_id" ]]; then
+        scope_id=$(kcadm create client-scopes -r ${REALM} \
+            -s name=mcp \
+            -s protocol=openid-connect \
+            -s 'attributes={"include.in.token.scope":"true","display.on.consent.screen":"true","consent.screen.text":"Access MCP servers"}' -i 2>&1)
+        log_info "Created mcp client scope: ${scope_id}"
+
+        kcadm create client-scopes/${scope_id}/protocol-mappers/models -r ${REALM} \
+            -s name=mcp-audience \
+            -s protocol=openid-connect \
+            -s protocolMapper=oidc-audience-mapper \
+            -s 'config={"included.custom.audience":"mcp","access.token.claim":"true","id.token.claim":"false","introspection.token.claim":"true"}' >/dev/null
+        log_info "Added audience mapper (aud: mcp) to mcp scope"
+    else
+        log_warn "mcp client scope already exists"
+    fi
+    kcadm update realms/${REALM}/default-optional-client-scopes/${scope_id} -r ${REALM} 2>/dev/null || true
+    log_info "mcp scope registered as a realm optional scope"
+
+    # 2. Offline session policy: 30 sliding idle days. Every refresh resets the
+    #    window, so an MCP connection in weekly use never re-authenticates.
+    kcadm update realms/${REALM} -s offlineSessionIdleTimeout=2592000
+    log_info "Offline session idle timeout set to 30 days"
+
+    # 3. CIMD client profile + policy. The profiles/policies endpoints replace
+    #    the whole realm-owned list on PUT — this realm defines no others, and
+    #    the existence check keeps re-runs from clobbering manual edits.
+    local trusted_domains='["claude.ai","*.claude.ai","vscode.dev","code.visualstudio.com","localhost","127.0.0.1"]'
+
+    if kcadm get realms/${REALM}/client-policies/profiles -r ${REALM} 2>/dev/null | grep -q '"name" : "mcp-cimd-clients"'; then
+        log_warn "CIMD client profile already exists"
+    else
+        local profile_body
+        profile_body=$(cat <<EOF
+{
+  "profiles": [
+    {
+      "name": "mcp-cimd-clients",
+      "description": "Accept MCP clients that identify via OAuth Client ID Metadata Documents",
+      "executors": [
+        {
+          "executor": "client-id-metadata-document",
+          "configuration": {
+            "cimd-allow-http-scheme": false,
+            "cimd-allow-permitted-domains": ${trusted_domains},
+            "cimd-restrict-same-domain": false,
+            "only-allow-confidential-client": false
+          }
+        }
+      ]
+    }
+  ]
+}
+EOF
+)
+        if printf '%s' "$profile_body" | kcadm_stdin update realms/${REALM}/client-policies/profiles -r ${REALM} -f - 2>/dev/null; then
+            log_info "CIMD client profile created (trusted: Claude Code, VS Code, localhost)"
+        else
+            log_warn "CIMD client profile failed — is 'features: cimd' set in keycloak-cr.yaml and Keycloak restarted?"
+            return 0
+        fi
+    fi
+
+    if kcadm get realms/${REALM}/client-policies/policies -r ${REALM} 2>/dev/null | grep -q '"name" : "mcp-cimd-clients"'; then
+        log_warn "CIMD client policy already exists"
+    else
+        local policy_body
+        policy_body=$(cat <<EOF
+{
+  "policies": [
+    {
+      "name": "mcp-cimd-clients",
+      "description": "Apply the CIMD profile when client_id is an https URL from a trusted domain",
+      "enabled": true,
+      "conditions": [
+        {
+          "condition": "client-id-uri",
+          "configuration": {
+            "client-id-uri-scheme": "https",
+            "client-id-uri-allow-permitted-domains": ${trusted_domains}
+          }
+        }
+      ],
+      "profiles": ["mcp-cimd-clients"]
+    }
+  ]
+}
+EOF
+)
+        if printf '%s' "$policy_body" | kcadm_stdin update realms/${REALM}/client-policies/policies -r ${REALM} -f - 2>/dev/null; then
+            log_info "CIMD client policy created"
+        else
+            log_warn "CIMD client policy failed — is 'features: cimd' set in keycloak-cr.yaml and Keycloak restarted?"
+        fi
+    fi
+}
+
 # Create admin user
 create_admin_user() {
     log_step "Creating admin users..."
@@ -762,6 +885,7 @@ main() {
             create_groups
             configure_clients
             configure_groups_scope
+            configure_mcp
             create_admin_user
             if [[ "$ENV" == azure-* ]]; then
                 configure_entra_idp
@@ -781,6 +905,9 @@ main() {
         user)
             create_admin_user
             ;;
+        mcp)
+            configure_mcp
+            ;;
         idp)
             if [[ "$ENV" == azure-* ]]; then
                 configure_entra_idp
@@ -794,7 +921,7 @@ main() {
             fi
             ;;
         *)
-            echo "Usage: $0 --env local|upcloud-dev|upcloud-prod|azure-dev|azure-prod|gcp-dev|gcp-prod|aws-dev|aws-prod [all|realm|clients|user|idp]"
+            echo "Usage: $0 --env local|upcloud-dev|upcloud-prod|azure-dev|azure-prod|gcp-dev|gcp-prod|aws-dev|aws-prod [all|realm|clients|user|idp|mcp]"
             exit 1
             ;;
     esac

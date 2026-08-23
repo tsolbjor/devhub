@@ -35,6 +35,14 @@ auth:
   exceptPaths: []
   issuer: https://keycloak.DOMAIN/realms/devops
 
+# Serve a Model Context Protocol endpoint at /mcp, protected by Bearer tokens
+# from the platform Keycloak. The gateway validates the token and publishes
+# the discovery document MCP clients (Claude Code, VS Code) need — your app
+# just implements MCP on /mcp and can read the forwarded JWT for identity.
+# Works alongside auth.enabled: browser sign-in and token clients coexist.
+mcp:
+  enabled: false
+
 # Dev-grade data services in this app's namespace. When enabled, the app
 # container automatically gets POSTGRES_HOST/PORT/DB/USER/PASSWORD and
 # REDIS_HOST/PORT/PASSWORD env vars — no secretKeyRef wiring needed.
