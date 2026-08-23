@@ -493,6 +493,13 @@ configure_entra_idp() {
     ensure_entra_mapper "entra-email" \
         '{"name":"entra-email","identityProviderAlias":"entra","identityProviderMapper":"oidc-user-attribute-idp-mapper","config":{"syncMode":"INHERIT","claim":"email","user.attribute":"email"}}'
 
+    # Mapper: username = the UPN's local part. Entra's preferred_username is
+    # the full UPN (an email), and that flows through Keycloak into every
+    # downstream service as the username — Forgejo rejects "@" in usernames
+    # and 500s on the very first SSO login trying to auto-create the account.
+    ensure_entra_mapper "entra-username" \
+        '{"name":"entra-username","identityProviderAlias":"entra","identityProviderMapper":"oidc-username-idp-mapper","config":{"syncMode":"INHERIT","template":"${CLAIM.preferred_username | localpart}","target":"LOCAL"}}'
+
     # Mappers: map Entra ID App Roles → Keycloak groups via the Advanced Claim
     # to Group mapper (oidc-advanced-group-idp-mapper — the only stock group
     # mapper that matches a claim value; "oidc-group-idp-mapper" does not exist,
