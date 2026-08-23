@@ -147,6 +147,7 @@ does not match the environment.
 ./deploy.sh --env aws-dev loki-auth           # (re)generate Loki ingest credentials
 ./deploy.sh --env aws-dev bootstrap           # ArgoCD app-of-apps
 ./deploy.sh --env aws-dev gitops              # hand platform components to ArgoCD
+./deploy.sh --env aws-dev cleanup-apps        # sweep namespaces of deleted apps (dry-run; add `apply`)
 
 # Setup scripts
 ./setup-ca.sh --env local                     # local CA + TLS certs
@@ -230,26 +231,34 @@ from that list.
 | `deploy.sh` (imperative) | Envoy Gateway, Keycloak (operator), Vault, Forgejo, ArgoCD | GitOps cannot install itself; these hold the bootstrap credentials and the ingress path |
 | ArgoCD (`k8s/argocd/platform-appset.yaml`) | cert-manager, external-dns, external-secrets, monitoring, loki, tempo, alloy, kyverno, reloader, woodpecker, headlamp, homepage, velero | reconciled from git; drift self-heals |
 | ArgoCD (`k8s/argocd/apps/portal.yaml`) | portal (kustomize, not a chart, so it cannot ride the appset) | reconciled from git; drift self-heals |
-| ArgoCD (`k8s/argocd/apps/forgejo-appset.yaml`) | developer apps | matrix of Forgejo repos × clusters labelled `devhub.io/role=workload` |
+| ArgoCD (`k8s/argocd/apps/forgejo-appset.yaml`) | developer apps | matrix of Forgejo repos × clusters labelled `devhub.io/role=workload`; two sets — repos with `k8s/values.yaml` render through the `devhub-app` chart, repos with raw `k8s/` manifests deploy as-is |
 
 Registering a workload cluster is enough to start receiving apps — no manifest edit.
 
 ### Portal (internal developer platform)
 
 `https://portal.<domain>` is a wizard that scaffolds a new application: Forgejo
-repo copied from `devhub-templates/app-template` (with `APP_NAME`/`DOMAIN`
-substituted), starter issues, optional dev-grade PostgreSQL/Redis manifests.
+repo copied from `devhub-templates/app-template` (with `APP_NAME`/`DOMAIN`/
+`POSTGRES_ENABLED`/`REDIS_ENABLED` substituted), CI activated in Woodpecker
+*before* the first commit so the scaffold itself builds, starter issues under a
+"Getting started" milestone (no kanban — Forgejo has no Projects API,
+forgejo/forgejo#5330), and live name validation (`/api/validate-name`: DNS
+label, not a platform hostname, not taken). The scaffolded repo carries one
+deployment file, `k8s/values.yaml`, rendered through the `devhub-app` chart
+(`k8s/templates/devhub-app-chart`) by the chart-based ApplicationSet.
 Everything downstream is existing convention — the repo landing in the `devhub`
 org is what makes `forgejo-appset` deploy it, and the `devhub-*` namespace is
 what makes Kyverno fence it. Design rule: **the portal writes git, never the
 cluster** — one Forgejo token, no Kubernetes RBAC. Templates live in the
 `devhub-templates` org because every `devhub`-org repo with `k8s/` gets
 deployed. `deploy.sh --env <env> portal` installs it (and publishes the
-template + mints the token); `portal-templates` republishes the template after
-an edit (force-push of a fresh tree); `WOODPECKER_TOKEN=<ui-token> deploy.sh
---env <env> ci-secrets` — the one manual step — stores the Woodpecker token so
-the portal auto-activates repos, and sets `registry_user`/`registry_token` as
-Woodpecker org secrets (push events only). See
+templates + mints the token); `portal-templates` republishes every
+`k8s/templates/` directory after an edit (force-push of a fresh tree);
+`deploy.sh --env <env> ci-secrets` stores a Woodpecker token so the portal
+auto-activates repos, and sets `registry_user`/`registry_token` as Woodpecker
+org secrets (push events only) — with no `WOODPECKER_TOKEN` given it mints the
+token itself, headlessly through the SSO chain (`mint-woodpecker-token.sh`,
+Playwright), so bootstrap and quickstart run it automatically. See
 `k8s/base/devops/portal/README.md`.
 
 ### Cloud-Specific Managed Services
@@ -379,7 +388,9 @@ devhub/
 │   ├── e2e/                           # Playwright end-to-end validation of a live environment
 │   │   ├── lib/                       #   env, SSO helpers, in-browser HTTP, local-noise policy
 │   │   └── tests/                     #   one spec per service, numbered to run in order
-│   ├── templates/app-template/        # developer app scaffold (rootless CI, hardened manifests)
+│   ├── templates/
+│   │   ├── app-template/              # developer app scaffold (rootless CI, one values.yaml)
+│   │   └── devhub-app-chart/          # the chart that renders every app's values.yaml
 │   └── docs/                          # guides
 ```
 

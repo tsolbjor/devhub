@@ -1,0 +1,14 @@
+# Keep one replica serving during node drains and cluster upgrades.
+{{- if gt (int .Values.app.replicas) 1 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "devhub-app.name" . }}
+  labels:
+    {{- include "devhub-app.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: {{ include "devhub-app.name" . }}
+{{- end }}

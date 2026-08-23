@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "devhub-app.name" . }}
+  labels:
+    {{- include "devhub-app.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ include "devhub-app.name" . }}
+  ports:
+    - port: 80
+      targetPort: {{ .Values.app.port }}
+      protocol: TCP

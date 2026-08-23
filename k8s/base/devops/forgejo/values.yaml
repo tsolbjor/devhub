@@ -102,6 +102,14 @@ gitea:
   config:
     APP_NAME: "DevHub"
 
+    # Woodpecker's activation webhooks. The hairpin-safe DNS rewrite makes
+    # ci.<domain> resolve to the gateway's PRIVATE load-balancer address, and
+    # Forgejo's SSRF guard refuses webhook deliveries to private addresses by
+    # default — every push event silently died in the webhook queue. Allowing
+    # exactly the CI hostname keeps the guard for everything else.
+    webhook:
+      ALLOWED_HOST_LIST: "ci.${DOMAIN}"
+
     server:
       DOMAIN: git.${DOMAIN}
       ROOT_URL: https://git.${DOMAIN}/

@@ -162,6 +162,42 @@ spec:
         certificateRefs:
           - kind: Secret
             name: loki-tls
+    # Applications: one wildcard listener instead of a listener per app,
+    # served from the DNS-01 wildcard certificate below — what makes
+    # portal-scaffolded apps reachable when this platform cluster doubles as
+    # the workload target (deploy.sh workload-target; mirrors
+    # base/workload/gateway.yaml). Until the letsencrypt-dns01 issuer exists
+    # the certificate stays Pending and only this listener is unprogrammed.
+    - name: apps
+      protocol: HTTPS
+      port: 443
+      hostname: "*.${DOMAIN}"
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: apps-wildcard-tls
+---
+# The wildcard certificate the apps listener serves. DNS-01 is mandatory for
+# wildcards (Let's Encrypt refuses HTTP-01 there); the letsencrypt-dns01
+# ClusterIssuer comes from `deploy.sh --env <env> workload-target`. Declared
+# explicitly so the gateway shim (which would try ${CLUSTER_ISSUER} over
+# HTTP-01) never owns this secret.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: apps-wildcard
+  namespace: gateway
+spec:
+  secretName: apps-wildcard-tls
+  dnsNames:
+    - "*.${DOMAIN}"
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-dns01
 ---
 # Everything on :80 is redirected to :443. Attached to the http listener only.
 apiVersion: gateway.networking.k8s.io/v1

@@ -1,19 +1,14 @@
-# Optional add-on: dev-grade Redis in this app's own namespace.
-#
-# The portal copies this file to k8s/redis.yaml when Redis is selected in the
-# wizard; it is not deployed from optional/ (ArgoCD only syncs k8s/).
-#
-# A cache, so no persistence: an emptyDir that vanishes with the pod is the
-# honest behaviour. The password is generated in-cluster by External Secrets'
-# Password generator — nothing secret is committed. The app reads the same
-# Secret: secretKeyRef {name: APP_NAME-redis, key: password}. Production
-# caching belongs on the managed Redis/Valkey the platform provisions per cloud.
----
+# Opt-in dev-grade Redis: a cache, so no persistence — an emptyDir that
+# vanishes with the pod is the honest behaviour. The password is generated
+# in-cluster by External Secrets' Password generator; the app container gets
+# REDIS_HOST/PORT/PASSWORD injected by the chart (deployment.yaml). Production
+# caching belongs on the managed Redis/Valkey the platform provisions.
+{{- if .Values.redis.enabled }}
+{{- $name := include "devhub-app.name" . }}
 apiVersion: generators.external-secrets.io/v1alpha1
 kind: Password
 metadata:
-  name: APP_NAME-redis-password
-  namespace: devhub-APP_NAME
+  name: {{ $name }}-redis-password
 spec:
   length: 32
   digits: 8
@@ -26,41 +21,39 @@ spec:
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: APP_NAME-redis
-  namespace: devhub-APP_NAME
+  name: {{ $name }}-redis
 spec:
   # "0" = generate once; a refresh would rotate the password under the running
   # server, which reads it only at start.
   refreshInterval: "0"
   target:
-    name: APP_NAME-redis
+    name: {{ $name }}-redis
     creationPolicy: Owner
     template:
       data:
-        password: "{{ .password }}"
+        password: "{{ "{{ .password }}" }}"
   dataFrom:
     - sourceRef:
         generatorRef:
           apiVersion: generators.external-secrets.io/v1alpha1
           kind: Password
-          name: APP_NAME-redis-password
+          name: {{ $name }}-redis-password
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: APP_NAME-redis
-  namespace: devhub-APP_NAME
+  name: {{ $name }}-redis
   labels:
-    app: APP_NAME-redis
+    app: {{ $name }}-redis
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: APP_NAME-redis
+      app: {{ $name }}-redis
   template:
     metadata:
       labels:
-        app: APP_NAME-redis
+        app: {{ $name }}-redis
     spec:
       priorityClassName: workload-default
       securityContext:
@@ -76,7 +69,7 @@ spec:
           env:
             - name: REDIS_PASSWORD
               valueFrom:
-                secretKeyRef: { name: APP_NAME-redis, key: password }
+                secretKeyRef: { name: {{ $name }}-redis, key: password }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -106,11 +99,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: APP_NAME-redis
-  namespace: devhub-APP_NAME
+  name: {{ $name }}-redis
 spec:
   selector:
-    app: APP_NAME-redis
+    app: {{ $name }}-redis
   ports:
     - port: 6379
       targetPort: 6379
+{{- end }}

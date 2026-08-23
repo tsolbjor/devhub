@@ -1,0 +1,95 @@
+# devhub-app chart defaults. An app repository overrides only what it must:
+# app.name, app.host, app.image.repository, registry.host — everything else is
+# a platform opinion it can inherit.
+
+app:
+  # Required. Also the Service name, the Secret prefix and the default label set.
+  name: ""
+  # Required. Public hostname the HTTPRoute claims on the platform gateway.
+  host: ""
+  # Additional hostnames served by the same app. One label per name — the
+  # platform's wildcard certificate and apps listener cover *.<domain> exactly
+  # one label deep, so the ecosystem convention is suffix grouping:
+  #   host:       citest.<domain>          the landing page
+  #   extraHosts: [api-citest.<domain>]    siblings of the same app
+  # A separate deployable (own image, own lifecycle) is its own portal scaffold
+  # named api-<app> instead.
+  #
+  # Note on auth: the OIDC flow's callback is registered on app.host, so with
+  # auth.enabled the sign-in works there; extraHosts are best kept for
+  # unauthenticated surfaces (a public API) or handled by the app itself.
+  extraHosts: []
+  # Container port the app listens on. The Service exposes it as port 80;
+  # TLS (443) terminates at the gateway, never in the app.
+  port: 8080
+  replicas: 2
+  image:
+    # Required, e.g. git.example.com/devhub/my-app
+    repository: ""
+    # CI rewrites this to the commit SHA on every push to the default branch.
+    tag: latest
+  # Extra environment variables, verbatim container env entries.
+  env: []
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  probes:
+    liveness: /healthz
+    readiness: /readyz
+
+registry:
+  # Required. Registry hostname the pull secret authenticates against,
+  # e.g. git.example.com (Forgejo's container registry).
+  host: ""
+
+# The platform gateway the HTTPRoute attaches to. Defaults match every devhub
+# environment; only a non-standard gateway needs overrides.
+gateway:
+  name: devhub
+  namespace: gateway
+  section: apps
+
+# Sign-in at the gateway, via the platform Keycloak. The app itself stays
+# auth-unaware: Envoy Gateway runs the whole OIDC code flow and only forwards
+# authenticated requests.
+#
+#   enabled: true   → the whole app requires sign-in; exceptPaths stay public
+#                     (health endpoints, webhooks, a public API)
+#   enabled: false  → the app is public; exceptPaths require sign-in
+#                     (an /admin section)
+#
+# The client secret arrives via External Secrets from the platform Vault
+# (secret/apps/oidc-gateway, seeded by setup-vault.sh; the "apps" client is
+# created by setup-keycloak.sh with a wildcard redirect for *.<domain>).
+auth:
+  enabled: false
+  exceptPaths: []
+  # Required when auth is in use, e.g. https://keycloak.example.com/realms/devops
+  issuer: ""
+  clientID: apps
+  # Where Envoy fetches tokens. Defaults to <issuer>/protocol/openid-connect/token;
+  # override with an in-cluster Keycloak URL where the public one is unreachable
+  # from the gateway (local environments).
+  tokenEndpoint: ""
+
+# Dev-grade PostgreSQL in the app's namespace: one instance, one volume, the
+# password generated in-cluster by External Secrets. When enabled the app
+# container gets POSTGRES_HOST/PORT/DB/USER/PASSWORD env vars automatically.
+# Production data belongs on the managed PostgreSQL the platform provisions.
+postgres:
+  enabled: false
+  storage: 1Gi
+
+# Dev-grade Redis: cache only, no persistence, no auth inside the namespace.
+# When enabled the app container gets REDIS_HOST/REDIS_PORT automatically.
+redis:
+  enabled: false
+
+# Escape hatch: additional manifests rendered verbatim, for the one thing the
+# chart does not model. If this list grows, eject to raw k8s/ manifests instead
+# (delete values.yaml, commit manifests — the raw ApplicationSet takes over).
+extraManifests: []

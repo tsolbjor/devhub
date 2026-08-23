@@ -130,6 +130,9 @@ resource "azurerm_kubernetes_cluster_node_pool" "ci" {
   kubernetes_cluster_id = azurerm_kubernetes_cluster.main.id
   vm_size               = var.ci_node_vm_size
   vnet_subnet_id        = azurerm_subnet.aks.id
+  # Lets the provider rotate the pool in place when vm_size (or similar)
+  # changes, instead of erroring: it creates this temp pool, swaps, deletes it.
+  temporary_name_for_rotation = "citmp"
 
   auto_scaling_enabled = true
   min_count            = var.ci_node_min_count
@@ -445,4 +448,17 @@ resource "azurerm_federated_identity_credential" "external_dns" {
   audience            = ["api://AzureADTokenExchange"]
   issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
   subject             = "system:serviceaccount:external-dns:external-dns"
+}
+
+# cert-manager shares the DNS identity: its DNS-01 solver writes the same
+# zone's TXT records. Without this federated credential no wildcard
+# certificate can ever be issued (Let's Encrypt requires DNS-01 for
+# wildcards), which the apps listener needs.
+resource "azurerm_federated_identity_credential" "cert_manager" {
+  name                = "${var.prefix}-cert-manager-fedcred"
+  resource_group_name = azurerm_resource_group.main.name
+  parent_id           = azurerm_user_assigned_identity.external_dns.id
+  audience            = ["api://AzureADTokenExchange"]
+  issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
+  subject             = "system:serviceaccount:cert-manager:cert-manager"
 }

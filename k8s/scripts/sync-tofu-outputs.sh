@@ -131,6 +131,7 @@ case "$CLOUD" in
         add_public AZURE_RESOURCE_GROUP "$(out resource_group_name)"
         add_public AZURE_LOCATION "$(out location)"
         add_public EXTERNAL_DNS_IDENTITY_CLIENT_ID "$(out external_dns_identity_client_id)"
+        add_public DNS_ZONE_RESOURCE_GROUP "$(out dns_zone_resource_group)"
 
         if [[ "$CLUSTER_TYPE" == "platform" ]]; then
             add_public AZURE_SUBSCRIPTION_ID "$(out subscription_id)"

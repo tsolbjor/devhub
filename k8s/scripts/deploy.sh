@@ -1126,34 +1126,47 @@ publish_app_templates() {
         fi
     done
 
-    if [[ -z "$(fget "/repos/devhub-templates/app-template" | jq -r '.id // empty')" ]]; then
-        echo '{"name":"app-template","description":"Scaffold used by the portal wizard","private":false,"auto_init":false,"default_branch":"main"}' \
-            | fapi POST /orgs/devhub-templates/repos >/dev/null \
-            || { log_warn "Could not create devhub-templates/app-template"; return 0; }
-    fi
-
-    # Fresh single-commit tree, force-pushed over the public URL — same
-    # reachability assumption (and same local-CA handling) as setup-gitops-repo.
-    local staging
-    staging="$(mktemp -d "${TMPDIR:-/tmp}/devhub-template.XXXXXX")"
-    cp -r "${K8S_DIR}/templates/app-template/." "$staging/"
-    git -C "$staging" init -q -b main
-    git -C "$staging" -c user.name=devhub -c user.email="devhub@${DOMAIN}" add -A
-    git -C "$staging" -c user.name=devhub -c user.email="devhub@${DOMAIN}" \
-        commit -q -m "Publish app-template from devhub"
-
+    # Every directory under k8s/templates/ is a repo in devhub-templates: the
+    # scaffolds the portal copies from, and the devhub-app chart their
+    # values.yaml renders through (the chart-based ApplicationSet clones it).
     local -a git_env=()
     if [[ "$TLS_TYPE" == "local-ca" && -f "${CERTS_DIR}/ca/ca.crt" ]]; then
         git_env=(env "GIT_SSL_CAINFO=${CERTS_DIR}/ca/ca.crt")
     fi
-    local push_url="https://${admin_user}:${token}@git.${DOMAIN}/devhub-templates/app-template.git"
-    if "${git_env[@]+"${git_env[@]}"}" git -C "$staging" push -q --force "$push_url" main; then
-        log_info "Published devhub-templates/app-template (re-run this command to republish)"
-    else
-        log_warn "Push failed. Is git.${DOMAIN} reachable from this machine?"
-        log_warn "Retry with: ./deploy.sh --env ${ENV} portal-templates"
-    fi
-    rm -rf "$staging"
+
+    local dir name descr staging push_url
+    for dir in "${K8S_DIR}/templates"/*/; do
+        name="$(basename "$dir")"
+        case "$name" in
+            app-template)     descr="Scaffold used by the portal wizard" ;;
+            devhub-app-chart) descr="Opinionated chart rendering every app's k8s/values.yaml" ;;
+            *)                descr="Published from devhub k8s/templates/${name}" ;;
+        esac
+
+        if [[ -z "$(fget "/repos/devhub-templates/${name}" | jq -r '.id // empty')" ]]; then
+            echo "{\"name\":\"${name}\",\"description\":\"${descr}\",\"private\":false,\"auto_init\":false,\"default_branch\":\"main\"}" \
+                | fapi POST /orgs/devhub-templates/repos >/dev/null \
+                || { log_warn "Could not create devhub-templates/${name}"; continue; }
+        fi
+
+        # Fresh single-commit tree, force-pushed over the public URL — same
+        # reachability assumption (and same local-CA handling) as setup-gitops-repo.
+        staging="$(mktemp -d "${TMPDIR:-/tmp}/devhub-template.XXXXXX")"
+        cp -r "${dir}." "$staging/"
+        git -C "$staging" init -q -b main
+        git -C "$staging" -c user.name=devhub -c user.email="devhub@${DOMAIN}" add -A
+        git -C "$staging" -c user.name=devhub -c user.email="devhub@${DOMAIN}" \
+            commit -q -m "Publish ${name} from devhub"
+
+        push_url="https://${admin_user}:${token}@git.${DOMAIN}/devhub-templates/${name}.git"
+        if "${git_env[@]+"${git_env[@]}"}" git -C "$staging" push -q --force "$push_url" main; then
+            log_info "Published devhub-templates/${name} (re-run this command to republish)"
+        else
+            log_warn "Push failed for ${name}. Is git.${DOMAIN} reachable from this machine?"
+            log_warn "Retry with: ./deploy.sh --env ${ENV} portal-templates"
+        fi
+        rm -rf "$staging"
+    done
 }
 
 # Registry credentials for CI as Woodpecker *organisation* secrets: every repo
@@ -1169,11 +1182,54 @@ publish_app_templates() {
 configure_woodpecker_ci_secrets() {
     log_step "Configuring Woodpecker org-level registry secrets..."
 
+    # Everything Woodpecker does — listing repos, creating activation webhooks,
+    # syncing orgs — happens with platform-admin's forge OAuth identity, so
+    # platform-admin must be able to administer the devhub org's repositories.
+    # Make it an org owner (idempotent) BEFORE any Woodpecker login: the login
+    # is what syncs org membership into Woodpecker.
+    local fj_pod fj_admin fj_token
+    fj_pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    [[ -n "$fj_pod" ]] || { log_error "Forgejo is not running"; exit 1; }
+    fj_admin="$(kubectl get secret forgejo-admin-secret -n forgejo \
+        -o jsonpath='{.data.username}' | base64 -d)"
+    fj_token="$(kubectl exec -n forgejo "$fj_pod" -- forgejo admin user generate-access-token \
+        --username "$fj_admin" --token-name "ci-secrets-$(date +%s)" \
+        --scopes write:organization,write:package,write:repository --raw 2>/dev/null | tr -d '\r' | tail -1)"
+    [[ -n "$fj_token" ]] || { log_error "Could not mint a Forgejo admin token"; exit 1; }
+    fjapi() { # method path
+        kubectl exec -n forgejo "$fj_pod" -- curl -fsS -X "$1" "http://localhost:3000/api/v1$2" \
+            -H "Authorization: token ${fj_token}" 2>/dev/null
+    }
+    local owners_id
+    owners_id="$(fjapi GET "/orgs/devhub/teams" | jq -r '.[] | select(.name=="Owners") | .id')"
+    if [[ -n "$owners_id" ]]; then
+        if kubectl exec -n forgejo "$fj_pod" -- curl -fsS -X PUT \
+            "http://localhost:3000/api/v1/teams/${owners_id}/members/platform-admin" \
+            -H "Authorization: token ${fj_token}" >/dev/null 2>&1; then
+            log_info "platform-admin is an owner of the devhub org"
+        else
+            log_warn "Could not add platform-admin to the devhub org owners (has it signed in to Forgejo yet?)"
+        fi
+    else
+        log_warn "devhub org has no Owners team visible — skipping org membership"
+    fi
+
     # Token: the environment wins; otherwise reuse the stored secret.
     local wp_token="${WOODPECKER_TOKEN:-}"
     if [[ -z "$wp_token" ]]; then
         wp_token="$(kubectl get secret portal-woodpecker-token -n portal \
             -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)"
+    fi
+    if [[ -z "$wp_token" || "$wp_token" == "placeholder" ]]; then
+        # No token given and none stored: mint one headlessly (Playwright walks
+        # the SSO chain as platform-admin — see mint-woodpecker-token.sh). This
+        # is what makes CI setup automatic all the way from quickstart.
+        log_info "No token provided — minting one via the SSO chain..."
+        wp_token="$("${SCRIPT_DIR}/mint-woodpecker-token.sh" --env "${ENV}" 2> >(sed 's/^/    /' >&2) | tail -1 || true)"
+        # A Woodpecker token is a JWT; anything else means log noise leaked
+        # onto stdout and must not be stored as a credential.
+        [[ "$wp_token" == *.*.* && "$wp_token" != *' '* ]] || wp_token=""
     fi
     if [[ -z "$wp_token" || "$wp_token" == "placeholder" ]]; then
         log_error "No Woodpecker API token. Create one at https://ci.${DOMAIN}/user, then:"
@@ -1212,14 +1268,12 @@ configure_woodpecker_ci_secrets() {
             ${3:+-d "$3"} 2>/dev/null
     }
 
-    local org_id
-    org_id="$(wpapi GET "/api/orgs/lookup/devhub" | jq -r '.id // empty')"
-    if [[ -z "$org_id" ]]; then
-        log_error "Woodpecker does not know the devhub org yet."
-        log_error "Sign in to https://ci.${DOMAIN} once (that syncs orgs from Forgejo) and re-run."
-        exit 1
-    fi
-
+    # Instance-global secrets, not org secrets: Woodpecker only materialises an
+    # org record once a repository in it is activated, so on a fresh platform
+    # there is nothing to scope an org secret to yet. This Woodpecker serves
+    # exactly one forge and every repo it can build lives in the devhub org,
+    # so global and org-scoped are the same trust boundary here.
+    #
     # events: push only — a pull request runs code from anyone who can open
     # one, and must not be able to read the registry-write credential. PR
     # builds still build; they just cannot push (which they never do anyway).
@@ -1228,13 +1282,13 @@ configure_woodpecker_ci_secrets() {
         [[ "$name" == "registry_user" ]] && value="$admin_user" || value="$registry_token"
         body="$(jq -n --arg n "$name" --arg v "$value" \
             '{name: $n, value: $v, events: ["push"]}')"
-        if ! wpapi POST "/api/orgs/${org_id}/secrets" "$body" >/dev/null; then
-            wpapi PATCH "/api/orgs/${org_id}/secrets/${name}" "$body" >/dev/null \
-                || { log_error "Could not create or update org secret ${name}"; exit 1; }
+        if ! wpapi POST "/api/secrets" "$body" >/dev/null; then
+            wpapi PATCH "/api/secrets/${name}" "$body" >/dev/null \
+                || { log_error "Could not create or update global secret ${name}"; exit 1; }
         fi
     done
 
-    log_info "Woodpecker org secrets set: registry_user, registry_token (devhub org, push events)"
+    log_info "Woodpecker secrets set: registry_user, registry_token (push events only)"
     log_info "The portal will now also auto-activate scaffolded repositories in Woodpecker."
 }
 
@@ -1294,6 +1348,158 @@ bootstrap_argocd_apps() {
 
 # Hand the non-bootstrap platform components over to ArgoCD. From here on their
 # desired state is this repository, and drift is corrected automatically.
+# ArgoCD credentials for the developer-app repositories. Forgejo requires
+# sign-in for every view (REQUIRE_SIGNIN_VIEW), so ArgoCD cannot clone app
+# repos or the devhub-app chart anonymously: register org-prefix repo-creds
+# backed by a freshly minted read-only token. Idempotent — re-running replaces
+# the token. Covers:
+#   https://git.<domain>/devhub                     the app repos (both appsets)
+#   http://forgejo-http...:3000/devhub-templates    the devhub-app chart source
+ensure_argocd_repo_creds() {
+    log_step "Registering ArgoCD credentials for app repositories..."
+
+    local pod admin_user token
+    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    if [[ -z "$pod" ]]; then
+        log_warn "Forgejo is not running — register later with: ./deploy.sh --env ${ENV} app-repo-creds"
+        return 0
+    fi
+    admin_user="$(kubectl get secret forgejo-admin-secret -n forgejo \
+        -o jsonpath='{.data.username}' | base64 -d)"
+    token="$(kubectl exec -n forgejo "$pod" -- forgejo admin user generate-access-token \
+        --username "$admin_user" --token-name "argocd-apps-$(date +%s)" \
+        --scopes read:organization,read:repository --raw 2>/dev/null | tr -d '\r' | tail -1)"
+    if [[ -z "$token" ]]; then
+        log_warn "Could not mint a Forgejo token — register later with: ./deploy.sh --env ${ENV} app-repo-creds"
+        return 0
+    fi
+
+    local name url
+    for name in apps templates; do
+        case "$name" in
+            apps)      url="https://git.${DOMAIN}/devhub" ;;
+            templates) url="http://forgejo-http.forgejo.svc.cluster.local:3000/devhub-templates" ;;
+        esac
+        kubectl create secret generic "repo-creds-forgejo-${name}" -n argocd \
+            --from-literal=type=git \
+            --from-literal=url="$url" \
+            --from-literal=username="$admin_user" \
+            --from-literal=password="$token" \
+            --dry-run=client -o yaml \
+            | kubectl label --local -f - argocd.argoproj.io/secret-type=repo-creds -o yaml \
+            | kubectl apply -f - >/dev/null
+        log_info "repo-creds registered: ${url}"
+    done
+}
+
+# Single-cluster workload mode: let THIS platform cluster double as the
+# workload target, the way local runs — for dev environments without a
+# separate workload cluster. Provides what register-workload-cluster.sh gives
+# a real one:
+#   - an ArgoCD cluster registration labelled devhub.io/role=workload, so the
+#     app ApplicationSets generate Applications with the in-cluster destination
+#   - the registry pull token in Vault (secret/forgejo/registry-pull-token),
+#     which every app namespace's ExternalSecret turns into a pull secret
+#   - the letsencrypt-dns01 ClusterIssuer, so the gateway's wildcard apps
+#     listener (overlays/<cloud>/devops/gateway.yaml) gets its certificate
+# Everything is idempotent; undo the registration with:
+#   kubectl delete secret cluster-<env>-workload -n argocd
+enable_workload_target() {
+    log_step "Enabling this cluster as a workload target..."
+
+    # 1. ArgoCD cluster registration. The name matches the workloads
+    # AppProject's destination pattern (*-workload).
+    kubectl create secret generic "cluster-${ENV}-workload" -n argocd \
+        --from-literal=name="${ENV}-workload" \
+        --from-literal=server="https://kubernetes.default.svc" \
+        --dry-run=client -o yaml \
+        | kubectl label --local -f - \
+            argocd.argoproj.io/secret-type=cluster devhub.io/role=workload -o yaml \
+        | kubectl apply -f - >/dev/null
+    log_info "ArgoCD target registered: ${ENV}-workload (in-cluster)"
+
+    # 2. Registry pull token → Vault. Same flow as register-workload-cluster.sh:
+    # a dedicated read-only Forgejo user, its token stored where the platform
+    # ESO policy already grants read.
+    local pod token_out registry_token
+    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    if [[ -n "$pod" ]]; then
+        token_out="$(kubectl exec -n forgejo "$pod" -- sh -c "
+            forgejo admin user create --username workload-registry-pull --random-password \
+                --email workload-registry-pull@${DOMAIN} --must-change-password=false 2>/dev/null || true
+            forgejo admin user generate-access-token --username workload-registry-pull \
+                --token-name single-cluster-$(date +%s) --scopes read:package --raw 2>&1 | tail -1
+        " 2>&1 | tr -d '\r' | tail -1)"
+        local vault_token
+        vault_token="$(jq -r '.admin_token // .root_token // empty' "${SCRIPT_ENV_DIR}/vault-init-keys.json" 2>/dev/null)"
+        if [[ -n "$token_out" && "$token_out" != *rror* && -n "$vault_token" ]]; then
+            if kubectl exec -n vault vault-0 -- env VAULT_ADDR=http://127.0.0.1:8200 \
+                VAULT_TOKEN="$vault_token" vault kv put secret/forgejo/registry-pull-token \
+                username="workload-registry-pull" token="$token_out" registry="git.${DOMAIN}" >/dev/null; then
+                log_info "Registry pull token stored: secret/forgejo/registry-pull-token"
+            else
+                log_warn "Vault write failed — renew the admin token (setup-vault.sh renew-admin) and re-run"
+            fi
+        else
+            log_warn "Could not mint/store the registry pull token (forgejo: ${token_out:0:40}...)"
+        fi
+    else
+        log_warn "Forgejo is not running — registry pull token skipped"
+    fi
+
+    # 3. DNS-01 issuer for the wildcard apps certificate (same solver
+    # deploy-workload.sh uses; the cloud DNS identity is external-dns's, which
+    # tofu also federates to cert-manager's service account).
+    local solver=""
+    case "$CLOUD" in
+        aws)
+            solver="      - dns01:
+          route53:
+            region: ${AWS_REGION:-eu-west-1}" ;;
+        azure)
+            solver="      - dns01:
+          azureDNS:
+            resourceGroupName: ${DNS_ZONE_RESOURCE_GROUP:-${AZURE_RESOURCE_GROUP:-}}
+            subscriptionID: ${AZURE_SUBSCRIPTION_ID:-}
+            hostedZoneName: ${DOMAIN}
+            environment: AzurePublicCloud
+            managedIdentity:
+              clientID: ${EXTERNAL_DNS_IDENTITY_CLIENT_ID:-}" ;;
+        gcp)
+            solver="      - dns01:
+          cloudDNS:
+            project: ${GCS_PROJECT_ID:-}" ;;
+        *)
+            log_warn "No DNS-01 solver for '${CLOUD}' — create the letsencrypt-dns01 ClusterIssuer manually"
+            ;;
+    esac
+    if [[ -n "$solver" ]]; then
+        cat <<EOF | kubectl apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-dns01
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ${ACME_EMAIL}
+    privateKeySecretRef:
+      name: letsencrypt-dns01
+    solvers:
+${solver}
+EOF
+        log_info "letsencrypt-dns01 ClusterIssuer applied"
+    fi
+
+    # 4. The apps listener and wildcard Certificate live in the overlay's
+    # gateway.yaml — re-apply so they exist.
+    apply_gateway_routes
+
+    log_info "Workload target enabled. Apps deploy here; sweep deleted ones with: ./deploy.sh --env ${ENV} cleanup-apps"
+}
+
 enable_gitops_platform() {
     log_step "Handing platform components over to ArgoCD..."
 
@@ -1310,6 +1516,10 @@ enable_gitops_platform() {
     local dir; dir="$(render_dir)"
     template_values "${ARGOCD_DIR}/platform-appset.yaml" "${dir}/platform-appset.yaml"
     kubectl apply -f "${dir}/platform-appset.yaml"
+
+    # The app appsets clone through these; without them every generated
+    # Application sits at ComparisonError against the signed-in-only Forgejo.
+    ensure_argocd_repo_creds
 
     log_info "ApplicationSet 'platform-components' applied"
     log_warn "ArgoCD now owns: cert-manager, external-dns, external-secrets,"
@@ -1713,6 +1923,13 @@ main() {
     check_requirements
     require_cluster_match
 
+    # cleanup-apps reads its own second argument (apply | dry-run), which is
+    # not one of the deploy/status/delete actions.
+    if [[ "$COMPONENT" == "cleanup-apps" ]]; then
+        cleanup_orphaned_app_namespaces "$([ "$ACTION" == "apply" ] && echo apply || echo dry-run)"
+        return 0
+    fi
+
     case "$ACTION" in
         deploy)
             case "$COMPONENT" in
@@ -1741,6 +1958,8 @@ main() {
                 portal)              install_portal ;;
                 portal-token)        ensure_portal_forgejo_token ;;
                 portal-templates)    publish_app_templates ;;
+                app-repo-creds)      ensure_argocd_repo_creds ;;
+                workload-target)     enable_workload_target ;;
                 ci-secrets)          configure_woodpecker_ci_secrets ;;
                 external-dns)        add_helm_repos && install_external_dns ;;
                 external-secrets)    add_helm_repos && install_external_secrets ;;

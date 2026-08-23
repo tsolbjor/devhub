@@ -68,15 +68,89 @@ async function woodpeckerActivate(forgeRemoteId) {
 // so the rules are DNS-1123's, with headroom for the devhub- prefix.
 const NAME_RE = /^[a-z](?:[a-z0-9-]{0,37}[a-z0-9])?$/;
 
-// The template convention (see k8s/templates/app-template): the literal tokens
-// APP_NAME and DOMAIN, in both file content and file names. APP_NAME first, so
-// APP_NAME.DOMAIN resolves to <name>.<domain>.
-function substitute(text, name) {
-  return text.split('APP_NAME').join(name).split('DOMAIN').join(DOMAIN);
+// Hostnames the platform itself claims on the same domain. An app named
+// "grafana" would resolve — into the wrong service. Extendable per environment
+// without a rebuild: RESERVED_NAMES="foo,bar".
+const RESERVED = new Set([
+  'keycloak', 'auth', 'vault', 'git', 'ci', 'argocd', 'grafana', 'prometheus',
+  'alertmanager', 'loki', 'tempo', 'headlamp', 'home', 'homepage', 'portal',
+  'registry', 'www', 'api', 'status',
+  ...(process.env.RESERVED_NAMES || '').split(',').map((s) => s.trim()).filter(Boolean),
+]);
+
+// Identity comes from the gateway: the SecurityPolicy authenticates the
+// browser and forwards the Keycloak access token upstream
+// (forwardAccessToken). The token is deliberately not re-verified here — the
+// NetworkPolicy admits only the gateway, and the gateway never forwards an
+// unauthenticated request, so parsing the payload is enough to know WHO the
+// gateway let in. Forgejo usernames match Keycloak's preferred_username
+// because Forgejo accounts are created by the same Keycloak OIDC login.
+function userFromRequest(req) {
+  const m = (req.headers.authorization || '').match(/^Bearer (.+)$/i);
+  if (!m) return null;
+  const parts = m[1].split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    return claims.preferred_username ? { username: claims.preferred_username } : null;
+  } catch { return null; }
 }
 
-// Optional add-ons: files the template keeps under optional/, copied into k8s/
-// only when asked for. Anything else under optional/ never ships.
+// The user's effective permission on an app repo ('owner', 'admin', 'write',
+// 'read', 'none'). Org owners come back as admin/owner too.
+async function userRepoPermission(username, name) {
+  try {
+    const p = await forgejo(
+      'GET',
+      `/repos/${APPS_ORG}/${name}/collaborators/${encodeURIComponent(username)}/permission`,
+    );
+    return (p && p.permission) || 'none';
+  } catch (e) {
+    if (e.status === 404 || e.status === 422) return 'none';
+    throw e;
+  }
+}
+
+const CAN_DEPROVISION = (perm) => perm === 'admin' || perm === 'owner';
+
+// One answer for both the live check (/api/validate-name) and the create path:
+// syntactically a DNS label, not a platform hostname, not an existing repo.
+async function validateName(name) {
+  if (!NAME_RE.test(name || '')) {
+    return {
+      available: false,
+      reason: 'Must be a DNS label: lowercase letters, digits and dashes, max 39 chars, starting with a letter.',
+    };
+  }
+  if (RESERVED.has(name)) {
+    return { available: false, reason: `"${name}.${DOMAIN}" is a platform hostname — pick another name.` };
+  }
+  try {
+    await forgejo('GET', `/repos/${APPS_ORG}/${name}`);
+    return { available: false, reason: `Repository ${APPS_ORG}/${name} already exists.` };
+  } catch (e) {
+    if (e.status !== 404) throw e;
+  }
+  return { available: true, reason: `${name}.${DOMAIN} is available.` };
+}
+
+// The template convention (see k8s/templates/app-template): the literal tokens
+// APP_NAME and DOMAIN, in both file content and file names — APP_NAME first, so
+// APP_NAME.DOMAIN resolves to <name>.<domain> — plus POSTGRES_ENABLED and
+// REDIS_ENABLED, which become the values.yaml opt-in flags.
+function substitute(text, name, options) {
+  return text
+    .split('APP_NAME').join(name)
+    .split('DOMAIN').join(DOMAIN)
+    .split('POSTGRES_ENABLED').join(options && options.postgres ? 'true' : 'false')
+    .split('REDIS_ENABLED').join(options && options.redis ? 'true' : 'false');
+}
+
+// Optional add-ons as files: templates that keep manifests under optional/ get
+// them copied into k8s/ when asked for; anything else under optional/ never
+// ships. The default app-template no longer uses this — its data services are
+// the POSTGRES_ENABLED/REDIS_ENABLED flags in k8s/values.yaml — but custom
+// raw-manifest templates still can.
 const OPTIONS = {
   postgres: { file: 'optional/postgres.yaml', dest: 'k8s/postgres.yaml' },
   redis: { file: 'optional/redis.yaml', dest: 'k8s/redis.yaml' },
@@ -98,29 +172,39 @@ const STARTER_ISSUES = (name, options, ciActivated) => {
     {
       title: `Verify the app is reachable at https://${name}.${DOMAIN}`,
       body:
-        'k8s/httproute.yaml attaches to the workload gateway\'s wildcard `apps` listener; ' +
-        'external-dns creates the DNS record from the HTTPRoute and cert-manager serves the ' +
-        'wildcard certificate (DNS-01). Nothing to configure per app — this is a check, after ' +
-        'the first image is pushed. Exception: on UpCloud the `letsencrypt-dns01` ClusterIssuer ' +
-        'is a manual Cloudflare setup; ask a platform admin if TLS fails there.',
+        'The devhub-app chart\'s HTTPRoute attaches to the workload gateway\'s wildcard ' +
+        '`apps` listener; external-dns creates the DNS record from the HTTPRoute and ' +
+        'cert-manager serves the wildcard certificate (DNS-01). Nothing to configure per ' +
+        'app — this is a check, after the first image is pushed. Exception: on UpCloud the ' +
+        '`letsencrypt-dns01` ClusterIssuer is a manual Cloudflare setup; ask a platform ' +
+        'admin if TLS fails there.',
     },
     {
       title: 'Review resource requests and limits',
       body:
-        'k8s/deployment.yaml ships conservative defaults. Kyverno enforces that requests ' +
-        'and limits exist, and the namespace quota caps the total.',
+        'The chart ships conservative defaults; override them under `app.resources` in ' +
+        'k8s/values.yaml. Kyverno enforces that requests and limits exist, and the ' +
+        'namespace quota caps the total.',
+    },
+    {
+      title: 'Set up the project board',
+      body:
+        `Create a kanban board at https://git.${DOMAIN}/${APPS_ORG}/${name}/projects ` +
+        '(the "Basic Kanban" template fits the starter issues). Forgejo has no Projects ' +
+        'API yet (forgejo/forgejo#5330), so the portal cannot create it for you — the ' +
+        'starter issues are grouped under the "Getting started" milestone in the meantime.',
     },
   );
-  for (const key of Object.keys(OPTIONS)) {
+  for (const key of ['postgres', 'redis']) {
     if (options[key]) {
       issues.push({
         title: `Plan the move from dev-grade ${key} to a managed service`,
         body:
-          `k8s/${key}.yaml runs a single in-namespace instance; its password is generated ` +
-          'in-cluster by an External Secrets `Password` generator (nothing is committed). ' +
-          'Fine for development — production data belongs on the managed ' +
-          (key === 'postgres' ? 'PostgreSQL' : 'cache') +
-          ' the platform provisions per cloud.',
+          `\`${key}.enabled: true\` in k8s/values.yaml runs a single in-namespace instance; ` +
+          'its password is generated in-cluster by an External Secrets `Password` generator ' +
+          '(nothing is committed) and the connection env vars are injected into the app ' +
+          'container by the chart. Fine for development — production data belongs on the ' +
+          `managed ${key === 'postgres' ? 'PostgreSQL' : 'cache'} the platform provisions per cloud.`,
       });
     }
   }
@@ -144,24 +228,14 @@ async function fileContent(templateRepo, filePath) {
   return Buffer.from(entry.content, 'base64').toString('utf8');
 }
 
-async function createApp({ name, description, template, options }) {
+async function createApp({ name, description, template, options, creator }) {
   const steps = [];
   const step = (title, detail) => steps.push({ title, detail });
 
-  if (!NAME_RE.test(name || '')) {
-    throw Object.assign(
-      new Error('Name must be a DNS label: lowercase letters, digits and dashes, max 39 chars, starting with a letter.'),
-      { status: 400 },
-    );
-  }
-
-  // Fail before creating anything if the repo already exists.
-  let exists = true;
-  try { await forgejo('GET', `/repos/${APPS_ORG}/${name}`); } catch (e) {
-    if (e.status === 404) exists = false; else throw e;
-  }
-  if (exists) {
-    throw Object.assign(new Error(`Repository ${APPS_ORG}/${name} already exists.`), { status: 409 });
+  // Fail before creating anything: bad label, platform hostname, taken repo.
+  const verdict = await validateName(name);
+  if (!verdict.available) {
+    throw Object.assign(new Error(verdict.reason), { status: NAME_RE.test(name || '') ? 409 : 400 });
   }
 
   // Read the template, substitute, route optional files.
@@ -176,8 +250,8 @@ async function createApp({ name, description, template, options }) {
     const dest = opt && options[opt[0]] ? opt[1].dest : p;
     files.push({
       operation: 'create',
-      path: substitute(dest, name),
-      content: Buffer.from(substitute(raw, name), 'utf8').toString('base64'),
+      path: substitute(dest, name, options),
+      content: Buffer.from(substitute(raw, name, options), 'utf8').toString('base64'),
     });
   }
   step('Template read', `${files.length} files from ${TEMPLATES_ORG}/${template}`);
@@ -191,42 +265,75 @@ async function createApp({ name, description, template, options }) {
   });
   step('Repository created', `${APPS_ORG}/${name}`);
 
-  // One commit with every file. The batch contents endpoint initialises an
-  // empty repository, so no auto_init README to collide with the template's.
-  await forgejo('POST', `/repos/${APPS_ORG}/${name}/contents`, {
-    message: `Scaffold ${name} from ${TEMPLATES_ORG}/${template}`,
-    files,
-  });
-  step('Files committed', `${files.length} files on main`);
+  // Record who provisioned this: the signed-in user becomes repository admin,
+  // which is also what authorises them to deprovision it later. Best-effort —
+  // a user who has never opened Forgejo (so no account yet) just isn't added.
+  if (creator) {
+    try {
+      await forgejo('PUT',
+        `/repos/${APPS_ORG}/${name}/collaborators/${encodeURIComponent(creator.username)}`,
+        { permission: 'admin' });
+      step('Owner recorded', `${creator.username} is repository admin — and may deprovision it here`);
+    } catch (err) {
+      console.error(`collaborator ${creator.username} on ${name}: ${err.message}`);
+      step('Owner not recorded', `${err.message} — sign in to Forgejo once, then ask an admin to add you`);
+    }
+  }
 
-  // CI activation — best-effort: the scaffold is complete without it, so a
-  // Woodpecker hiccup must not fail the wizard. Falls back to a starter issue.
+  // CI activation happens BEFORE the first commit, so Woodpecker's webhook is
+  // in place when the scaffold lands — the very first push builds and publishes
+  // the image, and the app comes up with no human involved. Best-effort: the
+  // scaffold is complete without it, so a Woodpecker hiccup must not fail the
+  // wizard. Falls back to a starter issue.
   let ciActivated = false;
   let wpRepo = null;
   if (CAN_ACTIVATE_CI) {
     try {
       wpRepo = await woodpeckerActivate(created.id);
       ciActivated = true;
-      step('CI activated', 'repository enabled in Woodpecker (org registry secrets apply)');
+      step('CI activated', 'enabled in Woodpecker before the first commit — the scaffold itself builds');
     } catch (err) {
       console.error(`woodpecker activation for ${name}: ${err.message}`);
       step('CI activation failed', `${err.message} — left as a starter issue`);
     }
   }
 
+  // One commit with every file. The batch contents endpoint initialises an
+  // empty repository, so no auto_init README to collide with the template's.
+  await forgejo('POST', `/repos/${APPS_ORG}/${name}/contents`, {
+    message: `Scaffold ${name} from ${TEMPLATES_ORG}/${template}`,
+    files,
+  });
+  step('Files committed', `${files.length} files on main${ciActivated ? ' — CI is building the first image' : ''}`);
+
   if (options.issues) {
+    // Group the starter issues under one milestone. This is the best grouping
+    // the API offers: Forgejo has no Projects (kanban) endpoints yet
+    // (forgejo/forgejo#5330), so board creation stays a starter issue.
+    let milestoneId = null;
+    try {
+      const milestone = await forgejo('POST', `/repos/${APPS_ORG}/${name}/milestones`, {
+        title: 'Getting started',
+        description: 'Scaffold follow-ups created by the portal.',
+      });
+      milestoneId = milestone && milestone.id ? milestone.id : null;
+    } catch (err) {
+      console.error(`milestone for ${name}: ${err.message}`);
+    }
     let count = 0;
     for (const issue of STARTER_ISSUES(name, options, ciActivated)) {
-      await forgejo('POST', `/repos/${APPS_ORG}/${name}/issues`, issue);
+      await forgejo('POST', `/repos/${APPS_ORG}/${name}/issues`,
+        milestoneId ? { ...issue, milestone: milestoneId } : issue);
       count += 1;
     }
-    step('Starter issues created', `${count} work items`);
+    step('Starter issues created', `${count} work items${milestoneId ? ' under the "Getting started" milestone' : ''}`);
   }
 
   return {
     steps,
     repo: `https://git.${DOMAIN}/${APPS_ORG}/${name}`,
     issues: `https://git.${DOMAIN}/${APPS_ORG}/${name}/issues`,
+    board: `https://git.${DOMAIN}/${APPS_ORG}/${name}/projects`,
     ci: ciActivated && wpRepo && wpRepo.id
       ? `https://ci.${DOMAIN}/repos/${wpRepo.id}`
       : `https://ci.${DOMAIN}/repos/add`,
@@ -276,12 +383,75 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, {
         domain: DOMAIN,
         appsOrg: APPS_ORG,
-        templates: (repos || []).map((r) => ({ name: r.name, description: r.description || '' })),
+        templates: (repos || [])
+          // *-chart repos are what scaffolds render THROUGH, not FROM.
+          .filter((r) => !r.name.endsWith('-chart'))
+          .map((r) => ({ name: r.name, description: r.description || '' })),
+      });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/validate-name') {
+      const verdict = await validateName(String(url.searchParams.get('name') || '').trim());
+      return send(res, 200, verdict);
+    }
+    if (req.method === 'GET' && url.pathname === '/api/apps') {
+      // The signed-in user's deprovisionable apps: every devhub-org repo they
+      // hold admin on. The platform gitops repo is never offered.
+      const user = userFromRequest(req);
+      if (!user) return send(res, 200, { user: null, apps: [] });
+      const repos = await forgejo('GET', `/orgs/${APPS_ORG}/repos?limit=100`);
+      const apps = [];
+      for (const r of repos || []) {
+        if (r.name === 'devhub') continue;
+        if (CAN_DEPROVISION(await userRepoPermission(user.username, r.name))) {
+          apps.push({
+            name: r.name,
+            description: r.description || '',
+            repo: `https://git.${DOMAIN}/${APPS_ORG}/${r.name}`,
+            url: `https://${r.name}.${DOMAIN}`,
+          });
+        }
+      }
+      return send(res, 200, { user: user.username, apps });
+    }
+    if (req.method === 'DELETE' && url.pathname.startsWith('/api/apps/')) {
+      const name = decodeURIComponent(url.pathname.slice('/api/apps/'.length));
+      if (!NAME_RE.test(name) || name === 'devhub') {
+        throw Object.assign(new Error('Not a deprovisionable application.'), { status: 400 });
+      }
+      const user = userFromRequest(req);
+      if (!user) {
+        throw Object.assign(
+          new Error('No identity on the request — the gateway must forward the access token (forwardAccessToken).'),
+          { status: 401 },
+        );
+      }
+      const perm = await userRepoPermission(user.username, name);
+      if (!CAN_DEPROVISION(perm)) {
+        throw Object.assign(
+          new Error(`Deprovisioning needs admin on ${APPS_ORG}/${name}; ${user.username} has "${perm}".`),
+          { status: 403 },
+        );
+      }
+      // Deleting the repository IS the deprovision: the ApplicationSets stop
+      // generating the Application on their next scan and ArgoCD prunes every
+      // deployed resource. Still git-shaped — the portal never touches the
+      // cluster. The namespace and its volumes are swept by the platform's
+      // `deploy.sh <env> cleanup-apps` (they survive on purpose, as an undo
+      // window alongside the Velero backups).
+      await forgejo('DELETE', `/repos/${APPS_ORG}/${name}`);
+      console.log(`deprovisioned ${APPS_ORG}/${name} by ${user.username}`);
+      return send(res, 200, {
+        deleted: name,
+        note:
+          'Repository deleted. ArgoCD removes the deployed workloads within its next scan (≤30 min). ' +
+          'The namespace, its volumes and the container images remain until a platform admin runs ' +
+          'cleanup-apps / deletes the packages — backups expire on their own.',
       });
     }
     if (req.method === 'POST' && url.pathname === '/api/apps') {
       const body = await readBody(req);
       const result = await createApp({
+        creator: userFromRequest(req),
         name: String(body.name || '').trim(),
         description: String(body.description || '').trim().slice(0, 255),
         template: NAME_RE.test(String(body.template || '')) ? String(body.template) : 'app-template',

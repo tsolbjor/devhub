@@ -36,3 +36,14 @@ variable "dns_zone_resource_group" {
   type        = string
   default     = ""
 }
+
+variable "ci_node_vm_size" {
+  description = <<-EOT
+    VM size for the tainted spot CI node pool. The binding constraint is the
+    subscription's LOW-PRIORITY vCPU quota in the region (check with
+    `az vm list-usage`): a default trial quota of 3 cannot ever allocate the
+    4-vCPU default, and CI builds sit Pending forever — pick a 2-vCPU size.
+  EOT
+  type        = string
+  default     = "Standard_D4s_v3"
+}

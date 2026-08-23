@@ -13,10 +13,27 @@ when:
   - event: [push, pull_request]
 
 steps:
-  - name: lint-manifests
-    image: bitnami/kubectl:latest
+  # Render k8s/values.yaml through the platform's devhub-app chart: a broken
+  # values file fails here, before anything reaches ArgoCD. The chart comes from
+  # Forgejo's archive endpoint (no git needed); --no-check-certificate because
+  # local environments run a private CA the CI image does not trust.
+  #
+  # Push events only: Forgejo requires sign-in for every view, so the download
+  # authenticates with the registry_token secret — which is deliberately absent
+  # from pull-request builds (untrusted code must not read it).
+  - name: lint
+    image: alpine/helm:3.16.2
+    when:
+      - event: push
+    environment:
+      FORGEJO_TOKEN:
+        from_secret: registry_token
     commands:
-      - kubectl apply --dry-run=client -f k8s/
+      # Quoted for YAML: the colon-space in the header would otherwise parse
+      # as a mapping and break the whole pipeline file.
+      - 'wget -qO- --no-check-certificate --header "Authorization: token $FORGEJO_TOKEN" https://git.DOMAIN/devhub-templates/devhub-app-chart/archive/main.tar.gz | tar xz'
+      - helm template APP_NAME devhub-app-chart -f k8s/values.yaml >/dev/null
+      - echo "values.yaml renders cleanly"
 
   - name: test
     image: mcr.microsoft.com/dotnet/sdk:8.0
@@ -27,6 +44,18 @@ steps:
   # publish a tag other people might pull.
   - name: build
     image: moby/buildkit:v0.17.2-rootless
+    # Rootless BuildKit builds in its own user+mount namespaces; the node's
+    # default AppArmor profile denies the mount-propagation call rootlesskit
+    # makes ("failed to share mount point: /"). This one step therefore runs
+    # with AppArmor/seccomp unconfined — still unprivileged: no host mounts,
+    # no added capabilities, no privileged flag.
+    backend_options:
+      kubernetes:
+        securityContext:
+          seccompProfile:
+            type: Unconfined
+          apparmorProfile:
+            type: Unconfined
     environment:
       BUILDKITD_FLAGS: --oci-worker-no-process-sandbox
       REGISTRY_USER:
@@ -62,8 +91,12 @@ steps:
     commands:
       - git config user.email "ci@git.DOMAIN"
       - git config user.name "Woodpecker CI"
-      - sed -i "s|image: .*|image: git.DOMAIN/devhub/APP_NAME:$CI_COMMIT_SHA|" k8s/deployment.yaml
-      - git add k8s/deployment.yaml
+      # Quoted for YAML: the colon-space inside the sed pattern would otherwise
+      # be parsed as a mapping and break the whole pipeline file.
+      - 'sed -i "s|tag: .*|tag: $CI_COMMIT_SHA|" k8s/values.yaml'
+      - git add k8s/values.yaml
       - git diff --cached --quiet && echo "no image change" && exit 0
       - git commit -m "[skip ci] deploy $CI_COMMIT_SHA"
-      - git push origin HEAD:${CI_REPO_DEFAULT_BRANCH}
+      # origin has no credentials in a step container; push with the token
+      # (Forgejo accepts an access token as the username).
+      - git push "https://$GIT_TOKEN@git.DOMAIN/devhub/APP_NAME.git" HEAD:${CI_REPO_DEFAULT_BRANCH}

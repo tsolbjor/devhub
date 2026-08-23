@@ -465,6 +465,21 @@ seed_platform_secrets() {
         fi
     fi
 
+    # Shared gateway OIDC client for developer apps (created by
+    # setup-keycloak.sh as client "apps"). Lives under apps/, not platform/,
+    # because workload clusters' Vault policy is limited to apps/* — the
+    # devhub-app chart's ExternalSecret pulls it into each app namespace.
+    local apps_oidc="${APPS_OIDC_SECRET:-}"
+    [[ -n "$apps_oidc" ]] || apps_oidc="$(grep -s '^APPS_OIDC_SECRET=' "${SCRIPT_ENV_DIR}/oidc-secrets.env" | tail -1 | cut -d= -f2-)"
+    if [[ -n "$apps_oidc" ]]; then
+        if [[ "$force" == "--force" ]] || ! _kv_exists apps/oidc-gateway; then
+            vault_admin kv put secret/apps/oidc-gateway client-secret="${apps_oidc}" >/dev/null
+            log_info "  secret/apps/oidc-gateway"
+        else
+            log_info "  secret/apps/oidc-gateway (exists, left as-is)"
+        fi
+    fi
+
     # Alertmanager webhook — created (possibly empty) so the ExternalSecret resolves.
     if [[ "$force" == "--force" ]] || ! _kv_exists platform/alertmanager; then
         local webhook
