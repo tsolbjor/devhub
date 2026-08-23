@@ -46,6 +46,10 @@
   button:disabled { opacity: .55; cursor: default; }
   code { background: var(--code-bg); border-radius: 4px; padding: 1px 5px; font-size: 13px; }
   .error { color: var(--err); margin-top: 14px; }
+  .name-check { font-size: 13px; min-height: 20px; margin-top: 4px; }
+  .name-check.ok { color: var(--ok); }
+  .name-check.bad { color: var(--err); }
+  .name-check.busy { color: var(--muted); }
   .steps { list-style: none; padding: 0; margin: 0 0 18px; }
   .steps li { padding: 6px 0; border-bottom: 1px solid var(--line); }
   .steps li::before { content: "✓ "; color: var(--ok); font-weight: 700; }
@@ -68,6 +72,7 @@
         <code>devhub-&lt;name&gt;</code> and the hostname</span></label>
       <input type="text" id="name" name="name" required pattern="[a-z][a-z0-9-]{0,37}[a-z0-9]"
              placeholder="my-service" autocomplete="off" spellcheck="false">
+      <div class="name-check" id="name-check" aria-live="polite"></div>
 
       <label for="description">Description <span class="hint">— shown in Forgejo</span></label>
       <input type="text" id="description" name="description" placeholder="What this service does" maxlength="255">
@@ -83,7 +88,8 @@
 
       <label>Work items</label>
       <div class="check"><input type="checkbox" id="issues" name="issues" checked>
-        <span>Create starter issues for the manual steps (CI activation, gateway listener, credentials)</span></div>
+        <span>Create starter issues under a "Getting started" milestone (reachability check,
+        resource review, project board, data-service follow-ups)</span></div>
 
       <button type="submit" id="submit">Create application</button>
       <div class="error" id="error" role="alert"></div>
@@ -103,6 +109,38 @@
   var form = document.getElementById('wizard');
   var errorEl = document.getElementById('error');
   var submit = document.getElementById('submit');
+  var nameEl = document.getElementById('name');
+  var nameCheck = document.getElementById('name-check');
+
+  // Live availability check: taken repos and platform hostnames fail here,
+  // not after submit. Debounced; a stale response never overwrites a newer one.
+  var checkTimer = null;
+  var checkSeq = 0;
+  var nameOk = false;
+  function setCheck(cls, text) { nameCheck.className = 'name-check ' + cls; nameCheck.textContent = text; }
+  nameEl.addEventListener('input', function () {
+    nameOk = false;
+    clearTimeout(checkTimer);
+    var value = nameEl.value.trim();
+    if (!value) { setCheck('', ''); return; }
+    setCheck('busy', 'Checking availability…');
+    checkTimer = setTimeout(function () {
+      var seq = ++checkSeq;
+      fetch('/api/validate-name?name=' + encodeURIComponent(value))
+        .then(function (r) { return r.json(); })
+        .then(function (v) {
+          if (seq !== checkSeq) return;
+          nameOk = !!v.available;
+          setCheck(v.available ? 'ok' : 'bad', (v.available ? '✓ ' : '✗ ') + v.reason);
+        })
+        .catch(function () {
+          if (seq !== checkSeq) return;
+          // The server re-validates on submit; a failed live check only mutes the hint.
+          nameOk = true;
+          setCheck('', '');
+        });
+    }, 350);
+  });
 
   fetch('/api/config').then(function (r) { return r.json(); }).then(function (cfg) {
     var sel = document.getElementById('template');
@@ -119,6 +157,10 @@
 
   form.addEventListener('submit', function (ev) {
     ev.preventDefault();
+    if (!nameOk) {
+      errorEl.textContent = nameCheck.textContent || 'Pick an available name first.';
+      return;
+    }
     errorEl.textContent = '';
     submit.disabled = true;
     submit.textContent = 'Creating…';
@@ -155,6 +197,7 @@
       var links = document.getElementById('links');
       [['Repository', result.repo],
        ['Work items', result.issues],
+       ['Project board (create it here)', result.board],
        [result.ciActivated ? 'CI pipelines (activated)' : 'Activate CI in Woodpecker', result.ci],
        ['ArgoCD applications', result.argocd]].forEach(function (pair) {
         var a = document.createElement('a');
@@ -164,9 +207,11 @@
         a.textContent = pair[0] + ' → ' + pair[1];
         links.appendChild(a);
       });
-      document.getElementById('next').textContent =
-        'Image: ' + result.image + '. The app deploys to every registered workload cluster as ' +
-        result.url + ' once CI has pushed a first image and the gateway listener exists.';
+      document.getElementById('next').textContent = result.ciActivated
+        ? 'Image: ' + result.image + '. CI is already building the scaffold commit; the app ' +
+          'deploys to every registered workload cluster as ' + result.url + ' when it lands.'
+        : 'Image: ' + result.image + '. The app deploys to every registered workload cluster as ' +
+          result.url + ' once CI is activated and has pushed a first image.';
       document.getElementById('form-panel').style.display = 'none';
       document.getElementById('result').style.display = 'block';
     }).catch(function (err) {

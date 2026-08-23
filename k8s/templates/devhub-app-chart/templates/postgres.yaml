@@ -1,24 +1,17 @@
-# Optional add-on: dev-grade PostgreSQL in this app's own namespace.
-#
-# The portal copies this file to k8s/postgres.yaml when PostgreSQL is selected
-# in the wizard; it is not deployed from optional/ (ArgoCD only syncs k8s/).
-#
-# Dev-grade means: one instance, one volume. The password is generated
-# in-cluster by External Secrets' Password generator, so nothing secret is ever
-# committed — the workload cluster runs ESO already (see
-# k8s/registry-pull-secret.yaml). The app reads the same Secret:
-#   secretKeyRef {name: APP_NAME-postgres, key: username|password|database}
-# Production loads belong on the managed PostgreSQL the platform provisions
-# per cloud.
+# Opt-in dev-grade PostgreSQL: one instance, one volume, in the app's own
+# namespace. The password is generated in-cluster by External Secrets' Password
+# generator, so nothing secret is ever committed. The app container gets
+# POSTGRES_HOST/PORT/DB/USER/PASSWORD injected by the chart (deployment.yaml).
+# Production loads belong on the managed PostgreSQL the platform provisions.
 #
 # Image is docker.io/library/* on purpose: Kyverno's registry allow-list for
 # devhub-* namespaces admits the platform registry and a short public list.
----
+{{- if .Values.postgres.enabled }}
+{{- $name := include "devhub-app.name" . }}
 apiVersion: generators.external-secrets.io/v1alpha1
 kind: Password
 metadata:
-  name: APP_NAME-postgres-password
-  namespace: devhub-APP_NAME
+  name: {{ $name }}-postgres-password
 spec:
   length: 32
   digits: 8
@@ -31,44 +24,42 @@ spec:
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: APP_NAME-postgres
-  namespace: devhub-APP_NAME
+  name: {{ $name }}-postgres
 spec:
   # "0" = generate once and stop: a refresh would mint a new password under a
   # database initialised with the old one.
   refreshInterval: "0"
   target:
-    name: APP_NAME-postgres
+    name: {{ $name }}-postgres
     creationPolicy: Owner
     template:
       data:
-        username: APP_NAME
-        database: APP_NAME
-        password: "{{ .password }}"
+        username: {{ $name }}
+        database: {{ $name }}
+        password: "{{ "{{ .password }}" }}"
   dataFrom:
     - sourceRef:
         generatorRef:
           apiVersion: generators.external-secrets.io/v1alpha1
           kind: Password
-          name: APP_NAME-postgres-password
+          name: {{ $name }}-postgres-password
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: APP_NAME-postgres
-  namespace: devhub-APP_NAME
+  name: {{ $name }}-postgres
   labels:
-    app: APP_NAME-postgres
+    app: {{ $name }}-postgres
 spec:
-  serviceName: APP_NAME-postgres
+  serviceName: {{ $name }}-postgres
   replicas: 1
   selector:
     matchLabels:
-      app: APP_NAME-postgres
+      app: {{ $name }}-postgres
   template:
     metadata:
       labels:
-        app: APP_NAME-postgres
+        app: {{ $name }}-postgres
     spec:
       priorityClassName: workload-default
       securityContext:
@@ -87,13 +78,13 @@ spec:
           env:
             - name: POSTGRES_USER
               valueFrom:
-                secretKeyRef: { name: APP_NAME-postgres, key: username }
+                secretKeyRef: { name: {{ $name }}-postgres, key: username }
             - name: POSTGRES_PASSWORD
               valueFrom:
-                secretKeyRef: { name: APP_NAME-postgres, key: password }
+                secretKeyRef: { name: {{ $name }}-postgres, key: password }
             - name: POSTGRES_DB
               valueFrom:
-                secretKeyRef: { name: APP_NAME-postgres, key: database }
+                secretKeyRef: { name: {{ $name }}-postgres, key: database }
             # A subdirectory, because the volume root holds lost+found.
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
@@ -108,7 +99,7 @@ spec:
               memory: 512Mi
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", "APP_NAME"]
+              command: ["pg_isready", "-U", "{{ $name }}"]
             initialDelaySeconds: 5
             periodSeconds: 10
           volumeMounts:
@@ -121,16 +112,16 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
-            storage: 5Gi
+            storage: {{ .Values.postgres.storage }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: APP_NAME-postgres
-  namespace: devhub-APP_NAME
+  name: {{ $name }}-postgres
 spec:
   selector:
-    app: APP_NAME-postgres
+    app: {{ $name }}-postgres
   ports:
     - port: 5432
       targetPort: 5432
+{{- end }}

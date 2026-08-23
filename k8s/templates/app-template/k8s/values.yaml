@@ -1,0 +1,35 @@
+# APP_NAME — every deployment concern of this app, in one file.
+#
+# The platform's devhub-app chart (devhub-templates/devhub-app-chart) renders
+# these values into the actual manifests: hardened Deployment, Service, public
+# HTTPRoute, PDB, NetworkPolicy, registry pull secret, and the opt-in data
+# services below. The chart-based ApplicationSet on the platform's ArgoCD picks
+# this file up automatically — committing to main is deploying.
+#
+# Ports and TLS are not your problem: the gateway terminates 443 and redirects
+# 80; the app listens on app.port, plain HTTP.
+#
+# Need something the chart does not model? Add it under extraManifests, or
+# eject entirely: delete this file and commit raw manifests to k8s/ — the raw
+# ApplicationSet takes over. See the chart's values.yaml for every knob.
+
+app:
+  name: APP_NAME
+  host: APP_NAME.DOMAIN
+  port: 8080
+  image:
+    repository: git.DOMAIN/devhub/APP_NAME
+    # CI rewrites the tag to the commit SHA on every push to main.
+    tag: latest
+
+registry:
+  host: git.DOMAIN
+
+# Dev-grade data services in this app's namespace. When enabled, the app
+# container automatically gets POSTGRES_HOST/PORT/DB/USER/PASSWORD and
+# REDIS_HOST/PORT/PASSWORD env vars — no secretKeyRef wiring needed.
+# Production data belongs on the managed services the platform provisions.
+postgres:
+  enabled: POSTGRES_ENABLED
+redis:
+  enabled: REDIS_ENABLED

@@ -1,0 +1,10 @@
+apiVersion: v2
+name: devhub-app
+description: >-
+  Opinionated chart for devhub applications. An app repository carries one
+  values.yaml; this chart owns the manifests — hardened Deployment, Service,
+  HTTPRoute, PDB, NetworkPolicy, registry pull secret, and opt-in dev-grade
+  PostgreSQL/Redis with connection env vars wired into the app.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

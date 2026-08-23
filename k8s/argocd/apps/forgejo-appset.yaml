@@ -1,9 +1,18 @@
-# ApplicationSet: developer repos from Forgejo → workload clusters.
+# ApplicationSets: developer repos from Forgejo → workload clusters.
 #
-# A matrix of (repositories in the devhub Forgejo organisation) × (registered
-# workload clusters). The cluster half is what makes the workload cluster real:
-# the destination used to be hardcoded to https://kubernetes.default.svc, so every
-# discovered app landed on the platform cluster next to Vault and Keycloak.
+# Two sets, split by what the repo carries:
+#   - forgejo-workloads-chart — repos with k8s/values.yaml: the values are
+#     rendered through the platform's devhub-app chart
+#     (devhub-templates/devhub-app-chart). This is what the portal scaffolds.
+#   - forgejo-workloads — repos with raw manifests in k8s/ and no values.yaml:
+#     deployed as-is. The escape hatch for apps that outgrow the chart.
+# The pathsExist/pathsDoNotExist filters are what keep the two disjoint.
+#
+# Both are a matrix of (repositories in the devhub Forgejo organisation) ×
+# (registered workload clusters). The cluster half is what makes the workload
+# cluster real: the destination used to be hardcoded to
+# https://kubernetes.default.svc, so every discovered app landed on the platform
+# cluster next to Vault and Keycloak.
 #
 # Forgejo implements the Gitea API, so ArgoCD's gitea SCM provider is the correct
 # one — there is no separate Forgejo provider.
@@ -37,12 +46,14 @@ spec:
                   secretName: argocd-forgejo-scm-token
                   key: token
               filters:
-                # Only repos with k8s/ manifests
+                # Only repos with raw k8s/ manifests
                 - pathsExist:
                     - k8s/
-                  # Exclude this platform repo (it has k8s/argocd/)
                   pathsDoNotExist:
+                    # Exclude this platform repo (it has k8s/argocd/)
                     - k8s/argocd/
+                    # Chart-based repos belong to forgejo-workloads-chart below
+                    - k8s/values.yaml
               cloneProtocol: https
           - clusters:
               selector:
@@ -64,6 +75,80 @@ spec:
         repoURL: '{{.url}}'
         targetRevision: HEAD
         path: k8s
+      destination:
+        name: '{{.name}}'
+        namespace: 'devhub-{{.repository}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - PrunePropagationPolicy=foreground
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m
+---
+# Chart-based developer apps: repos carrying only k8s/values.yaml. The chart
+# source is the platform's own Forgejo over the internal Service URL — same
+# reachability as the SCM scan above, and the repo is public, so the clone is
+# anonymous. targetRevision HEAD because portal-templates force-pushes a fresh
+# tree on republish (no tags survive); the chart is versioned by this platform
+# repository's history, not by Forgejo's.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: forgejo-workloads-chart
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - matrix:
+        generators:
+          - scmProvider:
+              gitea:
+                api: http://forgejo-http.forgejo.svc.cluster.local:3000
+                owner: devhub
+                allBranches: false
+                insecure: true # plain HTTP inside the cluster
+                tokenRef:
+                  secretName: argocd-forgejo-scm-token
+                  key: token
+              filters:
+                - pathsExist:
+                    - k8s/values.yaml
+              cloneProtocol: https
+          - clusters:
+              selector:
+                matchLabels:
+                  devhub.io/role: workload
+  template:
+    metadata:
+      name: '{{.name}}-{{.repository}}'
+      namespace: argocd
+      labels:
+        app.kubernetes.io/part-of: devhub
+        app.kubernetes.io/managed-by: applicationset
+        devhub.io/cluster: '{{.name}}'
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: workloads
+      sources:
+        - repoURL: http://forgejo-http.forgejo.svc.cluster.local:3000/devhub-templates/devhub-app-chart.git
+          targetRevision: HEAD
+          path: .
+          helm:
+            releaseName: '{{.repository}}'
+            valueFiles:
+              - $app/k8s/values.yaml
+        - repoURL: '{{.url}}'
+          targetRevision: HEAD
+          ref: app
       destination:
         name: '{{.name}}'
         namespace: 'devhub-{{.repository}}'

@@ -1,14 +1,12 @@
-# Baseline network isolation for this app's namespace.
-#
-# The platform re-applies an equivalent policy (deploy-workload.sh
-# namespace-defaults), so removing this file does not open the namespace up — it
-# is here so the behaviour is visible to whoever owns the app.
----
+# Baseline network isolation. The platform generates equivalent policies for
+# every devhub-* namespace (Kyverno), so deleting this changes nothing — it is
+# rendered so the behaviour is visible to whoever owns the app.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny-ingress
-  namespace: devhub-APP_NAME
+  labels:
+    {{- include "devhub-app.labels" . | nindent 4 }}
 spec:
   podSelector: {}
   policyTypes:
@@ -17,8 +15,9 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-ingress-controller
-  namespace: devhub-APP_NAME
+  name: allow-gateway-and-same-namespace
+  labels:
+    {{- include "devhub-app.labels" . | nindent 4 }}
 spec:
   podSelector: {}
   policyTypes:
@@ -28,7 +27,7 @@ spec:
         - podSelector: {}
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              kubernetes.io/metadata.name: envoy-gateway-system
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: monitoring

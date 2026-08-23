@@ -1126,34 +1126,47 @@ publish_app_templates() {
         fi
     done
 
-    if [[ -z "$(fget "/repos/devhub-templates/app-template" | jq -r '.id // empty')" ]]; then
-        echo '{"name":"app-template","description":"Scaffold used by the portal wizard","private":false,"auto_init":false,"default_branch":"main"}' \
-            | fapi POST /orgs/devhub-templates/repos >/dev/null \
-            || { log_warn "Could not create devhub-templates/app-template"; return 0; }
-    fi
-
-    # Fresh single-commit tree, force-pushed over the public URL — same
-    # reachability assumption (and same local-CA handling) as setup-gitops-repo.
-    local staging
-    staging="$(mktemp -d "${TMPDIR:-/tmp}/devhub-template.XXXXXX")"
-    cp -r "${K8S_DIR}/templates/app-template/." "$staging/"
-    git -C "$staging" init -q -b main
-    git -C "$staging" -c user.name=devhub -c user.email="devhub@${DOMAIN}" add -A
-    git -C "$staging" -c user.name=devhub -c user.email="devhub@${DOMAIN}" \
-        commit -q -m "Publish app-template from devhub"
-
+    # Every directory under k8s/templates/ is a repo in devhub-templates: the
+    # scaffolds the portal copies from, and the devhub-app chart their
+    # values.yaml renders through (the chart-based ApplicationSet clones it).
     local -a git_env=()
     if [[ "$TLS_TYPE" == "local-ca" && -f "${CERTS_DIR}/ca/ca.crt" ]]; then
         git_env=(env "GIT_SSL_CAINFO=${CERTS_DIR}/ca/ca.crt")
     fi
-    local push_url="https://${admin_user}:${token}@git.${DOMAIN}/devhub-templates/app-template.git"
-    if "${git_env[@]+"${git_env[@]}"}" git -C "$staging" push -q --force "$push_url" main; then
-        log_info "Published devhub-templates/app-template (re-run this command to republish)"
-    else
-        log_warn "Push failed. Is git.${DOMAIN} reachable from this machine?"
-        log_warn "Retry with: ./deploy.sh --env ${ENV} portal-templates"
-    fi
-    rm -rf "$staging"
+
+    local dir name descr staging push_url
+    for dir in "${K8S_DIR}/templates"/*/; do
+        name="$(basename "$dir")"
+        case "$name" in
+            app-template)     descr="Scaffold used by the portal wizard" ;;
+            devhub-app-chart) descr="Opinionated chart rendering every app's k8s/values.yaml" ;;
+            *)                descr="Published from devhub k8s/templates/${name}" ;;
+        esac
+
+        if [[ -z "$(fget "/repos/devhub-templates/${name}" | jq -r '.id // empty')" ]]; then
+            echo "{\"name\":\"${name}\",\"description\":\"${descr}\",\"private\":false,\"auto_init\":false,\"default_branch\":\"main\"}" \
+                | fapi POST /orgs/devhub-templates/repos >/dev/null \
+                || { log_warn "Could not create devhub-templates/${name}"; continue; }
+        fi
+
+        # Fresh single-commit tree, force-pushed over the public URL — same
+        # reachability assumption (and same local-CA handling) as setup-gitops-repo.
+        staging="$(mktemp -d "${TMPDIR:-/tmp}/devhub-template.XXXXXX")"
+        cp -r "${dir}." "$staging/"
+        git -C "$staging" init -q -b main
+        git -C "$staging" -c user.name=devhub -c user.email="devhub@${DOMAIN}" add -A
+        git -C "$staging" -c user.name=devhub -c user.email="devhub@${DOMAIN}" \
+            commit -q -m "Publish ${name} from devhub"
+
+        push_url="https://${admin_user}:${token}@git.${DOMAIN}/devhub-templates/${name}.git"
+        if "${git_env[@]+"${git_env[@]}"}" git -C "$staging" push -q --force "$push_url" main; then
+            log_info "Published devhub-templates/${name} (re-run this command to republish)"
+        else
+            log_warn "Push failed for ${name}. Is git.${DOMAIN} reachable from this machine?"
+            log_warn "Retry with: ./deploy.sh --env ${ENV} portal-templates"
+        fi
+        rm -rf "$staging"
+    done
 }
 
 # Registry credentials for CI as Woodpecker *organisation* secrets: every repo

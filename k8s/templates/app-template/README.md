@@ -3,25 +3,36 @@
 Starter template for application repositories that deploy to the DevHub platform
 via ArgoCD.
 
-Includes a minimal .NET 8 API, a multi-stage Dockerfile, Kubernetes manifests, and
-a Woodpecker CI pipeline that builds the image with rootless BuildKit and publishes
-it to Forgejo's container registry.
+Includes a minimal .NET 8 API, a multi-stage Dockerfile, a Woodpecker CI pipeline
+that builds the image with rootless BuildKit and publishes it to Forgejo's
+container registry — and exactly **one** deployment file: `k8s/values.yaml`.
+
+The manifests live in the platform's `devhub-app` chart
+(`devhub-templates/devhub-app-chart`); this repository only states what is
+app-specific: name, hostname, port, image, and whether it wants PostgreSQL or
+Redis. Commit to `main` → CI builds and publishes the container, bumps the image
+tag in `values.yaml`, and ArgoCD deploys it to every registered workload cluster
+at `https://APP_NAME.<domain>`.
 
 ## Usage
+
+The portal (`https://portal.<domain>`) scaffolds all of this for you — repo,
+CI activation, work items. By hand:
 
 1. Create a repository in Forgejo under the `devhub` organisation
 2. Copy this template into the repository root
 3. Replace the placeholders:
    - `APP_NAME` — your application name (e.g. `my-service`)
    - `DOMAIN` — the platform domain (`localhost` locally, your domain otherwise)
-4. In Woodpecker (`https://ci.<domain>`), enable the repository and add two secrets:
-   - `registry_user` / `registry_token` — a Forgejo token with `write:package`
+   - `POSTGRES_ENABLED` / `REDIS_ENABLED` — `true` or `false`
+4. Enable the repository in Woodpecker (`https://ci.<domain>`). Registry
+   credentials are devhub org-level secrets — nothing to add per repo
 5. Push
 
-ArgoCD discovers the repository within a few minutes (the `forgejo-workloads`
-ApplicationSet scans the `devhub` organisation for repos containing `k8s/`) and
-creates an Application that deploys from the `k8s/` directory to the workload
-cluster, in namespace `devhub-APP_NAME`.
+ArgoCD discovers the repository within a few minutes (the chart-based
+ApplicationSet scans the `devhub` organisation for repos containing
+`k8s/values.yaml`) and deploys it to the workload cluster, in namespace
+`devhub-APP_NAME`.
 
 ## Directory structure
 
@@ -31,12 +42,7 @@ Program.cs          # Minimal API with health endpoints
 APP_NAME.csproj     # .NET 8 project file (rename to match your app)
 appsettings.json    # Logging configuration
 k8s/
-  deployment.yaml            # Main workload: port 8080, health probes, hardened securityContext
-  service.yaml               # ClusterIP service
-  httproute.yaml             # Gateway API route (replaces Ingress)
-  registry-pull-secret.yaml  # ExternalSecret pulling registry credentials from Vault
-  networkpolicy.yaml         # Baseline isolation for the namespace
-  poddisruptionbudget.yaml   # Keeps one replica during drains
+  values.yaml       # The whole deployment: name, host, port, image, data services
 .woodpecker.yml     # CI: lint → test → build → deploy
 ```
 
@@ -44,14 +50,25 @@ k8s/
 
 | Step | What it does |
 |------|--------------|
-| **lint-manifests** | `kubectl apply --dry-run=client` over `k8s/` |
+| **lint** | Renders `k8s/values.yaml` through the platform's devhub-app chart — a broken values file fails before anything deploys |
 | **test** | `dotnet test` |
 | **build** | Rootless BuildKit build; pushes to `git.<domain>/devhub/APP_NAME` on the default branch, build-only on pull requests |
-| **deploy** | Commits the new image tag into `k8s/deployment.yaml` so ArgoCD syncs it |
+| **deploy** | Commits the new image tag into `k8s/values.yaml` so ArgoCD syncs it |
 
 Every step runs as an unprivileged pod on the platform's tainted CI node pool.
 There is no Docker daemon and no privileged container: a build cannot reach the
 node's kubelet credentials or the cloud metadata endpoint.
+
+## Data services
+
+Set `postgres.enabled: true` and/or `redis.enabled: true` in `k8s/values.yaml`.
+The chart runs a dev-grade instance in this app's namespace (password generated
+in-cluster, nothing committed) and injects the connection into the app container:
+
+- PostgreSQL: `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`
+- Redis: `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`
+
+Production data belongs on the managed services the platform provisions per cloud.
 
 ## What the platform enforces
 
@@ -63,18 +80,28 @@ suggestions:
 - images only from `git.<domain>` or an allow-listed public registry
 
 Kyverno also generates the namespace's ResourceQuota (4 CPU / 8 GiB requests),
-LimitRange and NetworkPolicies when ArgoCD creates it — the copies in `k8s/` are
-there so the behaviour is visible in your repository, not because it depends on them.
+LimitRange and NetworkPolicies when ArgoCD creates it. The chart renders
+equivalent policies so the behaviour is visible, not because it depends on them.
 
 ## Secrets
 
 Application secrets come from Vault via External Secrets. Write them under
 `secret/apps/<app-name>/` on the platform cluster, then reference them with an
-`ExternalSecret` (see `k8s/registry-pull-secret.yaml` for the shape). The workload
-cluster authenticates to Vault with its own identity — no static tokens.
+`ExternalSecret` under `extraManifests` in `k8s/values.yaml` (the chart's own
+registry-pull-secret template shows the shape). The workload cluster
+authenticates to Vault with its own identity — no static tokens.
 
 ## Routing
 
-`k8s/httproute.yaml` attaches to the platform Gateway's wildcard `apps` listener,
-so `APP_NAME.<domain>` works without any platform-side change. TLS is terminated by
-the Gateway using a wildcard certificate.
+The chart's HTTPRoute attaches to the platform Gateway's wildcard `apps`
+listener, so `APP_NAME.<domain>` works without any platform-side change. TLS is
+terminated by the Gateway using a wildcard certificate; the app itself only ever
+speaks plain HTTP on `app.port`.
+
+## Escape hatch
+
+Outgrown the chart? Two levels:
+
+1. `extraManifests:` in `values.yaml` — additional resources rendered verbatim
+2. Eject: delete `k8s/values.yaml`, commit raw manifests to `k8s/` — the raw
+   ApplicationSet deploys the directory as-is and the chart is out of the picture

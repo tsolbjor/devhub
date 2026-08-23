@@ -13,10 +13,16 @@ when:
   - event: [push, pull_request]
 
 steps:
-  - name: lint-manifests
-    image: bitnami/kubectl:latest
+  # Render k8s/values.yaml through the platform's devhub-app chart: a broken
+  # values file fails here, before anything reaches ArgoCD. The chart comes from
+  # Forgejo's archive endpoint (no git needed); --no-check-certificate because
+  # local environments run a private CA the CI image does not trust.
+  - name: lint
+    image: alpine/helm:3.16.2
     commands:
-      - kubectl apply --dry-run=client -f k8s/
+      - wget -qO- --no-check-certificate https://git.DOMAIN/devhub-templates/devhub-app-chart/archive/main.tar.gz | tar xz
+      - helm template APP_NAME devhub-app-chart -f k8s/values.yaml >/dev/null
+      - echo "values.yaml renders cleanly"
 
   - name: test
     image: mcr.microsoft.com/dotnet/sdk:8.0
@@ -62,8 +68,10 @@ steps:
     commands:
       - git config user.email "ci@git.DOMAIN"
       - git config user.name "Woodpecker CI"
-      - sed -i "s|image: .*|image: git.DOMAIN/devhub/APP_NAME:$CI_COMMIT_SHA|" k8s/deployment.yaml
-      - git add k8s/deployment.yaml
+      # Quoted for YAML: the colon-space inside the sed pattern would otherwise
+      # be parsed as a mapping and break the whole pipeline file.
+      - 'sed -i "s|tag: .*|tag: $CI_COMMIT_SHA|" k8s/values.yaml'
+      - git add k8s/values.yaml
       - git diff --cached --quiet && echo "no image change" && exit 0
       - git commit -m "[skip ci] deploy $CI_COMMIT_SHA"
       - git push origin HEAD:${CI_REPO_DEFAULT_BRANCH}

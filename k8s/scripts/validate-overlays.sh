@@ -96,6 +96,11 @@ problems = 0
 for path in sorted(root.rglob("*.yaml")):
     if any(part in {"certs", ".terraform"} for part in path.parts):
         continue
+    # The devhub-app chart's templates are Helm templates, not YAML — control
+    # flow ({{- if }}) has no YAML shape even with expressions masked. They are
+    # checked by `helm lint`/`helm template` instead (check_devhub_app_chart).
+    if "devhub-app-chart" in path.parts and path.parent.name == "templates":
+        continue
     text = path.read_text()
     # ArgoCD/Helm templating ({{ .x }}) and Alertmanager's Go templates are not
     # valid YAML on their own; replace each expression with a plain token so the
@@ -285,6 +290,47 @@ check_helm_template() {
 }
 
 # =============================================================================
+# 6. The devhub-app chart renders (local chart, no network needed)
+# =============================================================================
+
+# The chart every scaffolded app's k8s/values.yaml goes through. Rendered with
+# the flags both ways so a broken conditional cannot hide, and with the same
+# token substitution the portal performs on the template's values.yaml.
+check_devhub_app_chart() {
+    command -v helm &>/dev/null || { log_warn "helm not found — skipping devhub-app chart check"; return 0; }
+
+    log_step "Rendering the devhub-app chart..."
+
+    local chart="${K8S_DIR}/templates/devhub-app-chart"
+    local values="${K8S_DIR}/templates/app-template/k8s/values.yaml"
+    local render_dir
+    render_dir="$(mktemp -d "${TMPDIR:-/tmp}/devhub-chart-validate.XXXXXX")"
+
+    if ! helm lint "$chart" \
+        --set app.name=demo --set app.host=demo.example.com \
+        --set app.image.repository=git.example.com/devhub/demo \
+        --set registry.host=git.example.com \
+        >/dev/null 2>"${render_dir}/lint.err"; then
+        fail "devhub-app chart: helm lint failed — $(head -3 "${render_dir}/lint.err" | tr '\n' ' ')"
+    fi
+
+    local flags
+    for flags in "false false" "true true"; do
+        read -r pg redis <<<"$flags"
+        # The portal's substitution, verbatim: the template's values.yaml with
+        # the tokens replaced must be exactly what the chart can render.
+        sed -e 's/APP_NAME/demo/g' -e 's/DOMAIN/example.com/g' \
+            -e "s/POSTGRES_ENABLED/${pg}/g" -e "s/REDIS_ENABLED/${redis}/g" \
+            "$values" > "${render_dir}/values.yaml"
+        if ! helm template demo "$chart" -f "${render_dir}/values.yaml" \
+            >/dev/null 2>"${render_dir}/template.err"; then
+            fail "devhub-app chart: helm template failed (postgres=${pg} redis=${redis}) — $(head -3 "${render_dir}/template.err" | tr '\n' ' ')"
+        fi
+    done
+    rm -rf "$render_dir"
+}
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -295,6 +341,7 @@ echo "=============================================="
 check_yaml_syntax
 check_placeholders
 check_appset_values
+check_devhub_app_chart
 
 for env in "${ENVS[@]}"; do
     log_step "Checking environment: ${env}"

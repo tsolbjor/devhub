@@ -42,4 +42,24 @@ test.describe('portal', () => {
     // A literal ${DOMAIN} anywhere is the values-rendering bug.
     await expect(page.locator('body')).not.toContainText('${');
   });
+
+  test('name validation rejects platform hostnames and accepts free names', async ({ page }) => {
+    await signIn(page, services.portal);
+    await expect(page.locator('#name')).toBeVisible({ timeout: 60_000 });
+
+    // Through the page's own fetch: same gateway session, and *.localhost
+    // resolves in Chromium where Node's getaddrinfo fails.
+    const check = (name) =>
+      page.evaluate(
+        (n) => fetch('/api/validate-name?name=' + encodeURIComponent(n)).then((r) => r.json()),
+        name,
+      );
+
+    // "grafana.<domain>" is the platform's own hostname — never an app.
+    expect((await check('grafana')).available).toBe(false);
+    // Not a DNS label.
+    expect((await check('Bad_Name')).available).toBe(false);
+    // Read-only: validated, never created.
+    expect((await check('e2e-name-probe')).available).toBe(true);
+  });
 });
