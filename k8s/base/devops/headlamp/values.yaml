@@ -15,6 +15,13 @@ config:
     secret:
       create: false
 
+# The chart's default binds the ServiceAccount to cluster-admin — silently
+# overriding the curated read-only ClusterRole in rbac.yaml (delete pods,
+# read Secrets, everything). rbac.yaml's headlamp-view binding is the only
+# access this account gets.
+clusterRoleBinding:
+  create: false
+
 # The headlamp namespace enforces the "restricted" Pod Security Standard, and the
 # chart's defaults do not meet it (no seccompProfile, no dropped capabilities, no
 # explicit allowPrivilegeEscalation) — pods would be rejected at admission.
