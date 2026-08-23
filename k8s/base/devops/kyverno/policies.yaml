@@ -291,6 +291,18 @@ spec:
                 operator: Equal
                 value: ci
                 effect: NoSchedule
+              # Spot/preemptible CI pools carry the cloud's own taint on top of
+              # workload=ci (AKS: scalesetpriority=spot, GKE: gke-spot). Without
+              # these the cluster autoscaler refuses to scale the pool up for CI
+              # pods and every build sits Pending forever. Harmless where absent.
+              - key: kubernetes.azure.com/scalesetpriority
+                operator: Equal
+                value: spot
+                effect: NoSchedule
+              - key: cloud.google.com/gke-spot
+                operator: Equal
+                value: "true"
+                effect: NoSchedule
             +(priorityClassName): ci-job
             # A build step has no business talking to the API server; the agent
             # that created it already has the permissions it needs.
