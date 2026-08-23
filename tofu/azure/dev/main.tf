@@ -26,7 +26,7 @@ module "cluster" {
   worker_node_max_count = 3
 
   # CI node pool — spot, scales to zero, tainted workload=ci
-  ci_node_vm_size   = "Standard_D4s_v3"
+  ci_node_vm_size   = var.ci_node_vm_size
   ci_node_min_count = 0
   ci_node_max_count = 2
   ci_node_spot      = true
