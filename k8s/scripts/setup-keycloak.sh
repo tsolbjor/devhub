@@ -285,7 +285,7 @@ EOF
         {
           "condition": "client-id-uri",
           "configuration": {
-            "client-id-uri-scheme": "https",
+            "client-id-uri-scheme": ["https"],
             "client-id-uri-allow-permitted-domains": ${trusted_domains}
           }
         }
