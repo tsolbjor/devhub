@@ -329,6 +329,22 @@ check_devhub_app_chart() {
         fi
     done
 
+    # extraWorkloads: an off-the-shelf container per shape — routed, routed
+    # with gateway auth, and in-cluster only.
+    cat > "${render_dir}/workloads.yaml" <<'WLEOF'
+app: {name: demo, host: demo.example.com, image: {repository: git.example.com/devhub/demo}}
+registry: {host: git.example.com}
+auth: {issuer: https://keycloak.example.com/realms/devops}
+extraWorkloads:
+  - {name: docs, image: ghcr.io/org/docs:1.0.0, port: 8080, host: docs-demo.example.com, runAsUser: 101, writableDirs: [/var/cache], probePath: /health}
+  - {name: admin, image: quay.io/org/admin:2.0.0, port: 3000, host: admin-demo.example.com, auth: true}
+  - {name: worker, image: docker.io/library/busybox:1.36, port: 9000}
+WLEOF
+    if ! helm template demo "$chart" -f "${render_dir}/workloads.yaml" \
+        >/dev/null 2>"${render_dir}/workloads.err"; then
+        fail "devhub-app chart: helm template failed (extraWorkloads) — $(head -3 "${render_dir}/workloads.err" | tr '\n' ' ')"
+    fi
+
     local flags
     for flags in "false false" "true true"; do
         read -r pg redis <<<"$flags"

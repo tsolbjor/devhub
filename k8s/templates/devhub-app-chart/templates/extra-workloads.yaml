@@ -1,0 +1,164 @@
+# Off-the-shelf containers beside the app (see extraWorkloads in values.yaml):
+# the dev-grade postgres/redis pattern, generalised. Each entry becomes a
+# hardened Deployment + Service, an HTTPRoute when it has a host, and a
+# gateway sign-in SecurityPolicy when it also sets auth: true. Kyverno's
+# registry allow-list is what decides which images are admissible.
+{{- $root := . }}
+{{- range .Values.extraWorkloads }}
+{{- $name := printf "%s-%s" (include "devhub-app.name" $root) (required "extraWorkloads[].name is required" .name) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    app: {{ $name }}
+    app.kubernetes.io/part-of: {{ include "devhub-app.name" $root }}
+    app.kubernetes.io/managed-by: devhub-app-chart
+spec:
+  replicas: {{ .replicas | default 1 }}
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+        app.kubernetes.io/part-of: {{ include "devhub-app.name" $root }}
+    spec:
+      imagePullSecrets:
+        - name: registry-pull-secret
+      priorityClassName: workload-default
+      securityContext:
+        # Root stays forbidden; public images that need a specific uid set
+        # runAsUser, the rest inherit the app's default.
+        runAsNonRoot: true
+        runAsUser: {{ .runAsUser | default 10001 }}
+        fsGroup: {{ .runAsUser | default 10001 }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {{ .name }}
+          image: {{ required "extraWorkloads[].image is required" .image | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: {{ required "extraWorkloads[].port is required" .port }}
+          {{- with .env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- if .resources }}
+            {{- toYaml .resources | nindent 12 }}
+            {{- else }}
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            {{- end }}
+          readinessProbe:
+            {{- if .probePath }}
+            httpGet:
+              path: {{ .probePath }}
+              port: {{ .port }}
+            {{- else }}
+            tcpSocket:
+              port: {{ .port }}
+            {{- end }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- if or .writableDirs true }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- range $i, $dir := .writableDirs }}
+            {{- if ne $dir "/tmp" }}
+            - name: writable-{{ $i }}
+              mountPath: {{ $dir }}
+            {{- end }}
+            {{- end }}
+          {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- range $i, $dir := .writableDirs }}
+        {{- if ne $dir "/tmp" }}
+        - name: writable-{{ $i }}
+          emptyDir: {}
+        {{- end }}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    app: {{ $name }}
+    app.kubernetes.io/part-of: {{ include "devhub-app.name" $root }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ $name }}
+  ports:
+    - port: 80
+      targetPort: {{ .port }}
+      protocol: TCP
+{{- if .host }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $name }}
+  labels:
+    app: {{ $name }}
+    app.kubernetes.io/part-of: {{ include "devhub-app.name" $root }}
+spec:
+  parentRefs:
+    - name: {{ $root.Values.gateway.name }}
+      namespace: {{ $root.Values.gateway.namespace }}
+      sectionName: {{ $root.Values.gateway.section }}
+  hostnames:
+    - {{ .host | quote }}
+  rules:
+    - backendRefs:
+        - name: {{ $name }}
+          port: 80
+{{- if .auth }}
+{{- $issuer := required "auth.issuer is required when an extra workload sets auth: true" $root.Values.auth.issuer }}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: {{ $name }}-oidc
+  labels:
+    app: {{ $name }}
+    app.kubernetes.io/part-of: {{ include "devhub-app.name" $root }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ $name }}
+  oidc:
+    provider:
+      issuer: {{ $issuer | quote }}
+      authorizationEndpoint: "{{ $issuer }}/protocol/openid-connect/auth"
+      tokenEndpoint: {{ $root.Values.auth.tokenEndpoint | default (printf "%s/protocol/openid-connect/token" $issuer) | quote }}
+    clientID: {{ $root.Values.auth.clientID | quote }}
+    clientSecret:
+      name: {{ $root.Values.auth.clientID }}-oidc-secret
+    scopes:
+      - openid
+      - email
+      - profile
+      - groups
+    redirectURL: "https://{{ .host }}/oauth2/callback"
+    logoutPath: "/logout"
+{{- end }}
+{{- end }}
+{{- end }}

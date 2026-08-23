@@ -10,11 +10,13 @@ app.kubernetes.io/managed-by: devhub-app-chart
 {{- end -}}
 
 {{/*
-Whether any route needs sign-in: the whole app (auth.enabled), or just the
-exception paths of an otherwise-public app.
+Whether any route needs sign-in: the whole app (auth.enabled), the exception
+paths of an otherwise-public app, or an extra workload with auth: true.
 */}}
 {{- define "devhub-app.authActive" -}}
-{{- if or .Values.auth.enabled (gt (len .Values.auth.exceptPaths) 0) -}}true{{- end -}}
+{{- $wl := false -}}
+{{- range .Values.extraWorkloads }}{{- if and .auth .host }}{{- $wl = true }}{{- end }}{{- end -}}
+{{- if or .Values.auth.enabled (gt (len .Values.auth.exceptPaths) 0) $wl -}}true{{- end -}}
 {{- end -}}
 
 {{/*
