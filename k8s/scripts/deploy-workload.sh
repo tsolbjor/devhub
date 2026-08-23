@@ -389,9 +389,11 @@ case "$COMPONENT" in
     alloy)              install_alloy ;;
     storage)            install_storage_class ;;
     policies)           install_scheduling_policies ;;
+    # Deprovision tail: sweep namespaces of deleted apps (dry-run unless "apply").
+    cleanup-apps)       cleanup_orphaned_app_namespaces "${2:-dry-run}" ;;
     *)
         log_error "Unknown component: ${COMPONENT}"
-        log_error "Valid: all, gateway, cert-manager, external-dns, external-secrets, kyverno, alloy, storage, policies"
+        log_error "Valid: all, gateway, cert-manager, external-dns, external-secrets, kyverno, alloy, storage, policies, cleanup-apps"
         exit 1
         ;;
 esac

@@ -18,6 +18,23 @@ new service" into everything the platform already knows how to run.
 | Work items | starter issues via the Forgejo API, grouped under a "Getting started" milestone. A kanban board stays a starter issue: Forgejo has no Projects API yet (forgejo/forgejo#5330) |
 | Data services (optional) | `postgres.enabled` / `redis.enabled` in `values.yaml`; the chart runs the dev-grade instance and injects `POSTGRES_*`/`REDIS_*` env vars into the app container; passwords come from an in-cluster ESO `Password` generator, never git |
 
+## Deprovisioning
+
+The portal is growing into an orchestrator of curated platform actions;
+scaffolding is one, deprovisioning is the second. The signed-in user (the
+gateway forwards the Keycloak access token — `forwardAccessToken` on the
+SecurityPolicy) sees a "Your applications" list: every `devhub`-org repo they
+hold **admin** on. Scaffolding records this automatically — the creator is
+added as repository admin — and any admin a repo gains later may deprovision
+it too. Deleting stays git-shaped: the portal deletes the *repository*, the
+ApplicationSets stop generating the Application, ArgoCD prunes the workloads.
+
+What survives, on purpose (the undo window): the `devhub-*` namespace and its
+volumes — swept by `deploy.sh --env <env> cleanup-apps` (dry-run; add `apply`)
+or `deploy-workload.sh --env <env> cleanup-apps [apply]` on workload clusters
+— plus the container images under the org's packages, and Velero backups
+until retention expires.
+
 ## Design rules
 
 - **The portal writes git, never the cluster.** It holds one Forgejo token and

@@ -543,3 +543,56 @@ setup_paths() {
     # Scratch space for rendered Helm values (removed on exit).
     init_render_dir
 }
+
+# -----------------------------------------------------------------------------
+# App namespace cleanup — the tail end of deprovisioning a developer app.
+#
+# Deleting an app's Forgejo repository makes the ApplicationSets prune
+# everything ArgoCD deployed, but two things survive: the devhub-* namespace
+# (CreateNamespace=true namespaces are not ArgoCD-tracked) and the PVCs inside
+# it — the postgres volume keeps costing money until someone deletes it.
+#
+# A namespace counts as orphaned when BOTH:
+#   - it holds no deployments, statefulsets, daemonsets, cronjobs or pods
+#     (Kyverno-generated quota/LimitRange/NetworkPolicies do not count), and
+#   - it is older than CLEANUP_MIN_AGE_MINUTES (default 60) — so a freshly
+#     synced app whose workloads have not landed yet is never swept up.
+#
+# Dry-run by default; pass "apply" to delete. Deleting the namespace takes the
+# PVCs (and their cloud disks) with it. Exposed as the cleanup-apps action of
+# deploy.sh (platform/single-cluster envs) and deploy-workload.sh.
+cleanup_orphaned_app_namespaces() {
+    local mode="${1:-dry-run}"
+    local min_age_minutes="${CLEANUP_MIN_AGE_MINUTES:-60}"
+    log_step "Scanning devhub-* namespaces for orphans (min age ${min_age_minutes}m, mode: ${mode})..."
+
+    local now ns created age_s workloads pods found=0
+    now="$(date +%s)"
+    for ns in $(kubectl get namespaces -o name 2>/dev/null | sed 's|namespace/||' | grep '^devhub-' || true); do
+        created="$(kubectl get namespace "$ns" -o jsonpath='{.metadata.creationTimestamp}')"
+        age_s=$(( now - $(date -d "$created" +%s) ))
+        if (( age_s < min_age_minutes * 60 )); then
+            log_info "  ${ns}: younger than ${min_age_minutes}m — skipped"
+            continue
+        fi
+        workloads="$(kubectl get deployments,statefulsets,daemonsets,cronjobs -n "$ns" -o name 2>/dev/null | wc -l)"
+        pods="$(kubectl get pods -n "$ns" -o name 2>/dev/null | wc -l)"
+        if (( workloads > 0 || pods > 0 )); then
+            log_info "  ${ns}: ${workloads} workload(s), ${pods} pod(s) — in use"
+            continue
+        fi
+        found=$((found + 1))
+        if [[ "$mode" == "apply" ]]; then
+            log_warn "  ${ns}: orphaned — deleting (PVCs and their disks go with it)"
+            kubectl delete namespace "$ns" --wait=false
+        else
+            log_warn "  ${ns}: orphaned — would delete (PVCs: $(kubectl get pvc -n "$ns" -o name 2>/dev/null | wc -l))"
+        fi
+    done
+
+    if (( found == 0 )); then
+        log_info "No orphaned app namespaces"
+    elif [[ "$mode" != "apply" ]]; then
+        log_info "Dry run — re-run with 'apply' to delete: ${found} namespace(s)"
+    fi
+}

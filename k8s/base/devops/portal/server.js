@@ -78,6 +78,41 @@ const RESERVED = new Set([
   ...(process.env.RESERVED_NAMES || '').split(',').map((s) => s.trim()).filter(Boolean),
 ]);
 
+// Identity comes from the gateway: the SecurityPolicy authenticates the
+// browser and forwards the Keycloak access token upstream
+// (forwardAccessToken). The token is deliberately not re-verified here — the
+// NetworkPolicy admits only the gateway, and the gateway never forwards an
+// unauthenticated request, so parsing the payload is enough to know WHO the
+// gateway let in. Forgejo usernames match Keycloak's preferred_username
+// because Forgejo accounts are created by the same Keycloak OIDC login.
+function userFromRequest(req) {
+  const m = (req.headers.authorization || '').match(/^Bearer (.+)$/i);
+  if (!m) return null;
+  const parts = m[1].split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    return claims.preferred_username ? { username: claims.preferred_username } : null;
+  } catch { return null; }
+}
+
+// The user's effective permission on an app repo ('owner', 'admin', 'write',
+// 'read', 'none'). Org owners come back as admin/owner too.
+async function userRepoPermission(username, name) {
+  try {
+    const p = await forgejo(
+      'GET',
+      `/repos/${APPS_ORG}/${name}/collaborators/${encodeURIComponent(username)}/permission`,
+    );
+    return (p && p.permission) || 'none';
+  } catch (e) {
+    if (e.status === 404 || e.status === 422) return 'none';
+    throw e;
+  }
+}
+
+const CAN_DEPROVISION = (perm) => perm === 'admin' || perm === 'owner';
+
 // One answer for both the live check (/api/validate-name) and the create path:
 // syntactically a DNS label, not a platform hostname, not an existing repo.
 async function validateName(name) {
@@ -193,7 +228,7 @@ async function fileContent(templateRepo, filePath) {
   return Buffer.from(entry.content, 'base64').toString('utf8');
 }
 
-async function createApp({ name, description, template, options }) {
+async function createApp({ name, description, template, options, creator }) {
   const steps = [];
   const step = (title, detail) => steps.push({ title, detail });
 
@@ -229,6 +264,21 @@ async function createApp({ name, description, template, options }) {
     default_branch: 'main',
   });
   step('Repository created', `${APPS_ORG}/${name}`);
+
+  // Record who provisioned this: the signed-in user becomes repository admin,
+  // which is also what authorises them to deprovision it later. Best-effort —
+  // a user who has never opened Forgejo (so no account yet) just isn't added.
+  if (creator) {
+    try {
+      await forgejo('PUT',
+        `/repos/${APPS_ORG}/${name}/collaborators/${encodeURIComponent(creator.username)}`,
+        { permission: 'admin' });
+      step('Owner recorded', `${creator.username} is repository admin — and may deprovision it here`);
+    } catch (err) {
+      console.error(`collaborator ${creator.username} on ${name}: ${err.message}`);
+      step('Owner not recorded', `${err.message} — sign in to Forgejo once, then ask an admin to add you`);
+    }
+  }
 
   // CI activation happens BEFORE the first commit, so Woodpecker's webhook is
   // in place when the scaffold lands — the very first push builds and publishes
@@ -343,9 +393,65 @@ const server = http.createServer(async (req, res) => {
       const verdict = await validateName(String(url.searchParams.get('name') || '').trim());
       return send(res, 200, verdict);
     }
+    if (req.method === 'GET' && url.pathname === '/api/apps') {
+      // The signed-in user's deprovisionable apps: every devhub-org repo they
+      // hold admin on. The platform gitops repo is never offered.
+      const user = userFromRequest(req);
+      if (!user) return send(res, 200, { user: null, apps: [] });
+      const repos = await forgejo('GET', `/orgs/${APPS_ORG}/repos?limit=100`);
+      const apps = [];
+      for (const r of repos || []) {
+        if (r.name === 'devhub') continue;
+        if (CAN_DEPROVISION(await userRepoPermission(user.username, r.name))) {
+          apps.push({
+            name: r.name,
+            description: r.description || '',
+            repo: `https://git.${DOMAIN}/${APPS_ORG}/${r.name}`,
+            url: `https://${r.name}.${DOMAIN}`,
+          });
+        }
+      }
+      return send(res, 200, { user: user.username, apps });
+    }
+    if (req.method === 'DELETE' && url.pathname.startsWith('/api/apps/')) {
+      const name = decodeURIComponent(url.pathname.slice('/api/apps/'.length));
+      if (!NAME_RE.test(name) || name === 'devhub') {
+        throw Object.assign(new Error('Not a deprovisionable application.'), { status: 400 });
+      }
+      const user = userFromRequest(req);
+      if (!user) {
+        throw Object.assign(
+          new Error('No identity on the request — the gateway must forward the access token (forwardAccessToken).'),
+          { status: 401 },
+        );
+      }
+      const perm = await userRepoPermission(user.username, name);
+      if (!CAN_DEPROVISION(perm)) {
+        throw Object.assign(
+          new Error(`Deprovisioning needs admin on ${APPS_ORG}/${name}; ${user.username} has "${perm}".`),
+          { status: 403 },
+        );
+      }
+      // Deleting the repository IS the deprovision: the ApplicationSets stop
+      // generating the Application on their next scan and ArgoCD prunes every
+      // deployed resource. Still git-shaped — the portal never touches the
+      // cluster. The namespace and its volumes are swept by the platform's
+      // `deploy.sh <env> cleanup-apps` (they survive on purpose, as an undo
+      // window alongside the Velero backups).
+      await forgejo('DELETE', `/repos/${APPS_ORG}/${name}`);
+      console.log(`deprovisioned ${APPS_ORG}/${name} by ${user.username}`);
+      return send(res, 200, {
+        deleted: name,
+        note:
+          'Repository deleted. ArgoCD removes the deployed workloads within its next scan (≤30 min). ' +
+          'The namespace, its volumes and the container images remain until a platform admin runs ' +
+          'cleanup-apps / deletes the packages — backups expire on their own.',
+      });
+    }
     if (req.method === 'POST' && url.pathname === '/api/apps') {
       const body = await readBody(req);
       const result = await createApp({
+        creator: userFromRequest(req),
         name: String(body.name || '').trim(),
         description: String(body.description || '').trim().slice(0, 255),
         template: NAME_RE.test(String(body.template || '')) ? String(body.template) : 'app-template',

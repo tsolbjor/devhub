@@ -147,6 +147,7 @@ does not match the environment.
 ./deploy.sh --env aws-dev loki-auth           # (re)generate Loki ingest credentials
 ./deploy.sh --env aws-dev bootstrap           # ArgoCD app-of-apps
 ./deploy.sh --env aws-dev gitops              # hand platform components to ArgoCD
+./deploy.sh --env aws-dev cleanup-apps        # sweep namespaces of deleted apps (dry-run; add `apply`)
 
 # Setup scripts
 ./setup-ca.sh --env local                     # local CA + TLS certs

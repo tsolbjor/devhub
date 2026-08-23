@@ -40,3 +40,7 @@ spec:
       - groups
     redirectURL: "https://portal.${DOMAIN}/oauth2/callback"
     logoutPath: "/logout"
+    # The portal needs to know WHO the gateway let in (scaffolds record the
+    # creator as repository admin; deprovision checks repo permission), so the
+    # access token rides upstream in the Authorization header.
+    forwardAccessToken: true
