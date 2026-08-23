@@ -422,18 +422,19 @@ configure_entra_idp() {
     : "${ENTRA_KEYCLOAK_CLIENT_ID:?ENTRA_KEYCLOAK_CLIENT_ID not set — run sync-tofu-outputs.sh}"
     : "${ENTRA_KEYCLOAK_CLIENT_SECRET:?ENTRA_KEYCLOAK_CLIENT_SECRET not set — check secrets.env}"
 
-    # Update the Entra ID App Registration redirect URI to the real Keycloak domain.
-    # The tofu module registers a placeholder URI; this fixes it once the domain is known.
+    # The App Registration's redirect URI is owned by tofu (the module knows
+    # the domain), so this only verifies it — a mismatch here means Entra will
+    # answer every login with AADSTS50011.
     local redirect_uri="https://keycloak.${DOMAIN}/realms/devops/broker/entra/endpoint"
     if command -v az &>/dev/null; then
-        log_info "Updating App Registration redirect URI to: ${redirect_uri}"
-        az ad app update \
-            --id "${ENTRA_KEYCLOAK_CLIENT_ID}" \
-            --web-redirect-uris "${redirect_uri}" 2>/dev/null \
-            || log_warn "Could not update redirect URI via az CLI — set it manually in the Azure portal"
-    else
-        log_warn "az CLI not found — set the redirect URI manually in the Azure portal:"
-        log_warn "  ${redirect_uri}"
+        local configured
+        configured="$(az ad app show --id "${ENTRA_KEYCLOAK_CLIENT_ID}" \
+            --query 'web.redirectUris[0]' -o tsv 2>/dev/null || echo "")"
+        if [[ "$configured" != "$redirect_uri" ]]; then
+            log_warn "App Registration redirect URI is '${configured:-<unset>}' but Keycloak brokers at:"
+            log_warn "  ${redirect_uri}"
+            log_warn "Re-run 'tofu apply' (the module sets it from the domain), or fix it in the Azure portal."
+        fi
     fi
 
     # Idempotent: the instance is skipped when present, but the mappers below
