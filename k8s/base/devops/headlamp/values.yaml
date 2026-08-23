@@ -7,9 +7,16 @@ config:
   oidc:
     # Secret created by deploy.sh (placeholder) then updated by setup-keycloak.sh (real values)
     # Keys: clientID, clientSecret, issuerURL, scopes
+    #
+    # The chart wires the -oidc-* args only through its "external secret"
+    # option — naming an existing secret under `secret:` alone renders a
+    # deployment with no OIDC flags at all, and the UI silently falls back
+    # to token-paste login.
     secret:
-      name: headlamp-oidc-secret
       create: false
+    externalSecret:
+      enabled: true
+      name: headlamp-oidc-secret
 
 # The headlamp namespace enforces the "restricted" Pod Security Standard, and the
 # chart's defaults do not meet it (no seccompProfile, no dropped capabilities, no

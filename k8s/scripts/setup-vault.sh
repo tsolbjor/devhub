@@ -217,6 +217,64 @@ configure_k8s_auth() {
     log_info "Kubernetes authentication configured"
 }
 
+# Human SSO: the Keycloak realm (which brokers Entra) becomes an OIDC auth
+# method, so `vault login -method=oidc` and the UI's OIDC tab work for people.
+# The devops-admins group maps to the platform-admin policy through Vault's
+# external identity groups; everyone else lands on the default policy.
+#
+# The discovery URL is the *external* Keycloak address on purpose: Vault
+# insists the issuer in tokens equals the discovery URL, and the issuer is
+# always KC_HOSTNAME. Reaching it from the pod relies on the hairpin DNS
+# rewrite deploy.sh installs (pods otherwise cannot dial their own LB).
+configure_oidc_auth() {
+    log_step "Configuring OIDC auth (human SSO via Keycloak)..."
+
+    local client_secret
+    client_secret="$(kubectl get secret vault-oidc-secret -n vault \
+        -o jsonpath='{.data.client-secret}' 2>/dev/null | base64 -d || true)"
+    if [[ -z "$client_secret" ]]; then
+        log_warn "vault-oidc-secret not found — run setup-keycloak.sh first, then:"
+        log_warn "  ./setup-vault.sh --env ${ENV} oidc"
+        return 0
+    fi
+
+    vault_admin auth enable oidc 2>/dev/null || log_info "oidc auth already enabled"
+
+    vault_admin write auth/oidc/config \
+        oidc_discovery_url="https://keycloak.${DOMAIN}/realms/devops" \
+        oidc_client_id="vault" \
+        oidc_client_secret="${client_secret}" \
+        default_role="default" >/dev/null
+
+    vault_admin write auth/oidc/role/default \
+        bound_audiences="vault" \
+        allowed_redirect_uris="https://vault.${DOMAIN}/ui/vault/auth/oidc/oidc/callback,http://localhost:8250/oidc/callback" \
+        user_claim="preferred_username" \
+        groups_claim="groups" \
+        oidc_scopes="openid,profile,email,groups" \
+        token_policies="default" \
+        token_ttl=1h token_max_ttl=8h >/dev/null
+
+    # devops-admins (a Keycloak group fed by the Entra App Role) → platform-admin.
+    # External identity groups match on the group alias equal to the claim value.
+    local accessor group_id
+    accessor="$(vault_admin auth list -format=json | jq -r '."oidc/".accessor')"
+    group_id="$(vault_admin read -format=json identity/group/name/devops-admins 2>/dev/null \
+        | jq -r '.data.id // empty' || true)"
+    if [[ -z "$group_id" ]]; then
+        group_id="$(vault_admin write -format=json identity/group \
+            name=devops-admins type=external policies=platform-admin | jq -r '.data.id')"
+    else
+        vault_admin write identity/group/id/"${group_id}" \
+            name=devops-admins type=external policies=platform-admin >/dev/null
+    fi
+    vault_admin write identity/group-alias \
+        name="/devops-admins" mount_accessor="${accessor}" canonical_id="${group_id}" >/dev/null 2>&1 \
+        || log_info "group-alias /devops-admins already present"
+
+    log_info "OIDC auth configured — UI: 'OIDC' method; CLI: vault login -method=oidc"
+}
+
 # A named admin identity, so the root token can be revoked without losing the
 # ability to administer Vault. Stored alongside the unseal keys — the file is
 # already the crown jewels, and Vault 2.0 needs a token for root regeneration.
@@ -544,6 +602,7 @@ main() {
             unseal_vault
             configure_k8s_auth
             create_platform_roles
+            configure_oidc_auth
             create_admin_token
             seed_platform_secrets
             revoke_root_token
@@ -551,7 +610,8 @@ main() {
             ;;
         init)          init_vault ;;
         unseal)        unseal_vault ;;
-        configure)     configure_k8s_auth && create_platform_roles && create_admin_token ;;
+        configure)     configure_k8s_auth && create_platform_roles && configure_oidc_auth && create_admin_token ;;
+        oidc)          configure_oidc_auth ;;
         seed-secrets)  seed_platform_secrets "${2:-}" ;;
         admin-token)   create_admin_token ;;
         renew-admin)   renew_admin_token ;;
@@ -559,7 +619,7 @@ main() {
         revoke-root)   revoke_root_token ;;
         status)        $VAULT_EXEC vault status || true ;;
         *)
-            echo "Usage: $0 --env <env> [all|init|unseal|configure|seed-secrets|admin-token|renew-admin|new-root|revoke-root|status]"
+            echo "Usage: $0 --env <env> [all|init|unseal|configure|oidc|seed-secrets|admin-token|renew-admin|new-root|revoke-root|status]"
             exit 1
             ;;
     esac

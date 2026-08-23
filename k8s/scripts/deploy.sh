@@ -1419,6 +1419,49 @@ apply_gateway_routes() {
     kubectl apply -f "${dir}/httproutes.yaml"
 
     log_info "Gateway and routes applied"
+
+    apply_hairpin_dns
+}
+
+# Pods cannot reach the platform's own public hostnames: Azure's load
+# balancer does not hairpin traffic from its backends, so any server-side
+# call to https://<service>.${DOMAIN} (Forgejo's OIDC discovery, Vault's
+# issuer validation, Grafana's token exchange) times out. Rewrite the
+# platform domain inside cluster DNS to the Envoy gateway Service — it
+# serves the same certificates on 443, so external URLs stay honest
+# everywhere while resolving to an in-cluster path.
+apply_hairpin_dns() {
+    # AKS merges coredns-custom *.override files into the default server block.
+    # Other clouds manage their DNS differently (GKE runs kube-dns) — extend
+    # per cloud as they are brought up; internal-URL overrides cover them today.
+    [[ "$CLOUD" == "azure" ]] || return 0
+
+    local envoy_svc
+    envoy_svc="$(kubectl get svc -n envoy-gateway-system \
+        -l gateway.envoyproxy.io/owning-gateway-name=devhub \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    if [[ -z "$envoy_svc" ]]; then
+        log_warn "No Envoy gateway Service yet — skipping hairpin DNS (re-run 'deploy gateway' later)"
+        return 0
+    fi
+
+    log_step "Pointing ${DOMAIN} at the gateway inside cluster DNS..."
+    local domain_re="${DOMAIN//./\\.}"
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+data:
+  devhub-hairpin.override: |
+    rewrite stop {
+      name regex (.*\.)?${domain_re} ${envoy_svc}.envoy-gateway-system.svc.cluster.local
+      answer auto
+    }
+EOF
+    kubectl rollout restart deployment/coredns -n kube-system >/dev/null
+    log_info "In-cluster DNS rewrites *.${DOMAIN} → ${envoy_svc} (hairpin-safe)"
 }
 
 # Kyverno turns the platform's guardrails into admission-time policy and generates
