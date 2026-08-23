@@ -343,7 +343,11 @@ resource "azuread_application" "keycloak_idp" {
   display_name = "${var.prefix}-keycloak-idp"
 
   web {
-    redirect_uris = ["https://placeholder.invalid/realms/devops/broker/entra/endpoint"]
+    # Keycloak's broker callback for the Entra IdP. The domain is a module
+    # input now, so no placeholder + post-hoc `az ad app update` patching —
+    # that update failed silently once and every Entra login then died on
+    # AADSTS50011 (redirect URI mismatch).
+    redirect_uris = ["https://keycloak.${var.domain}/realms/devops/broker/entra/endpoint"]
   }
 
   required_resource_access {
