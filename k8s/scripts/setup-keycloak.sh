@@ -53,6 +53,12 @@ kcadm() {
     kubectl exec -n keycloak keycloak-0 -- ${KCADM} "$@"
 }
 
+# As kcadm, but forwards stdin — for `create ... -f -` with a JSON body that
+# kcadm's -s syntax cannot express (nested JSON config values).
+kcadm_stdin() {
+    kubectl exec -i -n keycloak keycloak-0 -- ${KCADM} "$@"
+}
+
 # Login to Keycloak admin
 kcadm_login() {
     local password=$(kubectl get secret keycloak-admin-secret -n keycloak -o jsonpath='{.data.password}' | base64 -d)
@@ -467,37 +473,37 @@ configure_entra_idp() {
     log_info "Entra ID identity provider created"
     fi
 
-    # ensure_entra_mapper <name> <mapper-type> <config-json>
+    # ensure_entra_mapper <name> <json-body>
     # Mapper creates are the one part of this section that cannot be re-issued:
     # Keycloak answers 409 on a duplicate name, and set -e then killed the whole
-    # setup half-way. Check by name first; the API also requires the alias in
-    # the body, not just the path.
+    # setup half-way. Check by name first. The body goes in as JSON over stdin —
+    # kcadm's -s syntax cannot express a config value that is itself JSON (the
+    # advanced group mapper's "claims"), it answers "Cannot parse the JSON".
     ensure_entra_mapper() {
-        local name="$1" type="$2" config="$3"
+        local name="$1" body="$2"
         if kcadm get identity-provider/instances/entra/mappers -r ${REALM} --fields name 2>/dev/null \
                 | grep -q "\"name\" : \"${name}\""; then
             log_info "Mapper ${name} already exists"
             return 0
         fi
-        kcadm create identity-provider/instances/entra/mappers -r ${REALM} \
-            -s "name=${name}" \
-            -s identityProviderAlias=entra \
-            -s "identityProviderMapper=${type}" \
-            -s "config=${config}"
+        printf '%s' "$body" | kcadm_stdin create identity-provider/instances/entra/mappers -r ${REALM} -f -
     }
 
     # Mapper: sync email claim → Keycloak user email attribute
-    ensure_entra_mapper "entra-email" oidc-user-attribute-idp-mapper \
-        '{"syncMode":"INHERIT","claim":"email","user.attribute":"email"}'
+    ensure_entra_mapper "entra-email" \
+        '{"name":"entra-email","identityProviderAlias":"entra","identityProviderMapper":"oidc-user-attribute-idp-mapper","config":{"syncMode":"INHERIT","claim":"email","user.attribute":"email"}}'
 
-    # Mappers: map Entra ID App Roles → Keycloak groups (requires Keycloak 25+)
+    # Mappers: map Entra ID App Roles → Keycloak groups via the Advanced Claim
+    # to Group mapper (oidc-advanced-group-idp-mapper — the only stock group
+    # mapper that matches a claim value; "oidc-group-idp-mapper" does not exist,
+    # and a mapper row with an unknown type NPEs every federated login).
     # App Roles are defined in the tofu module and appear in the token's 'roles' claim.
     # Assign users/groups to these App Roles in the Azure portal or via azuread_app_role_assignment.
     # syncMode=FORCE re-evaluates group membership on every login (reflects role changes immediately).
     local role_group
     for role_group in "devops-admins" "developers" "viewers"; do
-        ensure_entra_mapper "entra-role-${role_group}" oidc-group-idp-mapper \
-            "{\"syncMode\":\"FORCE\",\"claim\":\"roles\",\"claim.value\":\"${role_group}\",\"group\":\"/${role_group}\"}"
+        ensure_entra_mapper "entra-role-${role_group}" \
+            "{\"name\":\"entra-role-${role_group}\",\"identityProviderAlias\":\"entra\",\"identityProviderMapper\":\"oidc-advanced-group-idp-mapper\",\"config\":{\"syncMode\":\"FORCE\",\"claims\":\"[{\\\"key\\\":\\\"roles\\\",\\\"value\\\":\\\"${role_group}\\\"}]\",\"are.claim.values.regex\":\"false\",\"group\":\"/${role_group}\"}}"
     done
 
     log_info "Group mappers added: Entra ID App Role → Keycloak group (devops-admins, developers, viewers)"
