@@ -1775,6 +1775,13 @@ main() {
     check_requirements
     require_cluster_match
 
+    # cleanup-apps reads its own second argument (apply | dry-run), which is
+    # not one of the deploy/status/delete actions.
+    if [[ "$COMPONENT" == "cleanup-apps" ]]; then
+        cleanup_orphaned_app_namespaces "$([ "$ACTION" == "apply" ] && echo apply || echo dry-run)"
+        return 0
+    fi
+
     case "$ACTION" in
         deploy)
             case "$COMPONENT" in
@@ -1804,9 +1811,6 @@ main() {
                 portal-token)        ensure_portal_forgejo_token ;;
                 portal-templates)    publish_app_templates ;;
                 app-repo-creds)      ensure_argocd_repo_creds ;;
-                # Deprovision tail: sweep namespaces of deleted apps.
-                # Dry-run by default; `cleanup-apps apply` deletes.
-                cleanup-apps)        cleanup_orphaned_app_namespaces "$([ "$ACTION" == "apply" ] && echo apply || echo dry-run)" ;;
                 ci-secrets)          configure_woodpecker_ci_secrets ;;
                 external-dns)        add_helm_repos && install_external_dns ;;
                 external-secrets)    add_helm_repos && install_external_secrets ;;
