@@ -86,6 +86,7 @@ output "entra_keycloak_client_secret" {
 # ─── External-DNS / platform identities ──────────────────────────────
 
 output "external_dns_identity_client_id" { value = module.cluster.external_dns_identity_client_id }
+output "dns_zone_resource_group" { value = module.cluster.dns_zone_resource_group }
 output "loki_identity_client_id" { value = module.cluster.loki_identity_client_id }
 output "loki_container" { value = module.cluster.loki_container }
 output "velero_identity_client_id" { value = module.cluster.velero_identity_client_id }

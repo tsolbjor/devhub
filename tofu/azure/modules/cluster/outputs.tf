@@ -108,6 +108,11 @@ output "external_dns_identity_client_id" {
   value       = azurerm_user_assigned_identity.external_dns.client_id
 }
 
+output "dns_zone_resource_group" {
+  description = "Resource group the DNS zone actually lives in — cert-manager's DNS-01 solver must target this, not the cluster's group"
+  value       = data.azurerm_dns_zone.main.resource_group_name
+}
+
 output "loki_identity_client_id" {
   description = "Client ID of the Loki managed identity (blob chunk storage)"
   value       = azurerm_user_assigned_identity.loki.client_id

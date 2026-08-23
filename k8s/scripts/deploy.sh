@@ -1461,7 +1461,7 @@ enable_workload_target() {
         azure)
             solver="      - dns01:
           azureDNS:
-            resourceGroupName: ${AZURE_RESOURCE_GROUP:-}
+            resourceGroupName: ${DNS_ZONE_RESOURCE_GROUP:-${AZURE_RESOURCE_GROUP:-}}
             subscriptionID: ${AZURE_SUBSCRIPTION_ID:-}
             hostedZoneName: ${DOMAIN}
             environment: AzurePublicCloud

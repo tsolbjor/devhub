@@ -48,3 +48,10 @@ config:
   apiVersion: controller.config.cert-manager.io/v1alpha1
   kind: ControllerConfiguration
   enableGatewayAPI: true
+
+# DNS-01 self-checks go to public resolvers, never cluster DNS: the platform's
+# hairpin-safe CoreDNS rewrite (*.<domain> → the gateway Service) also swallows
+# _acme-challenge TXT lookups, so through cluster DNS cert-manager can never
+# see its own record and every DNS-01 order waits on "propagation" forever.
+dns01RecursiveNameservers: "1.1.1.1:53,8.8.8.8:53"
+dns01RecursiveNameserversOnly: true
