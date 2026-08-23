@@ -339,8 +339,16 @@ resource "azurerm_storage_account" "main" {
 # to the real domain (https://keycloak.<domain>/realms/devops/broker/entra/endpoint)
 # using `az ad app update` after the domain is known.
 
+# The identity running this apply — Entra objects list it as their owner so
+# they stay editable after a PIM-elevated directory role (the usual way the
+# create permission was obtained) expires. An ownerless app registration is
+# frozen the moment the elevation lapses: even fixing its own redirect URI
+# then needs a new PIM activation.
+data "azuread_client_config" "current" {}
+
 resource "azuread_application" "keycloak_idp" {
   display_name = "${var.prefix}-keycloak-idp"
+  owners       = [data.azuread_client_config.current.object_id]
 
   web {
     # Keycloak's broker callback for the Entra IdP. The domain is a module
@@ -399,6 +407,7 @@ resource "azuread_application" "keycloak_idp" {
 resource "azuread_service_principal" "keycloak_idp" {
   client_id                    = azuread_application.keycloak_idp.client_id
   app_role_assignment_required = var.entra_require_assignment
+  owners                       = [data.azuread_client_config.current.object_id]
 }
 
 resource "azuread_application_password" "keycloak_idp" {
