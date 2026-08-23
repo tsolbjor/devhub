@@ -41,6 +41,29 @@ gateway:
   namespace: gateway
   section: apps
 
+# Sign-in at the gateway, via the platform Keycloak. The app itself stays
+# auth-unaware: Envoy Gateway runs the whole OIDC code flow and only forwards
+# authenticated requests.
+#
+#   enabled: true   → the whole app requires sign-in; exceptPaths stay public
+#                     (health endpoints, webhooks, a public API)
+#   enabled: false  → the app is public; exceptPaths require sign-in
+#                     (an /admin section)
+#
+# The client secret arrives via External Secrets from the platform Vault
+# (secret/apps/oidc-gateway, seeded by setup-vault.sh; the "apps" client is
+# created by setup-keycloak.sh with a wildcard redirect for *.<domain>).
+auth:
+  enabled: false
+  exceptPaths: []
+  # Required when auth is in use, e.g. https://keycloak.example.com/realms/devops
+  issuer: ""
+  clientID: apps
+  # Where Envoy fetches tokens. Defaults to <issuer>/protocol/openid-connect/token;
+  # override with an in-cluster Keycloak URL where the public one is unreachable
+  # from the gateway (local environments).
+  tokenEndpoint: ""
+
 # Dev-grade PostgreSQL in the app's namespace: one instance, one volume, the
 # password generated in-cluster by External Secrets. When enabled the app
 # container gets POSTGRES_HOST/PORT/DB/USER/PASSWORD env vars automatically.

@@ -1,0 +1,64 @@
+# Sign-in at the gateway (see auth: in values.yaml). Envoy Gateway runs the
+# OIDC code flow against the platform Keycloak and only forwards authenticated
+# requests to the protected route — the app never sees an anonymous request
+# there and needs no auth code of its own.
+#
+# Endpoints are split on purpose:
+#   authorizationEndpoint  the browser is redirected there — public hostname
+#   tokenEndpoint          Envoy calls it from the cluster — defaults to the
+#                          public issuer, overridable (auth.tokenEndpoint) for
+#                          environments where that is unreachable in-cluster
+#
+# The shared "apps" client is created by setup-keycloak.sh with a wildcard
+# redirect (https://*.<domain>/oauth2/callback); its secret reaches this
+# namespace from Vault via External Secrets. Envoy Gateway requires the key to
+# be named "client-secret".
+{{- if include "devhub-app.authActive" . }}
+{{- $issuer := required "auth.issuer is required when auth is in use" .Values.auth.issuer }}
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: {{ .Values.auth.clientID }}-oidc-secret
+  labels:
+    {{- include "devhub-app.labels" . | nindent 4 }}
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: vault-backend
+    kind: ClusterSecretStore
+  target:
+    name: {{ .Values.auth.clientID }}-oidc-secret
+    creationPolicy: Owner
+  data:
+    - secretKey: client-secret
+      remoteRef:
+        key: apps/oidc-gateway
+        property: client-secret
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: {{ include "devhub-app.name" . }}-oidc
+  labels:
+    {{- include "devhub-app.labels" . | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ include "devhub-app.protectedRoute" . }}
+  oidc:
+    provider:
+      issuer: {{ $issuer | quote }}
+      authorizationEndpoint: "{{ $issuer }}/protocol/openid-connect/auth"
+      tokenEndpoint: {{ .Values.auth.tokenEndpoint | default (printf "%s/protocol/openid-connect/token" $issuer) | quote }}
+    clientID: {{ .Values.auth.clientID | quote }}
+    clientSecret:
+      name: {{ .Values.auth.clientID }}-oidc-secret
+    scopes:
+      - openid
+      - email
+      - profile
+      - groups
+    redirectURL: "https://{{ .Values.app.host }}/oauth2/callback"
+    logoutPath: "/logout"
+{{- end }}

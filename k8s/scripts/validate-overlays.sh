@@ -314,6 +314,21 @@ check_devhub_app_chart() {
         fail "devhub-app chart: helm lint failed — $(head -3 "${render_dir}/lint.err" | tr '\n' ' ')"
     fi
 
+    # Auth in both flip directions: protected app with public exceptions, and
+    # public app with protected exceptions.
+    local combo
+    for combo in "true" "false"; do
+        if ! helm template demo "$chart" \
+            --set app.name=demo --set app.host=demo.example.com \
+            --set app.image.repository=git.example.com/devhub/demo \
+            --set registry.host=git.example.com \
+            --set auth.enabled="$combo" --set 'auth.exceptPaths={/healthz}' \
+            --set auth.issuer=https://keycloak.example.com/realms/devops \
+            >/dev/null 2>"${render_dir}/auth.err"; then
+            fail "devhub-app chart: helm template failed (auth.enabled=${combo} + exceptPaths) — $(head -3 "${render_dir}/auth.err" | tr '\n' ' ')"
+        fi
+    done
+
     local flags
     for flags in "false false" "true true"; do
         read -r pg redis <<<"$flags"

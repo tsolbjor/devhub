@@ -70,6 +70,14 @@ in-cluster, nothing committed) and injects the connection into the app container
 
 Production data belongs on the managed services the platform provisions per cloud.
 
+## Sign-in (optional)
+
+Set `auth.enabled: true` in `k8s/values.yaml` to put the whole app behind the
+platform's Keycloak sign-in — the gateway runs the OIDC flow, the app stays
+auth-unaware. `auth.exceptPaths` flips the rule for specific path prefixes:
+public exceptions on a protected app (`/healthz`, webhooks), or
+sign-in-required exceptions on an otherwise public app (`/admin`).
+
 ## What the platform enforces
 
 Kyverno validates every pod in `devhub-*` namespaces at admission, so these are not

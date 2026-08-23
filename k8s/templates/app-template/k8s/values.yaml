@@ -25,6 +25,16 @@ app:
 registry:
   host: git.DOMAIN
 
+# Sign-in at the gateway via the platform Keycloak — the app stays auth-unaware.
+#   enabled: true  → whole app behind sign-in; exceptPaths stay public
+#   enabled: false → app public; exceptPaths require sign-in
+# e.g. enabled: true,  exceptPaths: ["/healthz", "/api/webhook"]
+#      enabled: false, exceptPaths: ["/admin"]
+auth:
+  enabled: false
+  exceptPaths: []
+  issuer: https://keycloak.DOMAIN/realms/devops
+
 # Dev-grade data services in this app's namespace. When enabled, the app
 # container automatically gets POSTGRES_HOST/PORT/DB/USER/PASSWORD and
 # REDIS_HOST/PORT/PASSWORD env vars — no secretKeyRef wiring needed.

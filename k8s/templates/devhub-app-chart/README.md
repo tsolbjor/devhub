@@ -14,6 +14,11 @@ the platform's idea of a well-behaved workload:
 - opt-in dev-grade PostgreSQL (`postgres.enabled`) and Redis (`redis.enabled`):
   password generated in-cluster, connection env vars (`POSTGRES_*`, `REDIS_*`)
   injected into the app container automatically
+- opt-in sign-in at the gateway via the platform Keycloak (`auth.enabled`):
+  Envoy Gateway runs the OIDC flow with the shared `apps` client, the app
+  stays auth-unaware. `auth.exceptPaths` flips the rule per path — public
+  exceptions on a protected app (`/healthz`, webhooks), or protected
+  exceptions on a public app (`/admin`)
 
 ## Minimal values.yaml
 
@@ -31,6 +36,10 @@ postgres:
   enabled: true
 redis:
   enabled: false
+auth:
+  enabled: true                       # sign-in required everywhere…
+  exceptPaths: ["/healthz", "/api/webhook"]   # …except these
+  issuer: https://keycloak.example.com/realms/devops
 ```
 
 See `values.yaml` in this repository for every knob (replicas, resources,

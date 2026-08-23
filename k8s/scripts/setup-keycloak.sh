@@ -172,7 +172,7 @@ configure_groups_scope() {
 
     kcadm update realms/${REALM}/default-default-client-scopes/${scope_id} -r ${REALM} 2>/dev/null || true
 
-    for client_name in "grafana" "argocd" "forgejo" "vault" "headlamp" "homepage" "portal"; do
+    for client_name in "grafana" "argocd" "forgejo" "vault" "headlamp" "homepage" "portal" "apps"; do
         local client_id=$(kcadm get clients -r ${REALM} --fields id,clientId 2>/dev/null | grep "\"clientId\" : \"${client_name}\"" -B 1 | grep "\"id\"" | cut -d'"' -f4 || echo "")
         if [[ -n "$client_id" ]]; then
             kcadm update clients/${client_id}/default-client-scopes/${scope_id} -r ${REALM} 2>/dev/null || true
@@ -347,6 +347,16 @@ configure_clients() {
     local portal_secret=$(create_client "portal" \
         "https://portal.${DOMAIN}/oauth2/callback")
     echo "PORTAL_OIDC_SECRET=${portal_secret}" >> "${secrets_file}"
+
+    # Shared confidential client for developer applications: the devhub-app
+    # chart's gateway SecurityPolicy signs users in with it. One client covers
+    # every app because Keycloak accepts a single-label host wildcard — and a
+    # scaffolded hostname is always exactly <app>.<domain>. The secret reaches
+    # app namespaces from Vault (secret/apps/oidc-gateway, seeded by
+    # setup-vault.sh seed-secrets) via External Secrets.
+    local apps_secret=$(create_client "apps" \
+        "https://*.${DOMAIN}/oauth2/callback")
+    echo "APPS_OIDC_SECRET=${apps_secret}" >> "${secrets_file}"
 
     kubectl create namespace portal 2>/dev/null || true
     kubectl create secret generic portal-oidc-secret -n portal \
