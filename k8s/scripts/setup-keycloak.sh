@@ -314,26 +314,16 @@ configure_clients() {
 
     # Headlamp
     log_info "Configuring Headlamp OIDC client..."
+    # Headlamp — same shape as Homepage: Envoy Gateway is the OIDC client on
+    # its behalf (k8s/base/devops/headlamp/oidc-securitypolicy.yaml). Headlamp
+    # itself does no OIDC — managed API servers reject tokens from a custom
+    # issuer, so it talks to the API as its read-only ServiceAccount instead.
     local headlamp_secret=$(create_client "headlamp" \
-        "https://headlamp.${DOMAIN}/oidc-callback")
+        "https://headlamp.${DOMAIN}/oauth2/callback")
     echo "HEADLAMP_OIDC_SECRET=${headlamp_secret}" >> "${secrets_file}"
 
-    local headlamp_issuer
-    if [[ "$DOMAIN" == "localhost" || "$DOMAIN" == *.localhost ]]; then
-        headlamp_issuer="${KEYCLOAK_INTERNAL_URL}/realms/devops"
-    else
-        headlamp_issuer="https://keycloak.${DOMAIN}/realms/devops"
-    fi
-
-    # Key names are environment variable names: the chart's externalSecret
-    # option loads this secret with envFrom, and the container args reference
-    # $(OIDC_CLIENT_ID) etc. — with other keys the args reach the binary as
-    # unexpanded literals ("unsupported protocol scheme").
     kubectl create secret generic headlamp-oidc-secret -n headlamp \
-        --from-literal=OIDC_CLIENT_ID="headlamp" \
-        --from-literal=OIDC_CLIENT_SECRET="${headlamp_secret}" \
-        --from-literal=OIDC_ISSUER_URL="${headlamp_issuer}" \
-        --from-literal=OIDC_SCOPES="openid,profile,email,groups" \
+        --from-literal=client-secret="${headlamp_secret}" \
         --dry-run=client -o yaml | kubectl apply -f -
 
     # Homepage

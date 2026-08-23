@@ -1,0 +1,38 @@
+# Authentication for Headlamp — same shape as Homepage: the gateway runs the
+# whole Keycloak OIDC code flow and never forwards an anonymous request.
+#
+# Why the gateway and not Headlamp's own OIDC support: Headlamp forwards the
+# user's OIDC token straight to the Kubernetes API server, and managed API
+# servers do not trust a custom issuer (AKS accepts Entra tokens only). The
+# platform-consistent model is therefore: SSO at the gateway decides who may
+# reach Headlamp at all, and Headlamp talks to the API as its own read-only
+# ServiceAccount (`./deploy.sh --env <env> headlamp-token` prints the token to
+# paste at its token screen — once per browser).
+#
+# Endpoint split, as everywhere: authorizationEndpoint is browser-facing,
+# tokenEndpoint is called by Envoy from inside the cluster.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: headlamp-oidc
+  namespace: headlamp
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: headlamp
+  oidc:
+    provider:
+      issuer: "https://keycloak.${DOMAIN}/realms/devops"
+      authorizationEndpoint: "https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/auth"
+      tokenEndpoint: "http://keycloak-service.keycloak.svc.cluster.local:8080/realms/devops/protocol/openid-connect/token"
+    clientID: headlamp
+    clientSecret:
+      name: headlamp-oidc-secret
+    scopes:
+      - openid
+      - email
+      - profile
+      - groups
+    redirectURL: "https://headlamp.${DOMAIN}/oauth2/callback"
+    logoutPath: "/logout"
