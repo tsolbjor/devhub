@@ -16,6 +16,13 @@ the platform's idea of a well-behaved workload:
 - opt-in dev-grade PostgreSQL (`postgres.enabled`) and Redis (`redis.enabled`):
   password generated in-cluster, connection env vars (`POSTGRES_*`, `REDIS_*`)
   injected into the app container automatically
+- off-the-shelf containers beside the app (`extraWorkloads`): any image from a
+  Kyverno-allow-listed registry (ghcr.io, quay.io, docker.io/library,
+  registry.k8s.io, the platform registry), no CI involved — hardened
+  Deployment + Service per entry, an HTTPRoute when it has a `host`
+  (`docs-<app>.<domain>`), and gateway sign-in when it sets `auth: true`.
+  Public images that need their own uid or writable paths set `runAsUser` /
+  `writableDirs`; root stays forbidden
 - opt-in sign-in at the gateway via the platform Keycloak (`auth.enabled`):
   Envoy Gateway runs the OIDC flow with the shared `apps` client, the app
   stays auth-unaware. `auth.exceptPaths` flips the rule per path — public

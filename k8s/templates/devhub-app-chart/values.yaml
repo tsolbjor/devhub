@@ -89,6 +89,32 @@ postgres:
 redis:
   enabled: false
 
+# Off-the-shelf containers running beside the app — the dev-grade
+# postgres/redis pattern, generalised. No CI: the image comes from any
+# Kyverno-allow-listed registry (git.<domain>, ghcr.io, docker.io/library,
+# registry.k8s.io, quay.io) with its tag pinned here; Renovate can bump it.
+# Each entry gets the same hardened treatment as the app: non-root, no
+# capabilities, resource limits, workload-default priority.
+#
+# extraWorkloads:
+#   - name: docs                        # objects are named <app>-<name>
+#     image: ghcr.io/some-org/docs:1.4.2
+#     port: 8080
+#     host: docs-myapp.example.com      # optional — omit for in-cluster only
+#     replicas: 1                       # optional
+#     env: []                           # optional, verbatim container env
+#     resources: {}                     # optional, defaults are conservative
+#     runAsUser: 10001                  # optional — public images often need
+#                                       # their own uid; root stays forbidden
+#     writableDirs: []                  # optional emptyDir mounts for images
+#                                       # that write, e.g. [/tmp, /var/cache]
+#     probePath: ""                     # optional HTTP readiness path;
+#                                       # default is a TCP check on port
+#     auth: false                       # true → Keycloak sign-in at the
+#                                       # gateway for this host (needs the
+#                                       # top-level auth.issuer set)
+extraWorkloads: []
+
 # Escape hatch: additional manifests rendered verbatim, for the one thing the
 # chart does not model. If this list grows, eject to raw k8s/ manifests instead
 # (delete values.yaml, commit manifests — the raw ApplicationSet takes over).

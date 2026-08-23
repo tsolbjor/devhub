@@ -34,6 +34,7 @@ spec:
       remoteRef:
         key: apps/oidc-gateway
         property: client-secret
+{{- if or .Values.auth.enabled (gt (len .Values.auth.exceptPaths) 0) }}
 ---
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: SecurityPolicy
@@ -61,4 +62,5 @@ spec:
       - groups
     redirectURL: "https://{{ .Values.app.host }}/oauth2/callback"
     logoutPath: "/logout"
+{{- end }}
 {{- end }}
