@@ -130,6 +130,9 @@ resource "azurerm_kubernetes_cluster_node_pool" "ci" {
   kubernetes_cluster_id = azurerm_kubernetes_cluster.main.id
   vm_size               = var.ci_node_vm_size
   vnet_subnet_id        = azurerm_subnet.aks.id
+  # Lets the provider rotate the pool in place when vm_size (or similar)
+  # changes, instead of erroring: it creates this temp pool, swaps, deletes it.
+  temporary_name_for_rotation = "citmp"
 
   auto_scaling_enabled = true
   min_count            = var.ci_node_min_count
