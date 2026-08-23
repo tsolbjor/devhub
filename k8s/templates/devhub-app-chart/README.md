@@ -45,7 +45,22 @@ auth:
 ```
 
 See `values.yaml` in this repository for every knob (replicas, resources,
-probes, extra env, `extraManifests`).
+probes, extra env, `extraHosts`, `extraManifests`).
+
+## App ecosystems: more than one hostname
+
+The platform's wildcard certificate and apps listener cover `*.<domain>`
+exactly one label deep, so the ecosystem convention is suffix grouping:
+`<app>.<domain>` is the landing page, siblings are `api-<app>.<domain>`,
+`admin-<app>.<domain>` and so on.
+
+- Same deployment answering several names → `app.extraHosts`.
+- A separate deployable (own image, own CI, own lifecycle) → its own portal
+  scaffold, named `api-<app>`.
+
+True `*.<app>.<domain>` subdomains need a per-app listener and certificate,
+which Gateway API's ListenerSet will make self-service once Envoy Gateway's
+support stabilises — the DNS-01 issuing it depends on already works here.
 
 ## How it is deployed
 

@@ -14,6 +14,9 @@ spec:
       sectionName: {{ .Values.gateway.section }}
   hostnames:
     - {{ required "app.host is required" .Values.app.host | quote }}
+    {{- range .Values.app.extraHosts }}
+    - {{ . | quote }}
+    {{- end }}
   rules:
     - backendRefs:
         - name: {{ include "devhub-app.name" . }}
@@ -36,6 +39,9 @@ spec:
       sectionName: {{ .Values.gateway.section }}
   hostnames:
     - {{ .Values.app.host | quote }}
+    {{- range .Values.app.extraHosts }}
+    - {{ . | quote }}
+    {{- end }}
   rules:
     - matches:
         {{- range .Values.auth.exceptPaths }}
