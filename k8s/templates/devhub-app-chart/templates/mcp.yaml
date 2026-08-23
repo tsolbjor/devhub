@@ -1,0 +1,97 @@
+# MCP at the gateway (see mcp: in values.yaml). Three pieces, all rendered
+# only with mcp.enabled:
+#
+#   - an HTTPRoute for mcp.path with a JWT SecurityPolicy: Envoy validates the
+#     Bearer token (issuer + audience) and forwards only authenticated
+#     requests, token attached — the app needs no OAuth code of its own
+#   - an HTTPRoute for /.well-known/oauth-protected-resource answered directly
+#     by the gateway (RFC 9728): MCP clients probe it to discover the
+#     authorization server and which scopes to request. Public by design.
+#
+# Longest-path matching keeps these separate from the main route, so they
+# carry their own auth requirement regardless of auth.enabled — a signed-in
+# app can still expose /mcp to token clients, and vice versa.
+{{- if .Values.mcp.enabled }}
+{{- $issuer := required "auth.issuer is required when mcp.enabled" .Values.auth.issuer }}
+{{- $resource := printf "https://%s%s" (required "app.host is required" .Values.app.host) .Values.mcp.path }}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: HTTPRouteFilter
+metadata:
+  name: {{ include "devhub-app.name" . }}-mcp-metadata
+  labels:
+    {{- include "devhub-app.labels" . | nindent 4 }}
+spec:
+  directResponse:
+    statusCode: 200
+    contentType: application/json
+    body:
+      type: Inline
+      inline: {{ dict "resource" $resource "authorization_servers" (list $issuer) "scopes_supported" .Values.mcp.scopes "bearer_methods_supported" (list "header") | toJson | quote }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "devhub-app.name" . }}-mcp-metadata
+  labels:
+    {{- include "devhub-app.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.gateway.name }}
+      namespace: {{ .Values.gateway.namespace }}
+      sectionName: {{ .Values.gateway.section }}
+  hostnames:
+    - {{ .Values.app.host | quote }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /.well-known/oauth-protected-resource
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: gateway.envoyproxy.io
+            kind: HTTPRouteFilter
+            name: {{ include "devhub-app.name" . }}-mcp-metadata
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "devhub-app.name" . }}-mcp
+  labels:
+    {{- include "devhub-app.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.gateway.name }}
+      namespace: {{ .Values.gateway.namespace }}
+      sectionName: {{ .Values.gateway.section }}
+  hostnames:
+    - {{ .Values.app.host | quote }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.mcp.path | quote }}
+      backendRefs:
+        - name: {{ include "devhub-app.name" . }}
+          port: 80
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: {{ include "devhub-app.name" . }}-mcp-jwt
+  labels:
+    {{- include "devhub-app.labels" . | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ include "devhub-app.name" . }}-mcp
+  jwt:
+    providers:
+      - name: keycloak
+        issuer: {{ $issuer | quote }}
+        audiences:
+          - {{ .Values.mcp.audience | quote }}
+        remoteJWKS:
+          uri: {{ .Values.mcp.jwksEndpoint | default (printf "%s/protocol/openid-connect/certs" $issuer) | quote }}
+{{- end }}

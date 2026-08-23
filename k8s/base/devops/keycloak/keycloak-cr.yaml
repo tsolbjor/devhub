@@ -67,6 +67,13 @@ spec:
     # Group membership is what ArgoCD, Grafana, Forgejo and Headlamp authorise on.
     - name: spi-login-protocol-openid-connect-legacy-logout-redirect-uri
       value: "true"
+    # OAuth Client ID Metadata Documents (experimental, Keycloak 26.6+): lets
+    # MCP clients (Claude Code, VS Code) identify themselves with a client_id
+    # URL instead of a pre-registered client. Which URLs are trusted is decided
+    # by the client policy that `setup-keycloak.sh mcp` creates — without that
+    # policy the feature accepts nothing, so enabling it here is inert on its own.
+    - name: features
+      value: "cimd"
 
   unsupported:
     podTemplate:

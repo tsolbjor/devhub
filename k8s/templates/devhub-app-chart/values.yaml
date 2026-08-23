@@ -68,13 +68,41 @@ gateway:
 auth:
   enabled: false
   exceptPaths: []
-  # Required when auth is in use, e.g. https://keycloak.example.com/realms/devops
+  # Required when auth or mcp is in use, e.g. https://keycloak.example.com/realms/devops
   issuer: ""
   clientID: apps
   # Where Envoy fetches tokens. Defaults to <issuer>/protocol/openid-connect/token;
   # override with an in-cluster Keycloak URL where the public one is unreachable
   # from the gateway (local environments).
   tokenEndpoint: ""
+
+# Token-protected Model Context Protocol endpoint at mcp.path. Where auth: is
+# browser sign-in (OIDC code flow, cookies), MCP clients (Claude Code, VS Code)
+# present Bearer JWTs: the gateway validates them against the platform Keycloak
+# (issuer + audience) and serves the RFC 9728 discovery document
+# (/.well-known/oauth-protected-resource) that tells clients where and how to
+# sign in — including offline_access, so the connection outlives Keycloak's SSO
+# session cap. The app stays auth-unaware on this path too: it just handles
+# validated /mcp requests, reading the forwarded JWT for identity if it cares.
+#
+# Independent of auth.enabled: the mcp.path route always carries JWT
+# validation, never the browser flow, and the discovery document stays public.
+# The realm side (mcp scope, audience, CIMD client policy) is one-time
+# platform prep: `setup-keycloak.sh mcp`.
+mcp:
+  enabled: false
+  path: /mcp
+  # Audience the access token must carry — stamped by the platform's optional
+  # `mcp` client scope. Shared across apps, like the `apps` browser client; a
+  # per-app audience needs its own client scope + audience mapper in Keycloak.
+  audience: mcp
+  # Scopes advertised to MCP clients (RFC 9728 scopes_supported).
+  scopes: [mcp, offline_access]
+  # Where Envoy fetches Keycloak's signing keys. Defaults to
+  # <auth.issuer>/protocol/openid-connect/certs; override with an in-cluster
+  # URL where the public hostname is unreachable from the gateway (local
+  # environments) — the same story as auth.tokenEndpoint.
+  jwksEndpoint: ""
 
 # Dev-grade PostgreSQL in the app's namespace: one instance, one volume, the
 # password generated in-cluster by External Secrets. When enabled the app

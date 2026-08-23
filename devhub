@@ -557,7 +557,7 @@ Platform / workload clusters
 
 Identity, secrets, GitOps
   vault --env <env> [action]      init | unseal | configure | seed-secrets | status
-  keycloak --env <env> [action]   realm | clients | user | idp | all
+  keycloak --env <env> [action]   realm | clients | user | idp | mcp | all
   secrets --env <env>             move platform credentials into Vault + ExternalSecrets
   gitops --env <env>              hand platform components over to ArgoCD
   gitops-repo --env <env>         publish the environment's standalone GitOps
