@@ -135,6 +135,16 @@ create_groups() {
         kcadm create groups -r ${REALM} -s name=${group}
         log_info "Created group: ${group}"
     done
+
+    # devops-admins may administer this realm through the realm-scoped console
+    # (https://keycloak.<domain>/admin/${REALM}/console/) — with the Entra App
+    # Role mapped onto the group, realm administration is assigned in Entra.
+    # The master realm stays local-only break-glass. add-roles is idempotent
+    # in effect but not in exit code, hence the tolerant call.
+    kcadm add-roles -r ${REALM} --gname devops-admins \
+        --cclientid realm-management --rolename realm-admin 2>/dev/null \
+        || log_warn "realm-admin grant for devops-admins already present (or failed — check manually)"
+    log_info "devops-admins granted realm-admin (realm console via Entra)"
 }
 
 # Configure groups client scope
