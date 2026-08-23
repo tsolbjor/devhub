@@ -97,4 +97,6 @@ steps:
       - git add k8s/values.yaml
       - git diff --cached --quiet && echo "no image change" && exit 0
       - git commit -m "[skip ci] deploy $CI_COMMIT_SHA"
-      - git push origin HEAD:${CI_REPO_DEFAULT_BRANCH}
+      # origin has no credentials in a step container; push with the token
+      # (Forgejo accepts an access token as the username).
+      - git push "https://$GIT_TOKEN@git.DOMAIN/devhub/APP_NAME.git" HEAD:${CI_REPO_DEFAULT_BRANCH}
