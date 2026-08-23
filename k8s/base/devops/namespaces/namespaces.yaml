@@ -122,14 +122,22 @@ metadata:
 # CI job pods live here, never beside Forgejo itself. That keeps build containers
 # out of the namespace holding the database credentials, and lets one
 # NetworkPolicy govern all CI egress.
+#
+# PSS enforce is "privileged" (i.e. not enforced) because rootless BuildKit
+# must run with AppArmor/seccomp Unconfined to create its user+mount
+# namespaces — which the baseline profile forbids, so no image ever built on
+# an AppArmor-enforcing node. The actual fences for this namespace are the
+# tainted CI node pool, the egress NetworkPolicy, and the Kyverno mutation
+# (no service-account token, ci priority class); build steps still run
+# unprivileged and non-root. "warn: baseline" keeps drift visible.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: woodpecker-ci
   labels:
     name: woodpecker-ci
-    pod-security.kubernetes.io/enforce: baseline
-    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: baseline
 ---
 apiVersion: v1
 kind: Namespace
