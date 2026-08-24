@@ -670,8 +670,19 @@ seed_platform_secrets() {
     # setup-keycloak.sh as client "apps"). Lives under apps/, not platform/,
     # because workload clusters' Vault policy is limited to apps/* — the
     # devhub-app chart's ExternalSecret pulls it into each app namespace.
+    #
+    # The `|| true` is load-bearing, not defensive noise. Under `set -euo
+    # pipefail` this assignment is the last command of a `||` list, so set -e
+    # applies to it: on a fresh install oidc-secrets.env does not exist yet
+    # (Keycloak runs after Vault), grep exits 1, pipefail promotes that to the
+    # pipeline's status, and setup-vault.sh died right here — mid-seed, with no
+    # error message at all. The whole bootstrap stopped after
+    # "secret/platform/grafana" and the only symptom was exit code 1.
     local apps_oidc="${APPS_OIDC_SECRET:-}"
-    [[ -n "$apps_oidc" ]] || apps_oidc="$(grep -s '^APPS_OIDC_SECRET=' "${SCRIPT_ENV_DIR}/oidc-secrets.env" | tail -1 | cut -d= -f2-)"
+    if [[ -z "$apps_oidc" ]]; then
+        apps_oidc="$(grep -s '^APPS_OIDC_SECRET=' "${SCRIPT_ENV_DIR}/oidc-secrets.env" \
+            | tail -1 | cut -d= -f2- || true)"
+    fi
     if [[ -n "$apps_oidc" ]]; then
         if [[ "$force" == "--force" ]] || ! _kv_exists apps/oidc-gateway; then
             kv_put secret/apps/oidc-gateway "$(jq -n --arg s "$apps_oidc" '{"client-secret":$s}')"

@@ -22,11 +22,27 @@ spec:
         # (a scrape that has never succeeded — e.g. the telemetry stanza in
         # base/devops/vault/values.yaml missing, which is how this alert was
         # silent), and the literal sealed reading.
+        #
+        # The last arm aggregates with max() rather than reading the raw series,
+        # because Vault exports *two* of them and one is a permanent artefact:
+        #   vault_core_unsealed{cluster=""} 0
+        #   vault_core_unsealed{cluster="vault-cluster-a52b2f0d"} 1
+        # The empty-cluster series is emitted before the cluster name is known —
+        # i.e. while sealed — and Vault keeps exporting it at 0 for the life of
+        # the process. `vault_core_unsealed == 0` therefore matched forever after
+        # the first unseal, and this critical alert fired permanently against a
+        # perfectly healthy Vault on every Shamir install (local, UpCloud). A
+        # critical that can never clear is worse than no alert: it trains people
+        # to ignore the channel that carries the real ones.
+        #
+        # max() by pod is the honest reading of "is any part of this Vault
+        # unsealed" — while genuinely sealed, no series reports 1 and the alert
+        # still fires.
         - alert: VaultSealed
           expr: |
             up{job=~".*vault.*"} == 0
             or absent(vault_core_unsealed)
-            or vault_core_unsealed == 0
+            or max by (namespace, pod) (vault_core_unsealed) == 0
           for: 5m
           labels:
             severity: critical

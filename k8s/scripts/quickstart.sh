@@ -622,9 +622,27 @@ run_all_pending() {
         fi
 
         local before="${STEP_KEYS[$NEXT_INDEX]}"
+        local before_index=$NEXT_INDEX
         run_step "$NEXT_INDEX" || return 1
 
+        # Not every step finishes when its command returns. Handing the platform
+        # to ArgoCD is the clear case: the push succeeds, then the Applications
+        # spend a couple of minutes in sync status Unknown while ArgoCD does its
+        # first reconcile — and re-checking immediately declared the last step of
+        # a *successful* install "still not complete". Give the detector a
+        # bounded window to come true before believing it.
         refresh_state
+        if [[ $NEXT_INDEX -eq $before_index ]]; then
+            local waited=0
+            log_info "Step reported success; waiting for it to take effect..."
+            while [[ $waited -lt 240 ]]; do
+                sleep 15
+                waited=$((waited + 15))
+                refresh_state
+                [[ $NEXT_INDEX -ne $before_index ]] && break
+            done
+        fi
+
         if [[ $NEXT_INDEX -ge 0 && "${STEP_KEYS[$NEXT_INDEX]}" == "$before" ]]; then
             log_warn "'${STEP_LABEL[$NEXT_INDEX]}' is still not complete — stopping here"
             return 1
