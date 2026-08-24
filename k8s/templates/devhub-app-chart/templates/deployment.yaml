@@ -5,7 +5,15 @@ metadata:
   labels:
     {{- include "devhub-app.labels" . | nindent 4 }}
 spec:
+  {{- /* With autoscaling.enabled the HPA owns the replica count, so the field
+         is omitted entirely: emitting it would make ArgoCD reset the count to
+         app.replicas on every sync and fight the autoscaler. Template-only
+         comment and whitespace-trimmed on purpose — with autoscaling disabled
+         (the default) this renders byte-identically to a plain
+         `replicas: <app.replicas>`. */}}
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.app.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       app: {{ include "devhub-app.name" . }}
@@ -24,6 +32,14 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      {{- /* Opt-in init containers — the chart's database-migration hook. Empty
+             by default, and `with` on an empty list emits nothing, so the
+             default render is unchanged. See values.yaml for the caveats
+             (Kyverno wants requests+limits; no auto-injected DB env). */}}
+      {{- with .Values.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: {{ include "devhub-app.name" . }}
           image: "{{ required "app.image.repository is required" .Values.app.image.repository }}:{{ .Values.app.image.tag }}"

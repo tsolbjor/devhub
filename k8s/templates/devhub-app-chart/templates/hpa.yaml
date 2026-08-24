@@ -1,0 +1,40 @@
+{{- /* Opt-in horizontal autoscaling, off by default.
+
+       The prose below lives INSIDE the if-block on purpose: a template whose
+       output is only comments still renders as a (no-op) manifest, and this
+       file must add literally nothing to an existing app's render — the whole
+       point of the feature being opt-in. Hence a Go-template comment out here
+       and YAML comments in there. */}}
+{{- if .Values.autoscaling.enabled }}
+# Horizontal autoscaling for this app (autoscaling.enabled in values.yaml).
+#
+# The Deployment omits `replicas` while this object exists, so the HPA is its
+# single owner — otherwise ArgoCD's sync and the autoscaler take turns
+# overwriting each other.
+#
+# CPU utilisation is measured against the container's CPU *request*, so
+# app.resources.requests.cpu is what the target percentage is a percentage of.
+# maxReplicas × requests must fit inside the ResourceQuota Kyverno generates for
+# the devhub-<app> namespace (4 CPU / 8 GiB of requests), or scaling up just
+# produces Pending pods.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "devhub-app.name" . }}
+  labels:
+    {{- include "devhub-app.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "devhub-app.name" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

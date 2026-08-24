@@ -21,7 +21,10 @@ CI activation, work items. By hand:
 
 1. Create a repository in Forgejo under the `devhub` organisation
 2. Copy this template into the repository root
-3. Replace the placeholders:
+3. Replace the placeholders (a global, literal string swap over every file name
+   and file content — see `TEMPLATE-AUTHORING.md` in the platform repo's
+   `k8s/templates/`, and treat all four as reserved words if you edit this
+   template):
    - `APP_NAME` — your application name (e.g. `my-service`)
    - `DOMAIN` — the platform domain (`localhost` locally, your domain otherwise)
    - `POSTGRES_ENABLED` / `REDIS_ENABLED` — `true` or `false`
@@ -58,6 +61,29 @@ k8s/
 Every step runs as an unprivileged pod on the platform's tainted CI node pool.
 There is no Docker daemon and no privileged container: a build cannot reach the
 node's kubelet credentials or the cloud metadata endpoint.
+
+The `registry_token` org secret is a repo-write Forgejo token, so it is
+requested per step and only where a step cannot work without it — the **test**
+step gets no credential at all. See the credential map at the top of
+`.woodpecker.yml`.
+
+Deployment is always by immutable `:$CI_COMMIT_SHA` tag; the `:latest` tag
+exists only as the BuildKit cache pointer. **Rollback is `git revert` of the
+`[skip ci] deploy <sha>` commit** — the older image is still in the registry, so
+no rebuild is needed. That `[skip ci]` marker is load-bearing: the tag bump is
+itself a push to `main`, and without it CI would trigger itself forever.
+
+## Deployment concerns you can turn on
+
+Both are opt-in in `k8s/values.yaml` and off by default:
+
+- `autoscaling.enabled` — a CPU-based HPA. While on, the chart stops declaring
+  `replicas` so the HPA owns the count. Keep `maxReplicas × requests` inside the
+  namespace quota (4 CPU / 8 GiB)
+- `initContainers` — the migration hook: runs to completion before the app
+  container starts, on every pod, so you need not migrate in-process. Must be
+  idempotent, concurrency-safe and backward compatible with the release still
+  serving. The chart's README has a worked example
 
 ## Data services
 

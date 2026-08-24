@@ -102,6 +102,18 @@ spec:
               command: ["pg_isready", "-U", "{{ $name }}"]
             initialDelaySeconds: 5
             periodSeconds: 10
+          # Restart a wedged server — but deliberately far more patient than
+          # readiness. initdb on a fresh volume, or WAL replay after an unclean
+          # shutdown, can hold the socket closed for a while, and a liveness
+          # kill mid-recovery is how a dev database turns into a corrupt one.
+          # Readiness is what keeps traffic away in the meantime.
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ $name }}"]
+            initialDelaySeconds: 120
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data

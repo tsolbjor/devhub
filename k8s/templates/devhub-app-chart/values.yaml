@@ -104,18 +104,106 @@ mcp:
   # environments) — the same story as auth.tokenEndpoint.
   jwksEndpoint: ""
 
-# Dev-grade PostgreSQL in the app's namespace: one instance, one volume, the
-# password generated in-cluster by External Secrets. When enabled the app
-# container gets POSTGRES_HOST/PORT/DB/USER/PASSWORD env vars automatically.
-# Production data belongs on the managed PostgreSQL the platform provisions.
+# Dev-grade PostgreSQL in the app's namespace. When enabled the app container
+# gets POSTGRES_HOST/PORT/DB/USER/PASSWORD env vars automatically and the
+# password is generated in-cluster by External Secrets, so nothing is committed.
+#
+# READ THIS BEFORE PUTTING ANYTHING YOU CARE ABOUT IN IT. "Dev-grade" is not
+# modesty, it is the specification:
+#   * one replica, one PersistentVolumeClaim — no replication, no failover.
+#     While the pod reschedules, the database is simply down
+#   * NO BACKUPS. Velero backs up the *platform* cluster; workload-cluster app
+#     volumes are not in a backup schedule. There is no PITR and no snapshot
+#     to roll back to — a dropped table is gone
+#   * the volume is ReadWriteOnce and node-local on some clouds: losing the
+#     node can lose the data outright
+#   * `helm uninstall` / deprovisioning the app deletes the PVC with it
+#   * no tuning, no connection pooling, no monitoring of its own
+# It exists so a developer can build a feature on day one without filing a
+# ticket. Production data belongs on the managed PostgreSQL the platform
+# provisions per cloud (RDS / Cloud SQL / Flexible Server / UpCloud Managed PG),
+# which has PITR, snapshots and failover. That move is a manual step — nothing
+# here migrates for you, and the portal's starter issue says so.
 postgres:
   enabled: false
   storage: 1Gi
 
-# Dev-grade Redis: cache only, no persistence, no auth inside the namespace.
-# When enabled the app container gets REDIS_HOST/REDIS_PORT automatically.
+# Dev-grade Redis in the app's namespace: cache only. When enabled the app
+# container gets REDIS_HOST/REDIS_PORT/REDIS_PASSWORD automatically.
+#
+# Same dev-grade contract as postgres above, and then some: one replica, no
+# persistence at all (an empty cache after every restart), no backups, no
+# failover. Treat it strictly as a cache — anything that must survive a pod
+# restart does not belong here. Sessions, queues and anything durable belong on
+# the managed cache the platform provisions per cloud.
 redis:
   enabled: false
+
+# Opt-in horizontal autoscaling. Disabled by default, and while disabled the
+# Deployment carries app.replicas exactly as before.
+#
+# When enabled, the Deployment stops declaring `replicas` at all and the HPA
+# owns the count — otherwise ArgoCD would reset it to app.replicas on every
+# sync and fight the autoscaler. Requires metrics-server in the workload
+# cluster (present on every devhub cluster) and, because scaling is measured as
+# a percentage of the CPU *request*, sane app.resources.requests.cpu.
+#
+# Keep maxReplicas inside the namespace ResourceQuota Kyverno generates
+# (4 CPU / 8 GiB of requests): maxReplicas × requests must fit, or the HPA will
+# scale up into failed pods.
+#
+# autoscaling:
+#   enabled: true
+#   minReplicas: 2
+#   maxReplicas: 6
+#   targetCPUUtilizationPercentage: 70
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+# Opt-in init containers, rendered verbatim into the app's pod spec. This is
+# the chart's database-migration hook: an init container runs to completion
+# before the app container starts, on every pod, so a rollout applies the
+# schema change before the new code serves traffic.
+#
+# Notes that will bite otherwise:
+#   * they inherit the pod securityContext (non-root, uid 10001) and Kyverno
+#     validates them like any other container — CPU and memory requests AND
+#     limits are mandatory, no privileged, allow-listed registry only
+#   * readOnlyRootFilesystem is set per container: add your own emptyDir if the
+#     migration tool needs to write
+#   * this runs once per pod, and concurrently across pods during a rollout —
+#     the migration must be idempotent and safe to run twice at once (most
+#     migration tools take a lock; confirm yours does)
+#   * migrations must be backward compatible with the *previous* image, which
+#     is still serving while the new pods roll out
+#   * postgres.enabled connection env vars are NOT injected here — repeat the
+#     secretKeyRefs you need (secret <app>-postgres, keys database/username/
+#     password) as shown below
+#
+# initContainers:
+#   - name: migrate
+#     image: git.example.com/devhub/my-app:latest   # usually the app image
+#     command: ["/app/migrate"]
+#     env:
+#       - name: POSTGRES_HOST
+#         value: my-app-postgres
+#       - name: POSTGRES_DB
+#         valueFrom: { secretKeyRef: { name: my-app-postgres, key: database } }
+#       - name: POSTGRES_USER
+#         valueFrom: { secretKeyRef: { name: my-app-postgres, key: username } }
+#       - name: POSTGRES_PASSWORD
+#         valueFrom: { secretKeyRef: { name: my-app-postgres, key: password } }
+#     securityContext:
+#       allowPrivilegeEscalation: false
+#       readOnlyRootFilesystem: true
+#       capabilities: { drop: ["ALL"] }
+#     resources:
+#       requests: { cpu: 50m, memory: 64Mi }
+#       limits: { cpu: 500m, memory: 256Mi }
+initContainers: []
 
 # Off-the-shelf containers running beside the app — the dev-grade
 # postgres/redis pattern, generalised. No CI: the image comes from any

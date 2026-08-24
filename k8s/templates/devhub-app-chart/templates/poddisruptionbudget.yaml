@@ -1,5 +1,8 @@
 # Keep one replica serving during node drains and cluster upgrades.
-{{- if gt (int .Values.app.replicas) 1 }}
+{{- /* With autoscaling.enabled the floor is autoscaling.minReplicas, since the
+       Deployment no longer declares replicas at all. With it disabled this is
+       exactly the previous `gt (int .Values.app.replicas) 1`. */}}
+{{- if gt (int (ternary .Values.autoscaling.minReplicas .Values.app.replicas .Values.autoscaling.enabled)) 1 }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

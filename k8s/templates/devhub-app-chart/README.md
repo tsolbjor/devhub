@@ -15,7 +15,21 @@ the platform's idea of a well-behaved workload:
 - registry pull secret via External Secrets from the platform Vault
 - opt-in dev-grade PostgreSQL (`postgres.enabled`) and Redis (`redis.enabled`):
   password generated in-cluster, connection env vars (`POSTGRES_*`, `REDIS_*`)
-  injected into the app container automatically
+  injected into the app container automatically. **Dev-grade is the
+  specification, not modesty**: single replica, no backups, no failover, and
+  the PVC dies with the app. Production data belongs on the managed database
+  the platform provisions per cloud — see `values.yaml` for the full contract
+- opt-in horizontal autoscaling (`autoscaling.enabled`): an `autoscaling/v2`
+  HPA on CPU utilisation. While enabled the Deployment omits `replicas`
+  entirely so the HPA is its single owner (otherwise ArgoCD's sync and the
+  autoscaler overwrite each other), and the PodDisruptionBudget floor becomes
+  `autoscaling.minReplicas`
+- opt-in `initContainers`, rendered verbatim into the app's pod spec — the
+  chart's **database-migration hook**, so an app need not migrate in-process on
+  startup. Same Kyverno rules as any container (requests *and* limits, non-root,
+  allow-listed registry); the migration must be idempotent, safe to run
+  concurrently across a rollout, and backward compatible with the image still
+  serving
 - off-the-shelf containers beside the app (`extraWorkloads`): any image from a
   Kyverno-allow-listed registry (ghcr.io, quay.io, docker.io/library,
   registry.k8s.io, the platform registry), no CI involved — hardened
@@ -59,7 +73,39 @@ auth:
 ```
 
 See `values.yaml` in this repository for every knob (replicas, resources,
-probes, extra env, `extraHosts`, `extraManifests`).
+probes, extra env, `extraHosts`, `autoscaling`, `initContainers`,
+`extraWorkloads`, `extraManifests`).
+
+## Database migrations
+
+There is no separate migration Job: the hook is `initContainers`, which runs to
+completion before the app container starts, on every pod.
+
+```yaml
+initContainers:
+  - name: migrate
+    image: git.example.com/devhub/my-service:latest   # usually the app image
+    command: ["/app/migrate"]
+    env:
+      - name: POSTGRES_HOST
+        value: my-service-postgres
+      - name: POSTGRES_PASSWORD
+        valueFrom: { secretKeyRef: { name: my-service-postgres, key: password } }
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities: { drop: ["ALL"] }
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { cpu: 500m, memory: 256Mi }
+```
+
+The `POSTGRES_*` / `REDIS_*` env vars the chart injects into the *app* container
+are not injected here — repeat the `secretKeyRef`s you need. During a rolling
+update this runs in several pods at once, alongside the old image still serving,
+so migrations must be idempotent, concurrency-safe (most migration tools take an
+advisory lock — confirm yours does) and backward compatible with the previous
+release.
 
 ## App ecosystems: more than one hostname
 
