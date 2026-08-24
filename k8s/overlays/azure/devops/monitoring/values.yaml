@@ -16,3 +16,29 @@ grafana:
       secretKeyRef:
         name: grafana-oidc-secret
         key: client-secret
+
+# ─── Managed control plane: stop scraping what is not reachable ──────
+# kube-prometheus-stack enables ServiceMonitors for kube-controller-manager,
+# kube-scheduler and etcd by default. On AKS the control plane is managed
+# and those endpoints are not exposed to the cluster at all, so the scrapes fail
+# forever and KubeControllerManagerDown / KubeSchedulerDown / the etcd* rules
+# sit permanently critical. That is not a monitoring gap being surfaced — it is
+# noise that buries real alerts, and the alert channel only works if everything
+# in it means something.
+#
+# Disabling each of these switches off both its ServiceMonitor and the alert
+# rules that depend on it.
+kubeControllerManager:
+  enabled: false
+
+kubeScheduler:
+  enabled: false
+
+kubeEtcd:
+  enabled: false
+
+# kubeProxy stays enabled: AKS runs kube-proxy with Azure CNI (network_policy = "azure" in
+# tofu/azure/modules/cluster/main.tf), so the target genuinely exists. If
+# KubeProxyDown fires permanently, the node's metricsBindAddress is on
+# localhost — disable it here rather than leaving it critical.
+

@@ -139,6 +139,28 @@ spec:
             namespace: velero
             baseValues: k8s/base/devops/velero/values.yaml
             overlayValues: devops/velero/values.yaml
+            # deploy.sh deliberately skips velero on local — there is no cloud
+            # backup target, so the chart installs a BackupStorageLocation that
+            # can never become Available and every schedule errors. Without this
+            # the handover left local with a permanently unhealthy Application.
+            # See the post-selector below for how it is filtered out.
+            skipEnv: local
+
+      # Post-generation filter over the parameters above (a sibling of `list`,
+      # not part of it). `NotIn` also matches a parameter set where the key is
+      # absent — Kubernetes label-selector semantics — so every element without
+      # a skipEnv is kept unconditionally, while an element whose skipEnv equals
+      # this environment's name drops out. deploy.sh substitutes ${ENV} before
+      # applying, so the comparison is resolved once, at handover.
+      #
+      # If a second per-environment exclusion ever appears, skipEnv should
+      # become one key per excluded environment rather than a single value.
+      selector:
+        matchExpressions:
+          - key: skipEnv
+            operator: NotIn
+            values:
+              - ${ENV}
 
   template:
     metadata:
@@ -148,7 +170,10 @@ spec:
         app.kubernetes.io/part-of: devhub
         devhub.io/component: '{{.component}}'
     spec:
-      project: default
+      # Not `default`: that project allows any source repo, any destination
+      # cluster and every cluster-scoped kind, so a commit here could deploy
+      # onto the registered workload clusters. See projects/platform.yaml.
+      project: platform
       destination:
         server: https://kubernetes.default.svc
         namespace: '{{.namespace}}'

@@ -17,7 +17,10 @@ metadata:
     app.kubernetes.io/part-of: devhub
     devhub.io/component: portal
 spec:
-  project: default
+  # projects/platform.yaml — the portal holds a Forgejo token that can create
+  # repositories, so it belongs behind the same source/destination limits as
+  # every other platform component.
+  project: platform
   source:
     repoURL: ${GITOPS_REPO_URL_INTERNAL}
     targetRevision: ${GITOPS_REVISION}

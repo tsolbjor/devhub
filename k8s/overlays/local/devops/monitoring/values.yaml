@@ -30,3 +30,23 @@ grafana:
       secretKeyRef:
         name: grafana-oidc-secret
         key: client-secret
+
+# ─── k3s has no separate control-plane components to scrape ──────────
+# Rancher Desktop runs k3s, which folds the controller manager, the scheduler
+# and kube-proxy into the k3s server/agent processes and uses SQLite instead of
+# etcd. Their metrics endpoints bind to 127.0.0.1 (or, for etcd, do not exist),
+# so kube-prometheus-stack's default ServiceMonitors can never succeed and
+# KubeControllerManagerDown / KubeSchedulerDown / KubeProxyDown / the etcd* rules
+# fire critical from the first sync onwards. On local that is the whole alert
+# channel, so it hides everything worth seeing.
+kubeControllerManager:
+  enabled: false
+
+kubeScheduler:
+  enabled: false
+
+kubeEtcd:
+  enabled: false
+
+kubeProxy:
+  enabled: false

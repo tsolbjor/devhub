@@ -173,8 +173,19 @@ spec:
       port: 443
       hostname: "*.${DOMAIN}"
       allowedRoutes:
+        # Tenant namespaces only, the same restriction as
+        # base/workload/gateway.yaml: `from: All` on a wildcard listener lets
+        # any namespace claim any hostname under the domain, including a
+        # platform service's. The label is stamped on app namespaces by ArgoCD
+        # (managedNamespaceMetadata in k8s/argocd/apps/forgejo-appset.yaml), so
+        # an app repository cannot grant itself access. Platform services on
+        # this cluster use their own per-hostname listeners above and are
+        # unaffected.
         namespaces:
-          from: All
+          from: Selector
+          selector:
+            matchLabels:
+              devhub.io/tenant: "true"
       tls:
         mode: Terminate
         certificateRefs:

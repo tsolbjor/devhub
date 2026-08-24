@@ -307,3 +307,215 @@ spec:
             # A build step has no business talking to the API server; the agent
             # that created it already has the permissions it needs.
             automountServiceAccountToken: false
+---
+# ─── Tenant isolation between devhub-* namespaces ─────────────────────
+# Every developer app gets its own devhub-<app> namespace, but three doors
+# between them were left open. ArgoCD syncs app repositories with cluster-admin
+# rights, so nothing downstream of the AppProject whitelist checks *whose*
+# namespace an object names, which Vault path a secret reads, or which hostname
+# a route claims. These rules close that.
+#
+# Why Kyverno and not the AppProject: an AppProject can restrict kinds and the
+# Application's destination namespace, but a raw manifest may still carry an
+# explicit metadata.namespace, and the ClusterSecretStore/Gateway are single
+# shared objects with no per-tenant scoping of their own.
+#
+# All three derive the tenant from the namespace name (devhub-<app>). That name
+# is set by the ApplicationSet template, not by the app repository.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: devhub-tenant-isolation
+  annotations:
+    policies.kyverno.io/title: Tenant isolation for application namespaces
+    policies.kyverno.io/description: >-
+      Keeps each devhub-<app> namespace to its own objects, its own Vault
+      secrets and its own hostnames. Templated with ${DOMAIN} by deploy.sh.
+spec:
+  admission: true
+  # Admission-only: the ArgoCD tracking label the first rule reads is applied
+  # during sync, and a background re-scan of long-standing objects would only
+  # re-report what admission already refused.
+  background: false
+  rules:
+    # ── 1. An app's objects may not land in another app's namespace ──
+    #
+    # Enforcement signal: ArgoCD's own tracking label. With the default
+    # `label` resource-tracking method the controller stamps
+    # app.kubernetes.io/instance = <Application name> on everything it applies,
+    # overwriting whatever the manifest said — so it is a value the tenant
+    # cannot forge. The Application name is '<cluster>-<repository>'
+    # (forgejo-appset.yaml) while the namespace is 'devhub-<repository>', so the
+    # check is "the instance label is, or ends with -, the namespace's app".
+    #
+    # Chosen over the alternative — argocd.argoproj.io/tracking-id, which
+    # encodes the namespace directly — because that annotation only exists when
+    # the installation is switched to `annotation` tracking, and this platform
+    # runs ArgoCD's default. If that ever changes, this rule keeps working
+    # (the label is still written in annotation+label mode) but the annotation
+    # would be the stronger signal.
+    - name: objects-stay-in-their-own-namespace
+      match:
+        any:
+          - resources:
+              namespaces:
+                - "devhub-*"
+              kinds:
+                - Deployment
+                - StatefulSet
+                - Job
+                - CronJob
+                - Service
+                - ConfigMap
+                - Secret
+                - ServiceAccount
+                - PersistentVolumeClaim
+                - PodDisruptionBudget
+                - HorizontalPodAutoscaler
+                - ExternalSecret
+                - HTTPRoute
+                - SecurityPolicy
+                - HTTPRouteFilter
+      preconditions:
+        all:
+          # Only objects ArgoCD actually tracks. Controller-created objects —
+          # the Secrets External Secrets projects, the PVCs a StatefulSet
+          # spawns, the guardrails generated above — carry no tracking label
+          # and are not tenant manifests.
+          - key: "{{ request.object.metadata.labels.\"app.kubernetes.io/instance\" || '' }}"
+            operator: NotEquals
+            value: ""
+          # ArgoCD truncates the tracking label at 63 characters, which would
+          # cut off the very suffix this rule compares. Namespace length keeps
+          # real app names far short of that, so a 63-character value means
+          # "cannot be judged" rather than "violation".
+          - key: "{{ length(request.object.metadata.labels.\"app.kubernetes.io/instance\" || '') }}"
+            operator: LessThan
+            value: 63
+      validate:
+        failureAction: Enforce
+        message: >-
+          This object is managed by a different application than the one that
+          owns {{ request.namespace }}. An app repository may only create
+          objects in its own devhub-<app> namespace — remove the explicit
+          metadata.namespace and let ArgoCD place it.
+        deny:
+          conditions:
+            all:
+              - key: "{{ request.object.metadata.labels.\"app.kubernetes.io/instance\" }}"
+                operator: NotEquals
+                value: "{{ regex_replace_all_literal('^devhub-', request.namespace, '') }}"
+              - key: "{{ ends_with(request.object.metadata.labels.\"app.kubernetes.io/instance\", join('', ['-', regex_replace_all_literal('^devhub-', request.namespace, '')])) }}"
+                operator: Equals
+                value: false
+
+    # ── 2. Vault reads stay inside the app's own path ────────────────
+    #
+    # The workload cluster authenticates to the platform Vault through one
+    # shared ClusterSecretStore (base/workload/vault-cluster-secret-store.yaml)
+    # whose policy grants read over all of apps/*. Without this rule any app
+    # could ship an ExternalSecret reading any other app's secrets.
+    #
+    # The two exceptions are the keys the devhub-app chart itself uses and that
+    # are shared by design:
+    #   apps/oidc-gateway            the shared "apps" OIDC client secret
+    #                                (templates/auth.yaml)
+    #   forgejo/registry-pull-token  the read-only registry pull credential
+    #                                (templates/registry-pull-secret.yaml)
+    # The chart's postgres/redis passwords need nothing here — they come from an
+    # in-namespace External Secrets Password generator, not from Vault.
+    - name: externalsecret-data-keys-are-own-path
+      match:
+        any:
+          - resources:
+              namespaces:
+                - "devhub-*"
+              kinds:
+                - ExternalSecret
+      validate:
+        failureAction: Enforce
+        message: >-
+          An ExternalSecret in {{ request.namespace }} may only read Vault keys
+          under apps/<app>/, plus the shared apps/oidc-gateway and
+          forgejo/registry-pull-token.
+        foreach:
+          - list: "request.object.spec.data || `[]`"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ element.remoteRef.key }}"
+                    operator: AnyNotIn
+                    value:
+                      - apps/oidc-gateway
+                      - forgejo/registry-pull-token
+                  - key: "{{ starts_with(element.remoteRef.key, join('', ['apps/', regex_replace_all_literal('^devhub-', request.namespace, ''), '/'])) }}"
+                    operator: Equals
+                    value: false
+          - list: "request.object.spec.dataFrom[?extract != null] || `[]`"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ element.extract.key }}"
+                    operator: AnyNotIn
+                    value:
+                      - apps/oidc-gateway
+                      - forgejo/registry-pull-token
+                  - key: "{{ starts_with(element.extract.key, join('', ['apps/', regex_replace_all_literal('^devhub-', request.namespace, ''), '/'])) }}"
+                    operator: Equals
+                    value: false
+
+    - name: externalsecret-no-store-wide-find
+      match:
+        any:
+          - resources:
+              namespaces:
+                - "devhub-*"
+              kinds:
+                - ExternalSecret
+      validate:
+        failureAction: Enforce
+        message: >-
+          spec.dataFrom[].find searches the whole Vault mount and cannot be
+          scoped to one app. List the keys explicitly under spec.data instead.
+        deny:
+          conditions:
+            all:
+              - key: "{{ length(request.object.spec.dataFrom[?find != null] || `[]`) }}"
+                operator: GreaterThan
+                value: 0
+
+    # ── 3. Hostnames stay inside the app's suffix group ──────────────
+    #
+    # The gateway's apps listener serves one wildcard certificate for
+    # *.${DOMAIN} and Gateway API resolves competing claims by oldest route
+    # first, so without this an app could claim a sibling's hostname. The
+    # platform convention (see the chart's app.extraHosts documentation) is
+    # suffix grouping, one DNS label deep:
+    #   <app>.${DOMAIN}            the app itself
+    #   api-<app>.${DOMAIN}        a sibling surface of the same app
+    #   <anything>-<app>.${DOMAIN} an extraWorkloads host
+    - name: httproute-hostnames-match-app
+      match:
+        any:
+          - resources:
+              namespaces:
+                - "devhub-*"
+              kinds:
+                - HTTPRoute
+      validate:
+        failureAction: Enforce
+        message: >-
+          An HTTPRoute in {{ request.namespace }} may only claim hostnames in
+          its own suffix group — <app>.${DOMAIN} or <something>-<app>.${DOMAIN}.
+          A separate deployable belongs in its own portal-scaffolded app.
+        foreach:
+          - list: "request.object.spec.hostnames || `[]`"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ split(element, '.') | [0] }}"
+                    operator: NotEquals
+                    value: "{{ regex_replace_all_literal('^devhub-', request.namespace, '') }}"
+                  - key: "{{ ends_with(split(element, '.') | [0], join('', ['-', regex_replace_all_literal('^devhub-', request.namespace, '')])) }}"
+                    operator: Equals
+                    value: false

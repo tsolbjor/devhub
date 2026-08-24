@@ -16,7 +16,10 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: default
+  # projects/platform.yaml, not the unrestricted built-in `default` project:
+  # this Application manages every other platform Application, so its blast
+  # radius is the whole ArgoCD installation.
+  project: platform
 
   source:
     repoURL: ${GITOPS_REPO_URL_INTERNAL}

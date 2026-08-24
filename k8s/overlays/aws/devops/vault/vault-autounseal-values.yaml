@@ -27,6 +27,15 @@ server:
           tls_disable = 1
           address = "[::]:8200"
           cluster_address = "[::]:8201"
+
+          # This overlay replaces the whole raft config, so the base file's
+          # telemetry stanzas have to be repeated here — without them
+          # /v1/sys/metrics answers 403 to the chart's ServiceMonitor and
+          # vault_core_unsealed never reaches Prometheus (VaultSealed cannot
+          # fire). See k8s/base/devops/vault/values.yaml.
+          telemetry {
+            unauthenticated_metrics_access = true
+          }
         }
 
         storage "raft" {
@@ -34,6 +43,11 @@ server:
         }
 
         service_registration "kubernetes" {}
+
+        telemetry {
+          prometheus_retention_time = "24h"
+          disable_hostname = true
+        }
 
         seal "awskms" {
           region     = "${AWS_REGION}"

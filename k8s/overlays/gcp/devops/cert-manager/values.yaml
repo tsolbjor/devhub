@@ -1,1 +1,14 @@
-# cert-manager GCP overlay — no overrides needed beyond base values
+# cert-manager GCP overlay values
+# Merged with base/devops/cert-manager/values.yaml
+#
+# Workload Identity for the DNS-01 solver: cert-manager writes TXT records in
+# the platform's Cloud DNS zone as its own Google service account (tofu output
+# cert_manager_gsa_email), never the node service account. DNS-01 is what makes
+# the wildcard certificate — and with it the gateway's apps listener —
+# possible; HTTP-01 keeps working unchanged.
+#
+# GKE turns this annotation into Application Default Credentials in the pod.
+
+serviceAccount:
+  annotations:
+    iam.gke.io/gcp-service-account: "${CERT_MANAGER_GSA_EMAIL}"

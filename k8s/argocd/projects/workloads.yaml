@@ -22,24 +22,99 @@ spec:
     - namespace: 'devhub-*'
       server: https://kubernetes.default.svc
 
+  # Namespace only. Everything else cluster-scoped — ClusterRole,
+  # ClusterRoleBinding, ClusterSecretStore, ClusterPolicy, CRDs — is denied by
+  # omission, so an app cannot grant itself cluster-wide privilege or replace a
+  # platform-wide object.
   clusterResourceWhitelist:
     - group: ''
       kind: Namespace
 
-  # Developer manifests may not create cluster-wide privilege or bypass the
-  # namespace guardrails that deploy-workload.sh applies.
+  # An explicit allow-list, not a blacklist. ArgoCD syncs these Applications
+  # with cluster-admin rights, so anything a developer repository can name here
+  # is created without an authorization check of its own — a blacklist only
+  # blocks the kinds someone thought of. The list below is the union of what the
+  # devhub-app chart emits and the small set a raw-manifest repository
+  # legitimately needs. A new kind is a deliberate platform decision.
+  namespaceResourceWhitelist:
+    # Workloads
+    - group: 'apps'
+      kind: Deployment
+    - group: 'apps'
+      kind: StatefulSet
+    - group: 'batch'
+      kind: Job
+    - group: 'batch'
+      kind: CronJob
+    # Core
+    - group: ''
+      kind: Service
+    - group: ''
+      kind: ConfigMap
+    - group: ''
+      kind: Secret
+    - group: ''
+      kind: ServiceAccount
+    - group: ''
+      kind: PersistentVolumeClaim
+    # Availability and scaling
+    - group: 'policy'
+      kind: PodDisruptionBudget
+    - group: 'autoscaling'
+      kind: HorizontalPodAutoscaler
+    # Secrets from the platform Vault. The generators group is the chart's
+    # in-cluster Password generator for the dev-grade postgres/redis passwords.
+    # Which Vault keys an ExternalSecret may reference is enforced separately by
+    # Kyverno (base/devops/kyverno/policies.yaml) — a shared ClusterSecretStore
+    # cannot express per-tenant scoping on its own.
+    - group: 'external-secrets.io'
+      kind: ExternalSecret
+    - group: 'generators.external-secrets.io'
+      kind: Password
+    # Routing and gateway-level auth
+    - group: 'gateway.networking.k8s.io'
+      kind: HTTPRoute
+    - group: 'gateway.envoyproxy.io'
+      kind: SecurityPolicy
+    - group: 'gateway.envoyproxy.io'
+      kind: HTTPRouteFilter
+
+  # Deliberately NOT allow-listed. Each of these would let an application undo a
+  # platform guardrail from inside its own namespace:
+  #
+  #   networking.k8s.io/NetworkPolicy
+  #     Kubernetes NetworkPolicies are additive — the effective rule set is the
+  #     union of every policy selecting the pod. An app-supplied allow-all
+  #     egress policy therefore does not override Kyverno's generated
+  #     default-deny and metadata-endpoint block, it defeats them.
+  #
+  #   rbac.authorization.k8s.io/Role, RoleBinding
+  #     ArgoCD applies as cluster-admin, which bypasses the API server's RBAC
+  #     escalation check. An app could grant its own ServiceAccount full rights
+  #     in its namespace — including reading every Secret ESO projects there.
+  #
+  #   kyverno.io/* (PolicyException, Policy, ...)
+  #     A PolicyException in the app's own namespace exempts the app from the
+  #     platform's resource-limit, non-root and registry policies.
+  #
+  #   ResourceQuota, LimitRange
+  #     Generated per namespace by Kyverno; an app-supplied copy would raise its
+  #     own ceiling.
+  #
+  # Kept as belt-and-braces: with an explicit whitelist these are already
+  # denied, but the blacklist states the intent where it is easiest to read.
   namespaceResourceBlacklist:
-    - group: 'rbac.authorization.k8s.io'
-      kind: ClusterRole
-    - group: 'rbac.authorization.k8s.io'
-      kind: ClusterRoleBinding
     - group: ''
       kind: ResourceQuota
     - group: ''
       kind: LimitRange
-
-  namespaceResourceWhitelist:
-    - group: '*'
+    - group: 'networking.k8s.io'
+      kind: NetworkPolicy
+    - group: 'rbac.authorization.k8s.io'
+      kind: Role
+    - group: 'rbac.authorization.k8s.io'
+      kind: RoleBinding
+    - group: 'kyverno.io'
       kind: '*'
 
   roles:

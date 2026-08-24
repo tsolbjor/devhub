@@ -10,7 +10,8 @@ argocd/
 │   ├── app-of-apps.yaml     # Root application (deploys all apps)
 │   └── *.yaml               # Individual application manifests
 ├── projects/                # ArgoCD Project definitions
-│   └── devhub.yaml           # Main project for devhub applications
+│   ├── platform.yaml        # The platform's own components
+│   └── workloads.yaml       # Developer apps on the workload clusters
 └── README.md
 ```
 
@@ -33,7 +34,7 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: devhub
+  project: workloads
   source:
     repoURL: https://forgejo.localhost/devhub/my-service.git
     targetRevision: HEAD
@@ -95,7 +96,7 @@ spec:
     metadata:
       name: 'my-service-{{env}}'
     spec:
-      project: devhub
+      project: workloads
       source:
         repoURL: https://forgejo.localhost/devhub/my-service.git
         path: 'k8s/overlays/{{env}}'
@@ -113,7 +114,11 @@ spec:
 | `apps/app-of-apps.yaml` | Everything else in `apps/`. Its `repoURL` is templated from `gitops.repoUrl` in the environment's `config.yaml` — it used to be hardcoded to `https://forgejo.localhost`, which broke every cloud bootstrap. |
 | `platform-appset.yaml` | The platform itself: cert-manager, external-dns, external-secrets, monitoring, loki, tempo, alloy, kyverno, reloader, woodpecker, headlamp, velero. Applied once by `deploy.sh --env <env> gitops`; charts come from upstream repos with values from this repo (`$values`). |
 | `apps/forgejo-appset.yaml` | Developer apps: a **matrix** of Forgejo repositories in the `devhub` organisation × clusters labelled `devhub.io/role=workload`. Apps therefore land on workload clusters, not on the platform cluster. |
-| `projects/*.yaml` | AppProjects (`devhub`, `workloads`): allowed sources, destinations (`name: '*-workload'`), and RBAC bound to the Keycloak groups `devops-admins` / `developers` / `viewers`. |
+| `projects/*.yaml` | AppProjects, and the security boundary for everything above. `platform`: the GitOps repo plus the enumerated upstream chart repos, the in-cluster destination only, an explicit `clusterResourceWhitelist`. `workloads`: `devhub-*` namespaces on `name: '*-workload'` clusters, with an explicit `namespaceResourceWhitelist` — NetworkPolicy, Role/RoleBinding and `kyverno.io/*` are deliberately absent (see the comments in the file for why each would undo a guardrail). RBAC is bound to the Keycloak groups `devops-admins` / `developers`. |
+
+> These files are applied **verbatim** by `deploy.sh` — there is no
+> `template_values` pass over `projects/`, so a `${VAR}` placeholder would reach
+> the cluster unsubstituted. Use glob patterns instead.
 
 ### Adding a platform component
 
