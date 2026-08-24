@@ -46,33 +46,28 @@ output "pg_forgejo_password" {
 }
 
 # ─── Redis ────────────────────────────────────────────────────────────
+#
+# null when enable_cache = false — the replication group is not provisioned.
 
 output "redis_host" {
-  description = "ElastiCache Redis primary endpoint"
-  value       = aws_elasticache_replication_group.main.primary_endpoint_address
+  description = "ElastiCache Redis primary endpoint (null when enable_cache = false)"
+  value       = try(aws_elasticache_replication_group.main[0].primary_endpoint_address, null)
 }
 
 output "redis_port" {
-  description = "ElastiCache Redis port"
-  value       = aws_elasticache_replication_group.main.port
+  description = "ElastiCache Redis port (null when enable_cache = false)"
+  value       = try(aws_elasticache_replication_group.main[0].port, null)
 }
 
 output "redis_auth_token" {
   description = "ElastiCache AUTH token — store in the forgejo-redis-secret K8s secret"
-  value       = random_password.redis_auth.result
+  value       = try(random_password.redis_auth[0].result, null)
   sensitive   = true
 }
 
 output "redis_tls_enabled" {
   description = "Whether Redis requires TLS (rediss://)"
-  value       = aws_elasticache_replication_group.main.transit_encryption_enabled
-}
-
-# ─── S3 ──────────────────────────────────────────────────────────────
-
-output "aws_region_output" {
-  description = "AWS region (for S3 connection config)"
-  value       = var.region
+  value       = try(aws_elasticache_replication_group.main[0].transit_encryption_enabled, null)
 }
 
 # ─── IRSA ────────────────────────────────────────────────────────────
@@ -80,6 +75,11 @@ output "aws_region_output" {
 output "external_dns_irsa_role_arn" {
   description = "IAM Role ARN for external-dns IRSA — written to tofu-outputs.env by sync-tofu-outputs.sh"
   value       = aws_iam_role.external_dns_irsa.arn
+}
+
+output "cert_manager_role_arn" {
+  description = "IAM Role ARN for cert-manager IRSA (Route53 DNS-01 solver)"
+  value       = aws_iam_role.cert_manager_irsa.arn
 }
 
 output "loki_irsa_role_arn" {

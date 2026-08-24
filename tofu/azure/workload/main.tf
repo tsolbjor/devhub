@@ -65,9 +65,21 @@ variable "aks_node_vm_size" {
 }
 
 variable "aks_node_count" {
-  description = "Number of AKS worker nodes"
+  description = "Initial number of AKS worker nodes — the autoscaler owns it from the first scale event onwards"
   type        = number
   default     = 2
+}
+
+variable "aks_node_min_count" {
+  description = "Minimum AKS worker nodes (autoscaler lower bound)"
+  type        = number
+  default     = 2
+}
+
+variable "aks_node_max_count" {
+  description = "Maximum AKS worker nodes (autoscaler upper bound)"
+  type        = number
+  default     = 8
 }
 
 variable "aks_kubernetes_version" {
@@ -143,6 +155,14 @@ resource "azurerm_kubernetes_cluster" "main" {
     node_count     = var.aks_node_count
     vm_size        = var.aks_node_vm_size
     vnet_subnet_id = azurerm_subnet.aks.id
+
+    # A fixed node_count made aks_node_count a hard ceiling: app deployments
+    # that outgrew it sat Pending with nothing to fix it. Same autoscaler wiring
+    # as the platform module.
+    auto_scaling_enabled = true
+    min_count            = var.aks_node_min_count
+    max_count            = var.aks_node_max_count
+
     node_labels = {
       prefix = var.prefix
       role   = "worker"
@@ -181,6 +201,37 @@ resource "azurerm_kubernetes_cluster" "main" {
 
   oidc_issuer_enabled       = true
   workload_identity_enabled = true
+
+  # Same reasoning as the platform module: without a channel Azure force-upgrades
+  # the cluster off unsupported versions outside tofu. This is the cluster running
+  # customer apps, so patches matter more here, not less.
+  automatic_upgrade_channel = var.aks_upgrade_channel == "none" ? null : var.aks_upgrade_channel
+
+  maintenance_window_auto_upgrade {
+    frequency   = "Weekly"
+    interval    = 1
+    duration    = 4
+    day_of_week = "Sunday"
+    start_time  = "02:00"
+    utc_offset  = "+00:00"
+  }
+
+  lifecycle {
+    # Node count is owned by the AKS autoscaler once it is running; the patch
+    # version by the upgrade channel (otherwise every plan rolls it back).
+    ignore_changes = [default_node_pool[0].node_count, kubernetes_version]
+  }
+}
+
+variable "aks_upgrade_channel" {
+  description = "AKS automatic upgrade channel: patch, stable, rapid, node-image or none"
+  type        = string
+  default     = "patch"
+
+  validation {
+    condition     = contains(["patch", "stable", "rapid", "node-image", "none"], var.aks_upgrade_channel)
+    error_message = "aks_upgrade_channel must be one of: patch, stable, rapid, node-image, none."
+  }
 }
 
 variable "aad_admin_group_object_ids" {
@@ -217,4 +268,17 @@ resource "azurerm_federated_identity_credential" "external_dns" {
   audience            = ["api://AzureADTokenExchange"]
   issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
   subject             = "system:serviceaccount:external-dns:external-dns"
+}
+
+# cert-manager shares the DNS identity: its DNS-01 solver writes the same
+# zone's TXT records. Without this federated credential no wildcard
+# certificate can ever be issued (Let's Encrypt requires DNS-01 for
+# wildcards), which the apps listener needs.
+resource "azurerm_federated_identity_credential" "cert_manager" {
+  name                = "${var.prefix}-cert-manager-fedcred"
+  resource_group_name = azurerm_resource_group.main.name
+  parent_id           = azurerm_user_assigned_identity.external_dns.id
+  audience            = ["api://AzureADTokenExchange"]
+  issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
+  subject             = "system:serviceaccount:cert-manager:cert-manager"
 }

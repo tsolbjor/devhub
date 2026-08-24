@@ -127,7 +127,13 @@ resource "upcloud_managed_database_user" "forgejo" {
 
 # ─── Managed Valkey ──────────────────────────────────────────────────
 
+# Off by default: nothing on the platform consumes the cache (Forgejo runs its
+# default memory/leveldb backends, and developer apps get a per-app in-cluster
+# Redis from the devhub-app chart), so a managed instance is spend for an unused
+# service. Set enable_cache = true when a workload needs it.
 resource "upcloud_managed_database_valkey" "main" {
+  count = var.enable_cache ? 1 : 0
+
   name  = "${var.prefix}-valkey"
   plan  = var.valkey_plan
   title = "${var.prefix} Valkey"

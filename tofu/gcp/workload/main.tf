@@ -41,9 +41,21 @@ variable "node_machine_type" {
 }
 
 variable "node_count" {
-  description = "Number of nodes per zone"
+  description = "Initial number of nodes per zone at pool creation (the autoscaler owns sizing afterwards)"
   type        = number
   default     = 1
+}
+
+variable "node_min_count" {
+  description = "Minimum nodes in total across all zones (autoscaler lower bound)"
+  type        = number
+  default     = 1
+}
+
+variable "node_max_count" {
+  description = "Maximum nodes in total across all zones (autoscaler upper bound)"
+  type        = number
+  default     = 4
 }
 
 variable "kubernetes_version" {
@@ -174,11 +186,12 @@ resource "google_container_cluster" "main" {
 
   deletion_protection = var.deletion_protection
 
-  dynamic "release_channel" {
-    for_each = var.kubernetes_version == null ? [1] : []
-    content {
-      channel = "STABLE"
-    }
+  # Minimum version when pinned; the STABLE channel keeps auto-upgrades on
+  # either way (the pin must be a version available in that channel).
+  min_master_version = var.kubernetes_version
+
+  release_channel {
+    channel = "STABLE"
   }
 
   resource_labels = local.labels
@@ -186,18 +199,57 @@ resource "google_container_cluster" "main" {
   depends_on = [google_project_service.container]
 }
 
+# Minimal dedicated node service account — logging/monitoring/image pulls only,
+# instead of the project-wide default compute SA.
+resource "google_service_account" "nodes" {
+  project      = var.project_id
+  account_id   = "${var.prefix}-gke-nodes"
+  display_name = "GKE node service account (minimal)"
+
+  depends_on = [google_project_service.iam]
+}
+
+resource "google_project_iam_member" "nodes" {
+  for_each = toset([
+    "roles/logging.logWriter",
+    "roles/monitoring.metricWriter",
+    "roles/monitoring.viewer",
+    "roles/stackdriver.resourceMetadata.writer",
+    "roles/artifactregistry.reader",
+  ])
+
+  project = var.project_id
+  role    = each.value
+  member  = "serviceAccount:${google_service_account.nodes.email}"
+}
+
 resource "google_container_node_pool" "main" {
-  project    = var.project_id
-  name       = "${var.prefix}-nodes"
-  location   = var.region
-  cluster    = google_container_cluster.main.name
-  node_count = var.node_count
+  project  = var.project_id
+  name     = "${var.prefix}-nodes"
+  location = var.region
+  cluster  = google_container_cluster.main.name
+
+  # Per-zone node count at creation; autoscaler owns the actual size from here on.
+  initial_node_count = var.node_count
+
+  # Totals across all zones, matching the platform module's pools.
+  autoscaling {
+    total_min_node_count = var.node_min_count
+    total_max_node_count = var.node_max_count
+    location_policy      = "BALANCED"
+  }
 
   node_config {
-    machine_type = var.node_machine_type
+    machine_type    = var.node_machine_type
+    service_account = google_service_account.nodes.email
 
     workload_metadata_config {
       mode = "GKE_METADATA"
+    }
+
+    shielded_instance_config {
+      enable_secure_boot          = true
+      enable_integrity_monitoring = true
     }
 
     oauth_scopes = [
@@ -210,6 +262,10 @@ resource "google_container_node_pool" "main" {
   management {
     auto_repair  = true
     auto_upgrade = true
+  }
+
+  lifecycle {
+    ignore_changes = [initial_node_count]
   }
 }
 
@@ -234,6 +290,31 @@ resource "google_service_account_iam_member" "external_dns_workload_identity" {
   service_account_id = google_service_account.external_dns.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[external-dns/external-dns]"
+}
+
+# ─── cert-manager DNS-01 Workload Identity ───────────────────────────
+# cert-manager's DNS-01 solver writes TXT records into the same Cloud DNS zone.
+# Without this identity no wildcard certificate can ever be issued (Let's
+# Encrypt requires DNS-01 for wildcards), which the apps listener needs.
+
+resource "google_service_account" "cert_manager" {
+  project      = var.project_id
+  account_id   = "${var.prefix}-cert-manager"
+  display_name = "cert-manager DNS-01 solver (Workload Identity)"
+
+  depends_on = [google_project_service.iam]
+}
+
+resource "google_project_iam_member" "cert_manager_dns_admin" {
+  project = var.project_id
+  role    = "roles/dns.admin"
+  member  = "serviceAccount:${google_service_account.cert_manager.email}"
+}
+
+resource "google_service_account_iam_member" "cert_manager_workload_identity" {
+  service_account_id = google_service_account.cert_manager.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[cert-manager/cert-manager]"
 }
 
 variable "master_ipv4_cidr_block" {

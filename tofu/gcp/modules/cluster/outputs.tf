@@ -52,19 +52,21 @@ output "pg_forgejo_password" {
 
 # ─── Redis ────────────────────────────────────────────────────────────
 
+# Cache outputs are null when enable_cache is off (the default).
+
 output "redis_host" {
   description = "Memorystore Redis host (private IP within VPC)"
-  value       = google_redis_instance.main.host
+  value       = try(google_redis_instance.main[0].host, null)
 }
 
 output "redis_port" {
   description = "Memorystore Redis port"
-  value       = google_redis_instance.main.port
+  value       = try(google_redis_instance.main[0].port, null)
 }
 
 output "redis_auth_string" {
   description = "Memorystore Redis AUTH string — store in the forgejo-redis-secret K8s secret"
-  value       = google_redis_instance.main.auth_string
+  value       = try(google_redis_instance.main[0].auth_string, null)
   sensitive   = true
 }
 
@@ -75,6 +77,11 @@ output "redis_auth_string" {
 output "external_dns_gsa_email" {
   description = "External-DNS Google Service Account email — written to tofu-outputs.env by sync-tofu-outputs.sh"
   value       = google_service_account.external_dns.email
+}
+
+output "cert_manager_gsa_email" {
+  description = "cert-manager Google Service Account email (Cloud DNS DNS-01 solver)"
+  value       = google_service_account.cert_manager.email
 }
 
 output "loki_gsa_email" {

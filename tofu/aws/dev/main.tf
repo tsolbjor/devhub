@@ -16,7 +16,7 @@ module "cluster" {
   node_count         = 2
   node_min_count     = 1
   node_max_count     = 4
-  kubernetes_version = "1.30"
+  kubernetes_version = "1.33"
 
   # CI node group — spot, scales to zero, tainted workload=ci
   ci_node_instance_type = "t3.large"

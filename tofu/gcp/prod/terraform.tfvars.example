@@ -8,3 +8,6 @@ prefix = "devhub-prod"
 
 # Who configured this deployment — used only in labels. setup-env.sh fills it in.
 deployed_by = "you@example.org"
+
+# GCP project the environment is provisioned into (required).
+project_id = "my-gcp-project"

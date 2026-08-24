@@ -63,10 +63,7 @@ output "storage_account_name" {
   value = module.cluster.storage_account_name
 }
 
-output "storage_primary_access_key" {
-  value     = module.cluster.storage_primary_access_key
-  sensitive = true
-}
+# No storage_primary_access_key: shared-key auth is disabled on the account.
 
 # ─── Entra ID ────────────────────────────────────────────────────────
 

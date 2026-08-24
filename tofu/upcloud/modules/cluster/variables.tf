@@ -79,6 +79,12 @@ variable "pg_version" {
   default     = "16"
 }
 
+variable "enable_cache" {
+  description = "Provision the managed Valkey instance. No platform component consumes the cache today; enable for workloads that need it."
+  type        = bool
+  default     = false
+}
+
 variable "valkey_plan" {
   description = "UpCloud Managed Valkey plan"
   type        = string

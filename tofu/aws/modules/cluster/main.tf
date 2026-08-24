@@ -104,15 +104,17 @@ resource "aws_route_table_association" "private" {
 
 resource "aws_security_group" "rds" {
   name_prefix = "${var.prefix}-rds-"
-  description = "Allow PostgreSQL access from within VPC"
+  description = "Allow PostgreSQL access from EKS nodes"
   vpc_id      = aws_vpc.main.id
 
+  # Scoped to the EKS cluster security group (which every managed node group
+  # joins), not the whole VPC CIDR.
   ingress {
-    description = "PostgreSQL from VPC"
-    from_port   = 5432
-    to_port     = 5432
-    protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
+    description     = "PostgreSQL from EKS nodes"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_eks_cluster.main.vpc_config[0].cluster_security_group_id]
   }
 
   egress {
@@ -130,16 +132,18 @@ resource "aws_security_group" "rds" {
 }
 
 resource "aws_security_group" "redis" {
+  count = var.enable_cache ? 1 : 0
+
   name_prefix = "${var.prefix}-redis-"
-  description = "Allow Redis access from within VPC"
+  description = "Allow Redis access from EKS nodes"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    description = "Redis from VPC"
-    from_port   = 6379
-    to_port     = 6379
-    protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
+    description     = "Redis from EKS nodes"
+    from_port       = 6379
+    to_port         = 6379
+    protocol        = "tcp"
+    security_groups = [aws_eks_cluster.main.vpc_config[0].cluster_security_group_id]
   }
 
   egress {
@@ -423,13 +427,21 @@ resource "aws_db_instance" "main" {
 #
 # TLS in transit + AUTH token, on top of VPC/security-group isolation. Clients
 # connect with rediss:// and the token from a K8s secret.
+#
+# Gated behind enable_cache: no platform component consumes the cache today
+# (Forgejo runs its default memory/leveldb backends, apps bring their own
+# in-cluster Redis) — enable it for workloads that need managed capacity.
 
 resource "random_password" "redis_auth" {
+  count = var.enable_cache ? 1 : 0
+
   length  = 64
   special = false
 }
 
 resource "aws_elasticache_subnet_group" "main" {
+  count = var.enable_cache ? 1 : 0
+
   # ElastiCache subnet groups take a fixed name (no name_prefix support).
   name       = "${var.prefix}-redis"
   subnet_ids = aws_subnet.private[*].id
@@ -438,6 +450,8 @@ resource "aws_elasticache_subnet_group" "main" {
 }
 
 resource "aws_elasticache_replication_group" "main" {
+  count = var.enable_cache ? 1 : 0
+
   replication_group_id       = "${var.prefix}-redis"
   description                = "Redis for DevHub ${var.prefix}"
   node_type                  = var.redis_node_type
@@ -446,12 +460,12 @@ resource "aws_elasticache_replication_group" "main" {
   engine_version             = "7.0"
   port                       = 6379
 
-  subnet_group_name  = aws_elasticache_subnet_group.main.name
-  security_group_ids = [aws_security_group.redis.id]
+  subnet_group_name  = aws_elasticache_subnet_group.main[0].name
+  security_group_ids = [aws_security_group.redis[0].id]
 
   at_rest_encryption_enabled = true
   transit_encryption_enabled = true
-  auth_token                 = random_password.redis_auth.result
+  auth_token                 = random_password.redis_auth[0].result
   auth_token_update_strategy = "ROTATE"
 
   snapshot_retention_limit = var.redis_snapshot_retention_days
@@ -504,6 +518,19 @@ resource "aws_cognito_user_pool" "main" {
     string_attribute_constraints {
       min_length = 5
       max_length = 254
+    }
+  }
+
+  # TOTP second factor. OPTIONAL rather than ON so enrolling users are not locked
+  # out mid-rollout; Cognito is the upstream IdP for the whole platform, so the
+  # accounts here reach Keycloak's devops-admins group. Switch to "ON" once every
+  # user has enrolled an authenticator.
+  mfa_configuration = var.cognito_mfa_configuration
+
+  dynamic "software_token_mfa_configuration" {
+    for_each = var.cognito_mfa_configuration == "OFF" ? [] : [1]
+    content {
+      enabled = true
     }
   }
 
@@ -620,4 +647,42 @@ resource "aws_iam_role_policy" "external_dns_route53" {
   name_prefix = "${var.prefix}-external-dns-route53-"
   role        = aws_iam_role.external_dns_irsa.id
   policy      = data.aws_iam_policy_document.external_dns_route53.json
+}
+
+# ─── cert-manager DNS-01 IRSA ────────────────────────────────────────
+# cert-manager's DNS-01 solver writes TXT records into the same zone. Without
+# this role no wildcard certificate can ever be issued (Let's Encrypt requires
+# DNS-01 for wildcards), which the apps listener needs.
+
+resource "aws_iam_role" "cert_manager_irsa" {
+  name_prefix        = "${var.prefix}-cert-manager-irsa-"
+  assume_role_policy = data.aws_iam_policy_document.irsa_trust["cert_manager"].json
+
+  tags = var.tags
+}
+
+data "aws_iam_policy_document" "cert_manager_route53" {
+  statement {
+    effect    = "Allow"
+    actions   = ["route53:GetChange"]
+    resources = ["arn:aws:route53:::change/*"]
+  }
+
+  statement {
+    effect    = "Allow"
+    actions   = ["route53:ChangeResourceRecordSets", "route53:ListResourceRecordSets"]
+    resources = ["arn:aws:route53:::hostedzone/${data.aws_route53_zone.main.zone_id}"]
+  }
+
+  statement {
+    effect    = "Allow"
+    actions   = ["route53:ListHostedZonesByName"]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "cert_manager_route53" {
+  name_prefix = "${var.prefix}-cert-manager-route53-"
+  role        = aws_iam_role.cert_manager_irsa.id
+  policy      = data.aws_iam_policy_document.cert_manager_route53.json
 }

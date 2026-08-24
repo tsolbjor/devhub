@@ -49,6 +49,17 @@ variable "aks_kubernetes_version" {
   default     = null
 }
 
+variable "aks_upgrade_channel" {
+  description = "AKS automatic upgrade channel: patch (security patches within the current minor), stable, rapid, node-image, or none. Without one, Azure force-upgrades the cluster off unsupported versions outside tofu."
+  type        = string
+  default     = "patch"
+
+  validation {
+    condition     = contains(["patch", "stable", "rapid", "node-image", "none"], var.aks_upgrade_channel)
+    error_message = "aks_upgrade_channel must be one of: patch, stable, rapid, node-image, none."
+  }
+}
+
 variable "aks_node_min_count" {
   description = "Minimum AKS nodes in the platform pool (autoscaler lower bound)"
   type        = number
@@ -178,6 +189,12 @@ variable "pg_standby_zone" {
 }
 
 # ─── Azure Managed Redis ──────────────────────────────────────────────
+
+variable "enable_cache" {
+  description = "Provision the managed Redis instance. No platform component consumes the cache today; enable for workloads that need it."
+  type        = bool
+  default     = false
+}
 
 variable "redis_sku_name" {
   description = "Azure Managed Redis SKU (e.g. Balanced_B0, Balanced_B1, MemoryOptimized_M10)"

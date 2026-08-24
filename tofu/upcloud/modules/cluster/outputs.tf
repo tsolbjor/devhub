@@ -56,19 +56,20 @@ output "pg_forgejo_password" {
 
 # ─── Valkey ──────────────────────────────────────────────────────────
 
+# null when enable_cache is false; sync-tofu-outputs.sh skips empty values.
 output "valkey_host" {
-  description = "Valkey private hostname"
-  value       = upcloud_managed_database_valkey.main.service_host
+  description = "Valkey private hostname (null unless enable_cache)"
+  value       = try(upcloud_managed_database_valkey.main[0].service_host, null)
 }
 
 output "valkey_port" {
-  description = "Valkey port"
-  value       = upcloud_managed_database_valkey.main.service_port
+  description = "Valkey port (null unless enable_cache)"
+  value       = try(upcloud_managed_database_valkey.main[0].service_port, null)
 }
 
 output "valkey_password" {
-  description = "Valkey default user password"
-  value       = upcloud_managed_database_valkey.main.service_password
+  description = "Valkey default user password (null unless enable_cache)"
+  value       = try(upcloud_managed_database_valkey.main[0].service_password, null)
   sensitive   = true
 }
 

@@ -73,7 +73,7 @@ variable "node_max_count" {
 variable "kubernetes_version" {
   description = "Kubernetes version for EKS"
   type        = string
-  default     = "1.30"
+  default     = "1.33"
 }
 
 variable "domain" {
@@ -209,6 +209,23 @@ resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
   role       = aws_iam_role.eks_cluster.name
 }
 
+# KMS key for envelope-encrypting Kubernetes Secrets in etcd. App namespaces on
+# this cluster hold their own database and registry credentials, so it earns the
+# same treatment as the platform cluster (tofu/aws/modules/cluster/main.tf).
+# The 30-day deletion window is the protection that matters: destroying this key
+# makes every Secret in etcd permanently unreadable.
+resource "aws_kms_key" "eks_secrets" {
+  description             = "${var.prefix} EKS secret envelope encryption"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+  tags                    = local.tags
+}
+
+resource "aws_kms_alias" "eks_secrets" {
+  name          = "alias/${var.prefix}-eks-secrets"
+  target_key_id = aws_kms_key.eks_secrets.key_id
+}
+
 resource "aws_eks_cluster" "main" {
   name     = "${var.prefix}-eks"
   role_arn = aws_iam_role.eks_cluster.arn
@@ -225,6 +242,13 @@ resource "aws_eks_cluster" "main" {
 
   enabled_cluster_log_types = ["api", "audit", "authenticator"]
 
+  encryption_config {
+    provider {
+      key_arn = aws_kms_key.eks_secrets.arn
+    }
+    resources = ["secrets"]
+  }
+
   access_config {
     authentication_mode = "API_AND_CONFIG_MAP"
   }
@@ -236,6 +260,21 @@ resource "aws_eks_cluster" "main" {
 
 # ─── Add-ons ──────────────────────────────────────────────────────────
 # Without the EBS CSI driver, app PVCs on this cluster never bind.
+# Versions are resolved explicitly (most recent for the cluster's Kubernetes
+# version) so they show up in state and plans instead of drifting behind
+# EKS defaults.
+
+locals {
+  eks_addons = toset(["aws-ebs-csi-driver", "vpc-cni", "kube-proxy", "coredns"])
+}
+
+data "aws_eks_addon_version" "this" {
+  for_each = local.eks_addons
+
+  addon_name         = each.key
+  kubernetes_version = aws_eks_cluster.main.version
+  most_recent        = true
+}
 
 data "aws_iam_policy_document" "ebs_csi_assume_role" {
   statement {
@@ -276,6 +315,7 @@ resource "aws_iam_role_policy_attachment" "ebs_csi" {
 resource "aws_eks_addon" "ebs_csi" {
   cluster_name                = aws_eks_cluster.main.name
   addon_name                  = "aws-ebs-csi-driver"
+  addon_version               = data.aws_eks_addon_version.this["aws-ebs-csi-driver"].version
   service_account_role_arn    = aws_iam_role.ebs_csi.arn
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
@@ -287,6 +327,7 @@ resource "aws_eks_addon" "ebs_csi" {
 resource "aws_eks_addon" "vpc_cni" {
   cluster_name                = aws_eks_cluster.main.name
   addon_name                  = "vpc-cni"
+  addon_version               = data.aws_eks_addon_version.this["vpc-cni"].version
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
   tags                        = local.tags
@@ -295,6 +336,7 @@ resource "aws_eks_addon" "vpc_cni" {
 resource "aws_eks_addon" "kube_proxy" {
   cluster_name                = aws_eks_cluster.main.name
   addon_name                  = "kube-proxy"
+  addon_version               = data.aws_eks_addon_version.this["kube-proxy"].version
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
   tags                        = local.tags
@@ -303,6 +345,7 @@ resource "aws_eks_addon" "kube_proxy" {
 resource "aws_eks_addon" "coredns" {
   cluster_name                = aws_eks_cluster.main.name
   addon_name                  = "coredns"
+  addon_version               = data.aws_eks_addon_version.this["coredns"].version
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
   tags                        = local.tags
@@ -371,7 +414,18 @@ resource "aws_eks_node_group" "main" {
     max_unavailable = 1
   }
 
-  tags = local.tags
+  # Without the auto-discovery tags cluster-autoscaler never finds this group,
+  # which left node_max_count inert — the group stayed at desired_size forever.
+  tags = merge(local.tags, {
+    "k8s.io/cluster-autoscaler/enabled"           = "true"
+    "k8s.io/cluster-autoscaler/${var.prefix}-eks" = "owned"
+  })
+
+  lifecycle {
+    # desired_size is owned by cluster-autoscaler once it is running; without
+    # this, every plan drags the group back to var.node_count.
+    ignore_changes = [scaling_config[0].desired_size]
+  }
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_worker_node_policy,
@@ -438,4 +492,67 @@ resource "aws_iam_role_policy" "external_dns_route53" {
   name_prefix = "${var.prefix}-external-dns-route53-"
   role        = aws_iam_role.external_dns_irsa.id
   policy      = data.aws_iam_policy_document.external_dns_route53.json
+}
+
+# ─── cert-manager DNS-01 IRSA ────────────────────────────────────────
+# cert-manager's DNS-01 solver writes TXT records into the same zone. Without
+# this role no wildcard certificate can ever be issued (Let's Encrypt requires
+# DNS-01 for wildcards), which the apps listener needs.
+
+data "aws_iam_policy_document" "cert_manager_assume_role" {
+  statement {
+    effect = "Allow"
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.eks.arn]
+    }
+
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:sub"
+      values   = ["system:serviceaccount:cert-manager:cert-manager"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "cert_manager_irsa" {
+  name_prefix        = "${var.prefix}-cert-manager-irsa-"
+  assume_role_policy = data.aws_iam_policy_document.cert_manager_assume_role.json
+
+  tags = local.tags
+}
+
+data "aws_iam_policy_document" "cert_manager_route53" {
+  statement {
+    effect    = "Allow"
+    actions   = ["route53:GetChange"]
+    resources = ["arn:aws:route53:::change/*"]
+  }
+
+  statement {
+    effect    = "Allow"
+    actions   = ["route53:ChangeResourceRecordSets", "route53:ListResourceRecordSets"]
+    resources = ["arn:aws:route53:::hostedzone/${data.aws_route53_zone.main.zone_id}"]
+  }
+
+  statement {
+    effect    = "Allow"
+    actions   = ["route53:ListHostedZonesByName"]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "cert_manager_route53" {
+  name_prefix = "${var.prefix}-cert-manager-route53-"
+  role        = aws_iam_role.cert_manager_irsa.id
+  policy      = data.aws_iam_policy_document.cert_manager_route53.json
 }

@@ -41,6 +41,11 @@ module "cluster" {
   domain                  = var.domain
   dns_zone_resource_group = var.dns_zone_resource_group
 
+  # Entra ID — production requires an explicit App Role assignment before a
+  # user can sign in, so a tenant account is not automatically a platform
+  # account. Assign users/groups to devops-admins, developers or viewers.
+  entra_require_assignment = true
+
   enable_delete_lock = true
 
   # Retention
