@@ -16,7 +16,8 @@ set -euo pipefail
 #
 # What this script does:
 #   1. Generates CA and TLS certificates (local only)
-#   2. Sets up cluster prerequisites (Envoy Gateway is installed by deploy.sh)
+#   2. Sets up cluster prerequisites — free host ports, CI node label
+#      (Envoy Gateway itself is installed by deploy.sh)
 #   3. Deploys all DevOps components
 #   4. Waits for Vault, initializes, unseals, and configures it
 #   5. Waits for Keycloak and configures realm/clients
@@ -42,6 +43,11 @@ parse_env_arg "${FILTERED_ARGS[@]}"
 setup_paths
 parse_config
 use_env_kubeconfig
+# Repo convention: never touch a cluster without checking it is the right one.
+# This script runs *everything*, so getting the target wrong here initialises the
+# wrong cluster's Vault, rewrites the wrong Keycloak realm and cross-writes both
+# environments' key files.
+require_cluster_match
 
 # =============================================================================
 # Phase 1: Certificates (local only)
@@ -65,18 +71,32 @@ phase_certificates() {
 }
 
 # =============================================================================
-# Phase 2: Cluster Setup (Ingress Controller)
+# Phase 2: Cluster prerequisites
 # =============================================================================
+#
+# The detector used to look for an ingress-nginx Helm release. This platform
+# routes with Envoy Gateway and has no nginx-ingress at all, so the check could
+# never succeed and setup-cluster.sh re-ran on every single invocation.
+#
+# What setup-cluster.sh actually leaves behind (see its main()) is: on local,
+# Traefik removed — it holds ports 80/443 that Envoy Gateway needs — and every
+# node labelled role=ci. Both are undone by a Rancher Desktop restart, since k3s
+# reinstates Traefik from its packaged manifest, so this stays a checked step
+# rather than a one-off. On managed clouds the script only verifies access and
+# the storage class, which is cheap and idempotent, so it always runs.
 
 phase_cluster_setup() {
-    log_phase "2/8 - Cluster Setup (nginx-ingress)"
+    log_phase "2/8 - Cluster Prerequisites"
 
-    if helm list -n ingress-nginx 2>/dev/null | grep -q ingress-nginx; then
-        log_info "nginx-ingress already installed"
-    else
-        log_step "Running cluster setup..."
-        "${SCRIPT_DIR}/setup-cluster.sh" --env "${ENV}"
+    if [[ "$ENV" == "local" ]] \
+       && ! kubectl get svc traefik -n kube-system &>/dev/null \
+       && kubectl get nodes -l role=ci -o name 2>/dev/null | grep -q .; then
+        log_info "Cluster prerequisites already satisfied (no Traefik, role=ci labelled)"
+        return 0
     fi
+
+    log_step "Running cluster setup..."
+    "${SCRIPT_DIR}/setup-cluster.sh" --env "${ENV}"
 }
 
 # =============================================================================

@@ -26,6 +26,10 @@ if [[ ${#ARGS[@]} -gt 0 ]]; then set -- "${ARGS[@]}"; else set --; fi
 setup_paths
 parse_config
 use_env_kubeconfig
+# Repo convention: never touch a cluster without checking it is the right one.
+# Without this, `--env local` while a prod kubeconfig is active would rewrite the
+# prod realm's clients and cross-write oidc-secrets.env.
+require_cluster_match
 
 # Credentials from tofu (secrets.env) and manually-provided ones
 # (manual-secrets.env, e.g. the Google OAuth client). sync-tofu-outputs.sh writes
@@ -88,38 +92,117 @@ create_realm() {
     log_info "Realm ${REALM} created"
 }
 
-# Create OIDC client
+# Create (or read back) an OIDC client, printing its secret on stdout.
+#
+# Hardening, applied to new clients and retrofitted onto existing ones:
+#   - webOrigins "+" derives the CORS allow-list from the registered redirect
+#     URIs. "*" put a wildcard on the token endpoint, so any origin could read
+#     token responses.
+#   - directAccessGrantsEnabled=false turns off the ROPC password grant, which
+#     trades a username/password straight for tokens, bypassing the browser
+#     flow and any MFA the upstream IdP enforces — and the local break-glass
+#     accounts have passwords. Nothing in this repo uses ROPC: the e2e suite and
+#     mint-woodpecker-token.sh both drive the browser SSO flow.
+#   - post.logout.redirect.uris "+" means "the registered redirect URIs";
+#     "*" made every client an open redirect.
+#
+# None of these clients needs CORS at all: every one of them exchanges the code
+# server-side (Grafana, Forgejo, Vault, argocd-server, or Envoy Gateway acting
+# for Homepage/Portal/Headlamp/apps). Note that Keycloak's "+" skips redirect
+# URIs containing a wildcard, so the shared `apps` client — whose redirect is
+# https://*.<domain>/oauth2/callback — resolves to no web origins at all. That
+# is correct for it: the gateway, not a browser script, calls the token endpoint.
+CLIENT_HARDENING=(
+    -s standardFlowEnabled=true
+    -s directAccessGrantsEnabled=false
+    -s serviceAccountsEnabled=false
+    -s 'webOrigins=["+"]'
+    -s 'attributes={"post.logout.redirect.uris":"+"}'
+)
+
 create_client() {
     local client_id="$1"
     local redirect_uri="$2"
     local public="${3:-false}"
 
-    local existing=$(kcadm get clients -r ${REALM} --fields id,clientId 2>/dev/null | grep "\"clientId\" : \"${client_id}\"" -B 1 | grep "\"id\"" | cut -d'"' -f4 || echo "")
+    local existing client_secret
+    existing="$(kcadm get clients -r ${REALM} --fields id,clientId 2>/dev/null | grep "\"clientId\" : \"${client_id}\"" -B 1 | grep "\"id\"" | cut -d'"' -f4 || echo "")"
 
     if [[ -n "$existing" ]]; then
-        local client_secret=$(kcadm get clients/${existing}/client-secret -r ${REALM} 2>/dev/null | grep "value" | cut -d'"' -f4 || echo "")
+        # A client created by an older run still carries webOrigins=*, ROPC and
+        # the post-logout wildcard. Re-applying the hardened flags is idempotent
+        # and the only way those clients ever get fixed; tolerate failure so a
+        # re-run is never fatal.
+        #
+        # attributes is merged with jq rather than passed as a literal object:
+        # kcadm's `-s attributes={...}` replaces the whole map, which would drop
+        # the defaults Keycloak wrote at creation (backchannel-logout flags,
+        # secret creation time, device-grant switch, …).
+        local -a harden=(
+            -s standardFlowEnabled=true
+            -s directAccessGrantsEnabled=false
+            -s serviceAccountsEnabled=false
+            -s 'webOrigins=["+"]'
+        )
+        local attrs
+        attrs="$(kcadm get "clients/${existing}" -r ${REALM} 2>/dev/null \
+            | jq -c '(.attributes // {}) + {"post.logout.redirect.uris":"+"}' 2>/dev/null || true)"
+        [[ -n "$attrs" ]] && harden+=(-s "attributes=${attrs}")
+
+        kcadm update "clients/${existing}" -r ${REALM} "${harden[@]}" >&2 \
+            || log_warn "Could not re-apply the hardened settings to client ${client_id}"
+
+        client_secret="$(kcadm get clients/${existing}/client-secret -r ${REALM} 2>/dev/null | grep "value" | cut -d'"' -f4 || echo "")"
         if [[ -n "$client_secret" ]]; then
             echo "${client_secret}"
             return 0
         fi
+        log_error "Client ${client_id} exists but its secret could not be read"
+        return 1
     fi
 
-    local client_secret=$(openssl rand -hex 32)
+    client_secret="$(openssl rand -hex 32)"
 
-    kcadm create clients -r ${REALM} \
+    if ! kcadm create clients -r ${REALM} \
         -s clientId=${client_id} \
         -s enabled=true \
         -s protocol=openid-connect \
         -s publicClient=${public} \
-        -s standardFlowEnabled=true \
-        -s directAccessGrantsEnabled=true \
-        -s serviceAccountsEnabled=false \
+        "${CLIENT_HARDENING[@]}" \
         -s "redirectUris=[\"${redirect_uri}\"]" \
-        -s 'webOrigins=["*"]' \
-        -s secret="${client_secret}" \
-        -s 'attributes={"post.logout.redirect.uris":"*"}' >&2
+        -s secret="${client_secret}" >&2; then
+        log_error "kcadm create failed for the OIDC client '${client_id}'"
+        return 1
+    fi
 
     echo "${client_secret}"
+}
+
+# require_client_secret <var-name> <client-id> <redirect-uri> [public]
+#
+# `local x=$(create_client ...)` swallows the command's exit status, so a failed
+# kcadm create used to leave x empty and the run then wrote client-secret="" into
+# a Kubernetes secret and into oidc-secrets.env: SSO for that service silently
+# broken while the script reported success. Check the status *and* the value.
+require_client_secret() {
+    local _rcs_var="$1" _rcs_id="$2" _rcs_uri="$3" _rcs_public="${4:-false}"
+    local _rcs_value _rcs_rc=0
+
+    _rcs_value="$(create_client "$_rcs_id" "$_rcs_uri" "$_rcs_public")" || _rcs_rc=$?
+    if [[ $_rcs_rc -ne 0 ]]; then
+        log_error "Could not configure the OIDC client '${_rcs_id}' (exit ${_rcs_rc})"
+        log_error "Nothing was written — re-run once Keycloak is healthy:"
+        log_error "  ./devhub keycloak --env ${ENV} clients"
+        exit 1
+    fi
+    # An opaque Keycloak secret is a long single token. Anything shorter, or
+    # containing whitespace, is an error message that leaked through a pipeline.
+    if [[ ${#_rcs_value} -lt 20 || "$_rcs_value" == *[[:space:]]* ]]; then
+        log_error "Implausible client secret for '${_rcs_id}' (${#_rcs_value} chars) — refusing to store it"
+        exit 1
+    fi
+
+    printf -v "$_rcs_var" '%s' "$_rcs_value"
 }
 
 # Create groups
@@ -304,6 +387,18 @@ EOF
     fi
 }
 
+# Password for a local realm account.
+#
+# Charset is hex plus one leading uppercase letter: CLAUDE.md notes that
+# kcadm-via-kubectl-exec breaks on `!`, `@` and `$`, and openssl's base64 output
+# can carry `+`, `/` and `=`, so hex is the safe alphabet. 24 bytes is 96 bits;
+# the previous "Admin$(openssl rand -hex 4)" was 32 bits — brute-forceable — on
+# an account that is simultaneously realm admin, ArgoCD admin, Forgejo admin and
+# Vault platform-admin. The leading letter satisfies mixed-case realm policies.
+gen_local_password() {
+    printf 'D%s' "$(openssl rand -hex 24)"
+}
+
 # Create admin user
 create_admin_user() {
     log_step "Creating admin users..."
@@ -341,7 +436,15 @@ create_admin_user() {
         echo "DEVOPS_ADMIN_PASSWORD=${temp_password}" >> "${secrets_file}"
     fi
 
-    # Create platform-admin (permanent password for testing/admin access)
+    # Create platform-admin — BREAK-GLASS account.
+    #
+    # A local realm user with a permanent password, in devops-admins, which maps
+    # to ArgoCD admin, Forgejo admin, Vault platform-admin and Keycloak
+    # realm-admin. It bypasses IdP federation entirely, so no upstream
+    # conditional access or MFA applies to it. It exists because the automated
+    # setup (validate-e2e, mint-woodpecker-token) needs a password login and
+    # because federation can break. On a federated environment, disable it once
+    # real admins can sign in through the IdP.
     if kcadm get users -r ${REALM} -q username=platform-admin 2>/dev/null | grep -q '"username"' || \
        kcadm get users -r ${REALM} -q email=platform-admin@${DOMAIN} 2>/dev/null | grep -q '"email"'; then
         if grep -q '^PLATFORM_ADMIN_PASSWORD=' "${secrets_file}" 2>/dev/null; then
@@ -351,13 +454,15 @@ create_admin_user() {
             # regenerated). Keycloak cannot read a password back, so reset it
             # and store the new one — same end state as a fresh create.
             local user_id=$(kcadm get users -r ${REALM} -q username=platform-admin 2>/dev/null | grep '"id"' | head -1 | cut -d'"' -f4)
-            local admin_password="Admin$(openssl rand -hex 4)"
+            local admin_password
+            admin_password="$(gen_local_password)"
             kcadm set-password -r ${REALM} --userid "${user_id}" --new-password "${admin_password}"
             echo "PLATFORM_ADMIN_PASSWORD=${admin_password}" >> "${secrets_file}"
             log_info "User platform-admin existed with no stored password — password reset and stored"
         fi
     else
-        local admin_password="Admin$(openssl rand -hex 4)"
+        local admin_password
+        admin_password="$(gen_local_password)"
 
         kcadm create users -r ${REALM} \
             -s username=platform-admin \
@@ -381,9 +486,12 @@ create_admin_user() {
             kcadm update users/${user_id}/groups/${group_id} -r ${REALM} -s userId=${user_id} -s groupId=${group_id} -n
         fi
 
-        log_info "User created: platform-admin"
-        log_info "Username: platform-admin"
-        log_info "Password: ${admin_password}"
+        log_info "User created: platform-admin (break-glass — bypasses IdP federation)"
+        # Never printed: quickstart tees every step's output to
+        # _setup/<env>/logs/*.log, so printing it would put the credential in a
+        # second file, in shell scrollback and on any shared screen.
+        log_info "Password stored in ${secrets_file}; read it with:"
+        log_info "  grep PLATFORM_ADMIN_PASSWORD ${secrets_file}"
         echo "PLATFORM_ADMIN_PASSWORD=${admin_password}" >> "${secrets_file}"
     fi
 }
@@ -408,8 +516,9 @@ configure_clients() {
 
     # Grafana
     log_info "Configuring Grafana OIDC client..."
-    local grafana_secret=$(create_client "grafana" \
-        "https://grafana.${DOMAIN}/login/generic_oauth")
+    local grafana_secret
+    require_client_secret grafana_secret "grafana" \
+        "https://grafana.${DOMAIN}/login/generic_oauth"
     echo "GRAFANA_OIDC_SECRET=${grafana_secret}" >> "${secrets_file}"
 
     kubectl create secret generic grafana-oidc-secret -n monitoring \
@@ -418,8 +527,9 @@ configure_clients() {
 
     # ArgoCD
     log_info "Configuring ArgoCD OIDC client..."
-    local argocd_secret=$(create_client "argocd" \
-        "https://argocd.${DOMAIN}/auth/callback")
+    local argocd_secret
+    require_client_secret argocd_secret "argocd" \
+        "https://argocd.${DOMAIN}/auth/callback"
     echo "ARGOCD_OIDC_SECRET=${argocd_secret}" >> "${secrets_file}"
 
     if kubectl get secret argocd-secret -n argocd >/dev/null 2>&1; then
@@ -434,8 +544,9 @@ configure_clients() {
 
     # Forgejo
     log_info "Configuring Forgejo OIDC client..."
-    local forgejo_secret=$(create_client "forgejo" \
-        "https://git.${DOMAIN}/user/oauth2/keycloak/callback")
+    local forgejo_secret
+    require_client_secret forgejo_secret "forgejo" \
+        "https://git.${DOMAIN}/user/oauth2/keycloak/callback"
     echo "FORGEJO_OIDC_SECRET=${forgejo_secret}" >> "${secrets_file}"
 
     kubectl create secret generic forgejo-oidc-secret -n forgejo \
@@ -447,8 +558,9 @@ configure_clients() {
 
     # Vault
     log_info "Configuring Vault OIDC client..."
-    local vault_secret=$(create_client "vault" \
-        "https://vault.${DOMAIN}/ui/vault/auth/oidc/oidc/callback")
+    local vault_secret
+    require_client_secret vault_secret "vault" \
+        "https://vault.${DOMAIN}/ui/vault/auth/oidc/oidc/callback"
     echo "VAULT_OIDC_SECRET=${vault_secret}" >> "${secrets_file}"
 
     kubectl create secret generic vault-oidc-secret -n vault \
@@ -462,8 +574,9 @@ configure_clients() {
     # its behalf (k8s/base/devops/headlamp/oidc-securitypolicy.yaml). Headlamp
     # itself does no OIDC — managed API servers reject tokens from a custom
     # issuer, so it talks to the API as its read-only ServiceAccount instead.
-    local headlamp_secret=$(create_client "headlamp" \
-        "https://headlamp.${DOMAIN}/oauth2/callback")
+    local headlamp_secret
+    require_client_secret headlamp_secret "headlamp" \
+        "https://headlamp.${DOMAIN}/oauth2/callback"
     echo "HEADLAMP_OIDC_SECRET=${headlamp_secret}" >> "${secrets_file}"
 
     kubectl create secret generic headlamp-oidc-secret -n headlamp \
@@ -477,8 +590,9 @@ configure_clients() {
     # callback path as the redirect URI, and a secret holding only the client
     # secret under the key Envoy Gateway expects.
     log_info "Configuring Homepage OIDC client..."
-    local homepage_secret=$(create_client "homepage" \
-        "https://home.${DOMAIN}/oauth2/callback")
+    local homepage_secret
+    require_client_secret homepage_secret "homepage" \
+        "https://home.${DOMAIN}/oauth2/callback"
     echo "HOMEPAGE_OIDC_SECRET=${homepage_secret}" >> "${secrets_file}"
 
     kubectl create secret generic homepage-oidc-secret -n homepage \
@@ -488,8 +602,9 @@ configure_clients() {
     # Portal — same shape as Homepage: Envoy Gateway is the OIDC client on its
     # behalf (k8s/base/devops/portal/oidc-securitypolicy.yaml).
     log_info "Configuring Portal OIDC client..."
-    local portal_secret=$(create_client "portal" \
-        "https://portal.${DOMAIN}/oauth2/callback")
+    local portal_secret
+    require_client_secret portal_secret "portal" \
+        "https://portal.${DOMAIN}/oauth2/callback"
     echo "PORTAL_OIDC_SECRET=${portal_secret}" >> "${secrets_file}"
 
     # Shared confidential client for developer applications: the devhub-app
@@ -498,8 +613,9 @@ configure_clients() {
     # scaffolded hostname is always exactly <app>.<domain>. The secret reaches
     # app namespaces from Vault (secret/apps/oidc-gateway, seeded by
     # setup-vault.sh seed-secrets) via External Secrets.
-    local apps_secret=$(create_client "apps" \
-        "https://*.${DOMAIN}/oauth2/callback")
+    local apps_secret
+    require_client_secret apps_secret "apps" \
+        "https://*.${DOMAIN}/oauth2/callback"
     echo "APPS_OIDC_SECRET=${apps_secret}" >> "${secrets_file}"
 
     kubectl create namespace portal 2>/dev/null || true
@@ -601,34 +717,47 @@ configure_entra_idp() {
         fi
     fi
 
-    # Idempotent: the instance is skipped when present, but the mappers below
-    # are still ensured — a run that died between instance and mappers used to
-    # leave the IdP half-configured forever.
-    if kcadm get identity-provider/instances/entra -r ${REALM} >/dev/null 2>&1; then
-        log_warn "Entra ID identity provider already exists — ensuring its mappers"
-    else
-    # Create the OIDC identity provider pointing to Entra ID v2.0 endpoints
-    kcadm create identity-provider/instances -r ${REALM} \
-        -s alias=entra \
-        -s displayName="Microsoft Entra ID" \
-        -s providerId=oidc \
-        -s enabled=true \
-        -s trustEmail=true \
-        -s storeToken=false \
-        -s "firstBrokerLoginFlowAlias=first broker login" \
-        -s "config.useJwksUrl=true" \
-        -s "config.validateSignature=true" \
-        -s "config.pkceEnabled=false" \
-        -s "config.clientAuthMethod=client_secret_post" \
-        -s "config.defaultScope=openid profile email" \
-        -s "config.authorizationUrl=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/authorize" \
-        -s "config.tokenUrl=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/token" \
-        -s "config.jwksUrl=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/discovery/v2.0/keys" \
-        -s "config.issuer=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0" \
-        -s "config.clientId=${ENTRA_KEYCLOAK_CLIENT_ID}" \
+    # Every setting this script owns, in one list, so create and update apply
+    # exactly the same configuration.
+    #
+    # The update path matters: tofu keeps the App Registration's client secret on
+    # a 2-year time_rotating schedule, so it *will* change. The instance still
+    # exists after a rotation, and the previous skip-if-exists left the stale
+    # config.clientSecret in place — every federated login then failed with
+    # invalid_client and re-running this script did nothing about it. kcadm
+    # update does a GET, merges the -s settings and PUTs, so nested config keys
+    # not listed here survive.
+    local -a entra_settings=(
+        -s displayName="Microsoft Entra ID"
+        -s providerId=oidc
+        -s enabled=true
+        -s trustEmail=true
+        -s storeToken=false
+        -s "firstBrokerLoginFlowAlias=first broker login"
+        -s "config.useJwksUrl=true"
+        -s "config.validateSignature=true"
+        -s "config.pkceEnabled=false"
+        -s "config.clientAuthMethod=client_secret_post"
+        -s "config.defaultScope=openid profile email"
+        -s "config.authorizationUrl=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/authorize"
+        -s "config.tokenUrl=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/token"
+        -s "config.jwksUrl=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/discovery/v2.0/keys"
+        -s "config.issuer=https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0"
+        -s "config.clientId=${ENTRA_KEYCLOAK_CLIENT_ID}"
         -s "config.clientSecret=${ENTRA_KEYCLOAK_CLIENT_SECRET}"
+    )
 
-    log_info "Entra ID identity provider created"
+    # Idempotent: an existing instance is re-configured rather than skipped, and
+    # the mappers below are ensured either way — a run that died between instance
+    # and mappers used to leave the IdP half-configured forever.
+    if kcadm get identity-provider/instances/entra -r ${REALM} >/dev/null 2>&1; then
+        log_info "Entra ID identity provider exists — re-applying its configuration"
+        kcadm update identity-provider/instances/entra -r ${REALM} "${entra_settings[@]}"
+        log_info "Entra ID configuration refreshed (client secret re-applied from secrets.env)"
+    else
+        kcadm create identity-provider/instances -r ${REALM} \
+            -s alias=entra "${entra_settings[@]}"
+        log_info "Entra ID identity provider created"
     fi
 
     # ensure_entra_mapper <name> <json-body>
@@ -703,34 +832,47 @@ configure_google_idp() {
         exit 1
     fi
 
-    # Skip if already configured
+    # One list for create and update, same as the Entra and Cognito sections.
+    # The Google OAuth client is created by hand (no Terraform resource exists),
+    # so its secret is rotated by hand too — and re-running this script has to be
+    # what picks the new value out of manual-secrets.env. Skipping an existing
+    # instance left the stale secret in place and every Google login then failed
+    # with invalid_client, with nothing in the script's output saying so.
+    local -a google_settings=(
+        -s displayName="Sign in with Google"
+        -s providerId=google
+        -s enabled=true
+        -s trustEmail=true
+        -s storeToken=false
+        -s "firstBrokerLoginFlowAlias=first broker login"
+        -s "config.clientId=${GOOGLE_IDP_CLIENT_ID}"
+        -s "config.clientSecret=${GOOGLE_IDP_CLIENT_SECRET}"
+        -s "config.defaultScope=openid profile email"
+    )
+
     if kcadm get identity-provider/instances/google -r ${REALM} >/dev/null 2>&1; then
-        log_warn "Google identity provider already configured — skipping"
-        return 0
+        log_info "Google identity provider exists — re-applying its configuration"
+        kcadm update identity-provider/instances/google -r ${REALM} "${google_settings[@]}"
+        log_info "Google configuration refreshed (client secret re-applied from manual-secrets.env)"
+    else
+        # Keycloak's built-in google provider type.
+        kcadm create identity-provider/instances -r ${REALM} \
+            -s alias=google "${google_settings[@]}"
+        log_info "Google identity provider created"
     fi
 
-    # Create the Google social IdP using Keycloak's built-in google provider type
-    kcadm create identity-provider/instances -r ${REALM} \
-        -s alias=google \
-        -s displayName="Sign in with Google" \
-        -s providerId=google \
-        -s enabled=true \
-        -s trustEmail=true \
-        -s storeToken=false \
-        -s "firstBrokerLoginFlowAlias=first broker login" \
-        -s "config.clientId=${GOOGLE_IDP_CLIENT_ID}" \
-        -s "config.clientSecret=${GOOGLE_IDP_CLIENT_SECRET}" \
-        -s "config.defaultScope=openid profile email"
-
-    log_info "Google identity provider created"
-
-    # Mapper: sync email claim → Keycloak user email attribute
-    kcadm create identity-provider/instances/google/mappers -r ${REALM} \
-        -s name="google-email" \
-        -s identityProviderMapper=oidc-user-attribute-idp-mapper \
-        -s 'config={"syncMode":"INHERIT","claim":"email","user.attribute":"email"}'
-
-    log_info "Email attribute mapper added"
+    # Mapper: sync email claim → Keycloak user email attribute. Checked by name,
+    # like the other two IdPs: Keycloak answers 409 on a duplicate and set -e
+    # then killed the run half-way through.
+    if kcadm get identity-provider/instances/google/mappers -r ${REALM} --fields name 2>/dev/null \
+            | grep -q '"name" : "google-email"'; then
+        log_info "Mapper google-email already exists"
+    else
+        printf '%s' \
+            '{"name":"google-email","identityProviderAlias":"google","identityProviderMapper":"oidc-user-attribute-idp-mapper","config":{"syncMode":"INHERIT","claim":"email","user.attribute":"email"}}' \
+            | kcadm_stdin create identity-provider/instances/google/mappers -r ${REALM} -f -
+        log_info "Email attribute mapper added"
+    fi
     log_info ""
     log_info "IMPORTANT: Google tokens do not include group/role claims."
     log_info "  After users sign in for the first time, assign them to Keycloak groups manually:"
@@ -783,51 +925,82 @@ configure_cognito_idp() {
         log_warn "  ${redirect_uri}"
     fi
 
-    # Skip if already configured
+    # One list for create and update, same as the Entra section: re-running has
+    # to re-apply config.clientSecret. Recreating the Cognito app client (or
+    # rotating its secret) leaves the Keycloak instance in place, and a stale
+    # secret there fails every federated login with invalid_client while the
+    # script reports success.
+    local -a cognito_settings=(
+        -s displayName="Sign in with AWS (Cognito)"
+        -s providerId=oidc
+        -s enabled=true
+        -s trustEmail=true
+        -s storeToken=false
+        -s "firstBrokerLoginFlowAlias=first broker login"
+        -s "config.useJwksUrl=true"
+        -s "config.validateSignature=true"
+        -s "config.pkceEnabled=false"
+        -s "config.clientAuthMethod=client_secret_post"
+        -s "config.defaultScope=openid profile email"
+        -s "config.authorizationUrl=https://${COGNITO_HOSTED_UI_DOMAIN}/oauth2/authorize"
+        -s "config.tokenUrl=https://${COGNITO_HOSTED_UI_DOMAIN}/oauth2/token"
+        -s "config.jwksUrl=${COGNITO_ISSUER_URL}/.well-known/jwks.json"
+        -s "config.issuer=${COGNITO_ISSUER_URL}"
+        -s "config.clientId=${COGNITO_CLIENT_ID}"
+        -s "config.clientSecret=${COGNITO_CLIENT_SECRET}"
+    )
+
+    # Idempotent, like the Entra section: an existing instance is re-configured
+    # rather than skipped, and the mappers below are ensured either way.
+    # Returning early here meant a run that died between the instance and the
+    # mappers left the IdP permanently half-configured — which is exactly what
+    # the broken group mappers below used to cause.
     if kcadm get identity-provider/instances/aws-cognito -r ${REALM} >/dev/null 2>&1; then
-        log_warn "Cognito identity provider already configured — skipping"
-        return 0
+        log_info "Cognito identity provider exists — re-applying its configuration"
+        kcadm update identity-provider/instances/aws-cognito -r ${REALM} "${cognito_settings[@]}"
+        log_info "Cognito configuration refreshed (client secret re-applied from secrets.env)"
+    else
+        kcadm create identity-provider/instances -r ${REALM} \
+            -s alias=aws-cognito "${cognito_settings[@]}"
+        log_info "Cognito identity provider created"
     fi
 
-    # Create the OIDC identity provider pointing to Cognito's OIDC endpoints
-    kcadm create identity-provider/instances -r ${REALM} \
-        -s alias=aws-cognito \
-        -s displayName="Sign in with AWS (Cognito)" \
-        -s providerId=oidc \
-        -s enabled=true \
-        -s trustEmail=true \
-        -s storeToken=false \
-        -s "firstBrokerLoginFlowAlias=first broker login" \
-        -s "config.useJwksUrl=true" \
-        -s "config.validateSignature=true" \
-        -s "config.pkceEnabled=false" \
-        -s "config.clientAuthMethod=client_secret_post" \
-        -s "config.defaultScope=openid profile email" \
-        -s "config.authorizationUrl=https://${COGNITO_HOSTED_UI_DOMAIN}/oauth2/authorize" \
-        -s "config.tokenUrl=https://${COGNITO_HOSTED_UI_DOMAIN}/oauth2/token" \
-        -s "config.jwksUrl=${COGNITO_ISSUER_URL}/.well-known/jwks.json" \
-        -s "config.issuer=${COGNITO_ISSUER_URL}" \
-        -s "config.clientId=${COGNITO_CLIENT_ID}" \
-        -s "config.clientSecret=${COGNITO_CLIENT_SECRET}"
-
-    log_info "Cognito identity provider created"
+    # ensure_cognito_mapper <name> <json-body> — the Entra pattern, for the same
+    # two reasons: Keycloak answers 409 on a duplicate mapper name, which under
+    # set -e killed the run half-way and left the IdP without group mappers; and
+    # kcadm's `-s key=value` syntax cannot express a config value that is itself
+    # JSON (the advanced group mapper's "claims") — it answers "Cannot parse the
+    # JSON". The body goes in over stdin instead.
+    ensure_cognito_mapper() {
+        local name="$1" body="$2"
+        if kcadm get identity-provider/instances/aws-cognito/mappers -r ${REALM} --fields name 2>/dev/null \
+                | grep -q "\"name\" : \"${name}\""; then
+            log_info "Mapper ${name} already exists"
+            return 0
+        fi
+        printf '%s' "$body" | kcadm_stdin create identity-provider/instances/aws-cognito/mappers -r ${REALM} -f -
+    }
 
     # Mapper: sync email claim → Keycloak user email attribute
-    kcadm create identity-provider/instances/aws-cognito/mappers -r ${REALM} \
-        -s name="cognito-email" \
-        -s identityProviderMapper=oidc-user-attribute-idp-mapper \
-        -s 'config={"syncMode":"INHERIT","claim":"email","user.attribute":"email"}'
+    ensure_cognito_mapper "cognito-email" \
+        '{"name":"cognito-email","identityProviderAlias":"aws-cognito","identityProviderMapper":"oidc-user-attribute-idp-mapper","config":{"syncMode":"INHERIT","claim":"email","user.attribute":"email"}}'
 
-    # Mappers: map Cognito groups → Keycloak groups (requires Keycloak 25+)
-    # Cognito includes a `cognito:groups` array claim in the ID token when users are in groups.
-    # Assign Cognito users to groups (devops-admins, developers, viewers) in the AWS console:
+    # Mappers: Cognito group → Keycloak group, through the Advanced Claim to
+    # Group mapper (oidc-advanced-group-idp-mapper). That is the only stock group
+    # mapper that matches a claim value: "oidc-group-idp-mapper" does not exist,
+    # and a mapper row with an unknown type NPEs *every* federated login — the
+    # same trap documented in the Entra section above. The old call also passed
+    # the config as a bare `-s "{...}"`, which is not valid kcadm syntax, so
+    # under set -e it either aborted the run or poisoned Cognito logins.
+    #
+    # Cognito puts a `cognito:groups` array claim in the ID token when users are
+    # in groups. Assign them in the AWS console:
     #   Amazon Cognito → User pools → <pool> → Users → <user> → Add user to group
     # syncMode=FORCE re-evaluates group membership on every login.
-    for group in "devops-admins" "developers" "viewers"; do
-        kcadm create identity-provider/instances/aws-cognito/mappers -r ${REALM} \
-            -s "name=cognito-group-${group}" \
-            -s identityProviderMapper=oidc-group-idp-mapper \
-            -s "{\"config\":{\"syncMode\":\"FORCE\",\"claim\":\"cognito:groups\",\"claim.value\":\"${group}\",\"group\":\"/${group}\"}}"
+    local cognito_group
+    for cognito_group in "devops-admins" "developers" "viewers"; do
+        ensure_cognito_mapper "cognito-group-${cognito_group}" \
+            "{\"name\":\"cognito-group-${cognito_group}\",\"identityProviderAlias\":\"aws-cognito\",\"identityProviderMapper\":\"oidc-advanced-group-idp-mapper\",\"config\":{\"syncMode\":\"FORCE\",\"claims\":\"[{\\\"key\\\":\\\"cognito:groups\\\",\\\"value\\\":\\\"${cognito_group}\\\"}]\",\"are.claim.values.regex\":\"false\",\"group\":\"/${cognito_group}\"}}"
     done
 
     log_info "Group mappers added: Cognito group → Keycloak group (devops-admins, developers, viewers)"
@@ -854,7 +1027,8 @@ print_summary() {
     echo "  ${SCRIPT_ENV_DIR}/oidc-secrets.env"
     echo ""
     echo "Realm Users:"
-    echo "  - platform-admin (permanent password, full admin access)"
+    echo "  - platform-admin  BREAK-GLASS: permanent password, full admin, no IdP/MFA"
+    echo "                    grep PLATFORM_ADMIN_PASSWORD ${SCRIPT_ENV_DIR}/oidc-secrets.env"
     echo "  - devops-admin (temporary password, must change on first login)"
     echo ""
     echo "Services configured with SSO:"

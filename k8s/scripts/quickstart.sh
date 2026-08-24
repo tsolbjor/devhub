@@ -252,12 +252,15 @@ det_synced() {
     grep -qE '^PG_HOST=.+' "${ENV_DIR}/tofu-outputs.env"
 }
 det_reachable()  { kc get --raw /readyz >/dev/null; }
-# The marker configmap is what create_db_users leaves behind on success; the
-# previously checked keycloak-db-secret is created by a *later* deploy step,
-# so this step never detected as complete right after it ran.
+# The marker ConfigMap is what create_db_users leaves behind on success, and it
+# is the only authoritative signal. The old fallback on keycloak-db-secret was
+# wrong in both directions: that Secret is created by a *later* deploy step, so
+# the step failed to detect right after it ran, and an out-of-order run (deploy
+# before db-users) marked db-users complete while the database users did not
+# exist — Keycloak then failed to authenticate with a password that was never
+# created.
 det_dbusers()    { [[ "$CLOUD" == "local" || "$CLOUD" == "upcloud" ]] \
-                   || kc get configmap devhub-db-users-created -n data-services >/dev/null \
-                   || kc get secret keycloak-db-secret -n keycloak >/dev/null; }
+                   || kc get configmap devhub-db-users-created -n data-services >/dev/null; }
 det_certs()      { [[ "$ENV" != "local" ]] || [[ -f "${REPO_ROOT}/k8s/certs/domains/local-dev.crt" ]]; }
 # "Deployed" has to mean the components later steps depend on are present, not just
 # that something got installed. Checking only argocd-server let a half-finished
@@ -441,7 +444,7 @@ print_login_hint() {
 
     echo ""
     echo -e "  ${BOLD}Sign in as:${NC} platform-admin   (realm 'devops' — SSO for every service)"
-    echo "              grep PLATFORM_ADMIN_PASSWORD k8s/scripts/${ENV}/oidc-secrets.env"
+    echo "              grep PLATFORM_ADMIN_PASSWORD ${secrets}"
     echo "              Keycloak's own admin console is a separate account:"
     echo "              kubectl get secret keycloak-admin-secret -n keycloak \\"
     echo "                -o jsonpath='{.data.password}' | base64 -d"
@@ -546,9 +549,17 @@ run_step() {
     # Every step's full output also lands in _setup/<env>/logs/, so what
     # scrolled past during a long run can still be read afterwards.
     # (pipefail is set, so tee does not mask the step's exit code.)
+    #
+    # Tightened permissions because these files capture *everything* a step
+    # printed: connection strings, ARNs, tofu plan output, and whatever a script
+    # echoes on its way to an error. 700/600 matches the rest of _setup/<env>/.
     local logdir="${ENV_DIR}/logs" logfile
     mkdir -p "$logdir"
+    # ENV_DIR may be created here as $logdir's parent, so tighten both.
+    chmod 700 "$ENV_DIR" "$logdir"
     logfile="${logdir}/$(date +%Y%m%d-%H%M%S)-${key}.log"
+    # Created with the right mode before tee ever opens it.
+    (umask 077; : > "$logfile")
 
     # preflight interviews the operator (confirmations no command can check);
     # in unattended mode answer for them, as --auto promises.

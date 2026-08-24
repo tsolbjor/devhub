@@ -37,6 +37,14 @@ k8s/scripts/*/
 !k8s/scripts/lib/
 !k8s/scripts/windows/
 
+# setup-ca.sh's generated manifests. They now go to _setup/<env>/, but an older
+# run wrote them into the committed overlay — and tls-secret.yaml carries the
+# base64 TLS *private key*, so a `git add -A` in such a checkout published it.
+# Ignored here so that cannot happen again. Already-tracked copies need
+# `git rm --cached` as well; an ignore rule does not untrack a file.
+k8s/overlays/*/tls-secret.yaml
+k8s/overlays/*/ca-configmap.yaml
+
 # End-to-end suite: the runner, its browsers and everything a run produces.
 # The saved storage state is a live signed-in session, so it is a credential.
 k8s/e2e/node_modules/
