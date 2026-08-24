@@ -134,7 +134,7 @@ kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath='{.data.pas
 kubectl get secret forgejo-forgejo-initial-root-password -n forgejo -o jsonpath='{.data.password}' | base64 -d
 ```
 
-Keycloak-generated OIDC secrets are written to `k8s/scripts/local/oidc-secrets.env`.
+Keycloak-generated OIDC secrets are written to `_setup/local/oidc-secrets.env`.
 
 ## Troubleshooting
 

@@ -23,7 +23,11 @@ set -euo pipefail
 #     IDs — account-specific, not secret — and without them the next operator
 #     cannot run `tofu init` at all.
 #   - renovate.json ships, so chart pins keep moving after the link is cut. An
-#     environment frozen at its birth date rots quietly.
+#     environment frozen at its birth date rots quietly. A generated
+#     platform-config Application is what makes those bumps *take effect*, and a
+#     generated .woodpecker.yml is what checks them before they do — without
+#     either, Renovate in a published repo is decoration.
+#   - k8s/e2e/ ships, because validate-e2e.sh does and is useless without it.
 #   - Installer-only scripts (quickstart, setup-env, preflight, this one) do not
 #     ship. They set an environment up; they have no meaning inside one.
 #
@@ -44,10 +48,36 @@ source "${SCRIPT_DIR}/lib/common.sh"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # Global because the EXIT trap that removes it outlives the function that sets
-# it. The staged tree holds a Forgejo push URL with a token in .git/config, so
-# removing it is not optional tidiness.
+# it. Credentials never touch the staged tree (the push authenticates with an
+# HTTP header, not a URL), but the tree still names every hostname, bucket and
+# CIDR the environment uses — remove it either way.
 STAGING=""
 cleanup_staging() { [[ -n "$STAGING" ]] && rm -rf "$STAGING"; }
+
+# The publish token is admin-scoped and minted per run; leaving it valid after
+# the run is a standing credential nobody tracks. Revoked from the EXIT trap so
+# an aborted run cleans up too. Uses basic auth (Forgejo's token endpoints
+# refuse token auth), fed to curl over stdin so the password never appears in
+# an argv.
+ADMIN_TOKEN_NAME=""
+revoke_publish_token() {
+    [[ -n "$ADMIN_TOKEN_NAME" && -n "$FORGEJO_POD" && -n "$FORGEJO_USER" ]] || return 0
+    local pass
+    pass="$(kubectl get secret forgejo-admin-secret -n forgejo \
+        -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+    [[ -n "$pass" ]] || return 0
+    if kubectl exec -i -n forgejo "$FORGEJO_POD" -- curl -sS -o /dev/null -f -K - \
+        -X DELETE "http://localhost:3000/api/v1/users/${FORGEJO_USER}/tokens/${ADMIN_TOKEN_NAME}" \
+        <<< "user = \"${FORGEJO_USER}:${pass}\"" 2>/dev/null; then
+        log_info "Publish token revoked (${ADMIN_TOKEN_NAME})"
+    else
+        log_warn "Could not revoke the publish token ${ADMIN_TOKEN_NAME} —"
+        log_warn "delete it in Forgejo: Settings → Applications → Access tokens"
+    fi
+    ADMIN_TOKEN_NAME=""
+}
+
+cleanup() { revoke_publish_token; cleanup_staging; }
 
 parse_env_arg "$@"
 if [[ ${#ARGS[@]} -gt 0 ]]; then set -- "${ARGS[@]}"; else set --; fi
@@ -91,11 +121,19 @@ SHIPPED_DIRS=(
 )
 
 # Individual files.
+#
+# CLOUD_CAPABILITIES.md ships because OPERATIONS.md links to it for the gaps an
+# operator has to live with (Forgejo on a volume, UpCloud's manual unseal, the
+# opt-in cache); ADDONS.md because enabling an add-on is a day-two action, and
+# the retrofit it documents is for exactly this kind of handed-over environment.
+# k8s/e2e/README.md rides along inside the e2e directory.
 SHIPPED_FILES=(
     "renovate.json"
     "k8s/docs/OPERATIONS.md"
     "k8s/docs/KEYCLOAK_SSO.md"
     "k8s/docs/SSO_TESTING_GUIDE.md"
+    "k8s/docs/CLOUD_CAPABILITIES.md"
+    "k8s/docs/ADDONS.md"
 )
 
 # Scripts that set an environment up rather than operate one. They stay behind.
@@ -145,6 +183,25 @@ stage_repo() {
         cp "${REPO_ROOT}/${f}" "${dest}/${f}"
     done
 
+    # The end-to-end suite. validate-e2e.sh ships as one of the operating
+    # scripts below, and without k8s/e2e/ it has nothing to run: `./devhub
+    # validate --e2e` in a published environment failed on a missing
+    # playwright.config.js, which reads as "the platform is broken" rather than
+    # "the suite was never copied".
+    #
+    # Copied through tar rather than `cp -r` for the excludes: node_modules is
+    # ~75 MB of re-installable binaries, .auth holds a live SSO storage state
+    # (a session cookie — a credential), and report/ + results/ are artefacts of
+    # whoever ran it last. `npm ci` in the published repo restores the rest
+    # (package-lock.json ships if the generating checkout had one).
+    if [[ -d "${REPO_ROOT}/k8s/e2e" ]]; then
+        mkdir -p "${dest}/k8s/e2e"
+        tar -C "${REPO_ROOT}/k8s/e2e" \
+            --exclude=./node_modules --exclude=./.auth \
+            --exclude=./report --exclude=./results \
+            -cf - . | tar -C "${dest}/k8s/e2e" -xf -
+    fi
+
     # Operating scripts, minus the installer-only ones.
     mkdir -p "${dest}/k8s/scripts"
     local script base skip
@@ -169,25 +226,7 @@ stage_repo() {
     mkdir -p "${dest}/k8s/overlays"
     cp -rL "${REPO_ROOT}/k8s/overlays/${ENV}" "${dest}/k8s/overlays/${ENV}"
 
-    # In this repo the overlay config.yaml is a sample and the wizard's answers
-    # live in the gitignored k8s/scripts/<env>/config.yaml (see cfg_get). The
-    # published repo has no wizard and owns its history, so the effective
-    # values are baked into its committed config.yaml here.
-    local local_cfg="$(setup_root)/${ENV}/config.yaml"
-    if [[ -f "$local_cfg" ]]; then
-        local staged_cfg="${dest}/k8s/overlays/${ENV}/config.yaml"
-        local key val
-        for key in domain acmeEmail gitops.repoUrl platformVaultUrl platformLokiUrl; do
-            val="$(yaml_get "$local_cfg" "$key")"
-            [[ -n "$val" ]] || continue
-            case "$key" in
-                gitops.repoUrl)
-                    sed -i "s|^\([[:space:]]*repoUrl:\).*|\1 ${val}|" "$staged_cfg" ;;
-                *)
-                    sed -i "s|^${key}:.*|${key}: ${val}|" "$staged_cfg" ;;
-            esac
-        done
-    fi
+    bake_answers_into_config "$dest"
 
     # Generated locally and holding a private key — never publish it. deploy.sh
     # recreates it from k8s/certs on the machine that owns the CA.
@@ -232,11 +271,145 @@ stage_repo() {
 
     render_env_placeholders "$dest"
 
+    write_platform_config_app "$dest"
+    write_env_ci "$dest"
     write_env_gitignore "$dest"
     write_origin_stamp "$dest"
     write_env_readme "$dest"
 
     log_info "Staged $(find "$dest" -type f | wc -l) files"
+}
+
+# =============================================================================
+# Baking the wizard's answers into the published config.yaml
+# =============================================================================
+#
+# In this repo the overlay config.yaml is a committed sample and the wizard's
+# answers live in the gitignored _setup/<env>/config.yaml, layered over it by
+# cfg_get. The published repo has no wizard and owns its history, so the
+# effective values have to be written into its committed config.yaml.
+#
+# The set of keys is *derived from the answers file* rather than listed here. A
+# hardcoded list (it was `domain acmeEmail gitops.repoUrl platformVaultUrl
+# platformLokiUrl`) means every new question setup-env.sh learns to ask silently
+# publishes the committed sample value instead of the operator's answer — a
+# failure with no error message, discovered when the environment behaves as
+# though it were called example.com. Whatever the operator answered ships.
+
+# Every dotted path in a config.yaml that carries a scalar value. Same
+# indentation-aware walk as yaml_get in lib/common.sh, so a nested `host:`
+# cannot be reported under the wrong parent; mapping openers (no value on the
+# line) are not leaves and are skipped.
+yaml_leaf_paths() {
+    awk '
+        {
+            line = $0
+            sub(/[[:space:]]*#.*$/, "", line)
+            if (line ~ /^[[:space:]]*$/) next
+
+            match(line, /^[ ]*/)
+            indent = RLENGTH
+
+            if (line !~ /^[ ]*[A-Za-z0-9_.-]+:/) next
+            key = line
+            sub(/^[ ]*/, "", key)
+            val = key
+            sub(/^[A-Za-z0-9_.-]+:[ ]*/, "", val)
+            sub(/:.*$/, "", key)
+
+            while (depth > 0 && indents[depth] >= indent) depth--
+            depth++
+            indents[depth] = indent
+            keys[depth] = key
+
+            gsub(/^[ \t]+|[ \t]+$/, "", val)
+            if (val == "") next
+
+            full = keys[1]
+            for (i = 2; i <= depth; i++) full = full "." keys[i]
+            print full
+        }
+    ' "$1"
+}
+
+# Replace the scalar at a dotted path, in place, parent-scoped.
+#
+# The parent scoping is the point. The previous substitution for gitops.repoUrl
+# was `sed -i 's|^\([[:space:]]*repoUrl:\).*|...|'`, which rewrites *any* line
+# whose key is repoUrl at any indentation under any parent — correct only for as
+# long as config.yaml has exactly one of them. Same awk path stack as yaml_get.
+#
+# The new value goes through the environment rather than `awk -v`, which would
+# interpret backslash escapes in a value that is meant to be literal.
+# Returns non-zero if the path is not present in the file.
+yaml_set_scalar() {
+    local file="$1" path="$2" value="$3" tmp
+    tmp="$(mktemp)"
+
+    if _YAML_SET_VALUE="$value" awk -v want="$path" '
+        {
+            raw = $0
+            line = raw
+            sub(/[[:space:]]*#.*$/, "", line)
+            if (line ~ /^[[:space:]]*$/) { print raw; next }
+
+            match(line, /^[ ]*/)
+            indent = RLENGTH
+
+            if (line !~ /^[ ]*[A-Za-z0-9_.-]+:/) { print raw; next }
+            key = line
+            sub(/^[ ]*/, "", key)
+            sub(/:.*$/, "", key)
+
+            while (depth > 0 && indents[depth] >= indent) depth--
+            depth++
+            indents[depth] = indent
+            keys[depth] = key
+
+            full = keys[1]
+            for (i = 2; i <= depth; i++) full = full "." keys[i]
+
+            if (full == want && !done) {
+                printf "%s%s: %s\n", substr(raw, 1, indent), key, ENVIRON["_YAML_SET_VALUE"]
+                done = 1
+                next
+            }
+            print raw
+        }
+        END { exit(done ? 0 : 1) }
+    ' "$file" > "$tmp"; then
+        mv "$tmp" "$file"
+        return 0
+    fi
+
+    rm -f "$tmp"
+    return 1
+}
+
+bake_answers_into_config() {
+    local dest="$1"
+    local answers="$(setup_root)/${ENV}/config.yaml"
+    local staged="${dest}/k8s/overlays/${ENV}/config.yaml"
+
+    [[ -f "$answers" && -f "$staged" ]] || return 0
+
+    local key val baked=0
+    while IFS= read -r key; do
+        val="$(yaml_get "$answers" "$key")"
+        [[ -n "$val" ]] || continue
+        if yaml_set_scalar "$staged" "$key" "$val"; then
+            baked=$((baked + 1))
+        else
+            # The answers file knows a key the committed overlay does not
+            # declare. Appending it blindly would guess at the nesting, so say
+            # so instead — the published environment would otherwise run on the
+            # sample value with nothing to point at.
+            log_warn "Answered '${key}' has no place in overlays/${ENV}/config.yaml — not baked"
+            log_warn "  add the key to the committed overlay so it can be published"
+        fi
+    done < <(yaml_leaf_paths "$answers")
+
+    log_info "Baked ${baked} answered value(s) into the published config.yaml"
 }
 
 # Resolve every ${VAR} in the staged manifests to this environment's value.
@@ -298,6 +471,218 @@ render_env_placeholders() {
     log_info "Rendered ${rendered} manifest(s)"
 }
 
+# =============================================================================
+# platform-config: the Application that makes chart-pin commits take effect
+# =============================================================================
+#
+# Without this, Renovate is decorative after the handover.
+#
+# In the published repo the app-of-apps (k8s/argocd/apps/app-of-apps.yaml)
+# watches k8s/argocd/apps with recurse: false, so the only things any controller
+# reconciles are the Applications in that one directory. platform-appset.yaml
+# and projects/ sit one level up and are applied by `deploy.sh <env> gitops` —
+# imperatively, once. A merged Renovate PR that bumps a chart version in
+# platform-appset.yaml therefore changes a file nobody reads: the ApplicationSet
+# object in the cluster keeps the old pin, the platform keeps the old chart, and
+# the git history says otherwise. That is the worst kind of drift, because it
+# looks like it worked.
+#
+# So the published repo gets one more Application whose source is its own
+# k8s/argocd directory, filtered to the two things deploy.sh would otherwise own
+# alone. After this, `git commit` on a chart pin is the whole update procedure.
+#
+# Why only here and not in devhub itself: in *this* repository platform-appset.yaml
+# carries ${GITOPS_REPO_URL_INTERNAL} / ${GITOPS_REVISION} / ${ENV}, which
+# deploy.sh resolves through template_values() before applying. ArgoCD does no
+# templating — it hands the file to the cluster verbatim — so pointing an
+# Application at it upstream would apply an ApplicationSet whose repoURL is the
+# literal seven characters ${ENV}. render_env_placeholders has already resolved
+# them in the staged tree, which is what makes this safe; the check below is that
+# guarantee made explicit rather than assumed.
+#
+# projects/*.yaml is already placeholder-free by design — deploy.sh applies those
+# verbatim with no template_values() pass, so they use repo-URL prefix globs
+# rather than ${GITOPS_REPO_URL_INTERNAL}. The check covers them anyway: it
+# should fail if that ever stops being true.
+write_platform_config_app() {
+    local dest="$1"
+    local argocd_dir="${dest}/k8s/argocd"
+
+    [[ -f "${argocd_dir}/platform-appset.yaml" ]] || return 0
+
+    log_step "Generating the platform-config Application..."
+
+    # Placeholder-free, or nothing. A single surviving ${VAR} here would be
+    # applied to the cluster as text.
+    local leftover
+    leftover="$({ grep -rhoE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' \
+        "${argocd_dir}/platform-appset.yaml" "${argocd_dir}/projects/" 2>/dev/null \
+        || true; } | sort -u | tr '\n' ' ')"
+    if [[ -n "$leftover" ]]; then
+        log_error "Unresolved placeholder(s) in the staged k8s/argocd tree: ${leftover}"
+        log_error ""
+        log_error "ArgoCD does not template manifests — it would apply these literally."
+        log_error "Every variable used by platform-appset.yaml and projects/ must be in"
+        log_error "TEMPLATE_VARS (lib/common.sh) *and* have a value for ${ENV}; check"
+        log_error "_setup/${ENV}/tofu-outputs.env and the placeholder warnings above."
+        exit 1
+    fi
+
+    cat > "${argocd_dir}/apps/platform-config.yaml" <<EOF
+# platform-config — reconciles this repository's own ArgoCD configuration.
+#
+# Generated by devhub when this environment was published. It is what makes a
+# commit to platform-appset.yaml or projects/ actually happen: without it those
+# files are applied only by \`deploy.sh --env ${ENV} gitops\`, so a merged
+# Renovate chart-pin bump would change git and nothing else.
+#
+# Picked up automatically: the app-of-apps watches this directory.
+#
+# prune: false — deliberately. This Application manages the ApplicationSet that
+# owns every GitOps platform component. A path typo or a bad include pattern
+# that made the manifests "disappear" must not be able to delete cert-manager,
+# the monitoring stack and Velero along with it. Removing a component is an
+# edit to platform-appset.yaml, whose own prune rules then apply.
+#
+# No finalizer, for the same reason: deleting this Application should hand
+# control back to deploy.sh, not cascade into the platform.
+#
+# recurse: true is required — with recurse: false ArgoCD never descends into
+# projects/, so the include pattern below would match nothing there. The
+# include is also what keeps this Application from picking up apps/ (including
+# itself) and looping.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-config
+  namespace: argocd
+spec:
+  # 'default', not the 'platform' AppProject the other platform Applications
+  # use: this is the Application that installs projects/platform.yaml, so it
+  # must not depend on that object existing. An Application naming a missing
+  # project is rejected outright — which would make a deleted AppProject
+  # unrecoverable through GitOps.
+  project: default
+
+  source:
+    repoURL: ${GITOPS_REPO_URL_INTERNAL}
+    targetRevision: ${GITOPS_REVISION}
+    path: k8s/argocd
+    directory:
+      recurse: true
+      include: '{platform-appset.yaml,projects/*.yaml}'
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      # The ApplicationSet manifest is large and hand-edited; a client-side
+      # apply would drop fields it did not send.
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+EOF
+
+    log_info "platform-config Application generated (appset + projects now reconcile from git)"
+}
+
+# =============================================================================
+# CI for the published repository
+# =============================================================================
+#
+# The published repo is where platform changes are now made, and it is the one
+# place with no rehearsal: a single environment, ArgoCD syncing automatically
+# with selfHeal, and no staging copy to try a chart bump against. Until now it
+# also ran no checks at all — devhub's own .github/workflows/validate.yml is
+# installer-only and does not ship (there is no GitHub Actions runner in an
+# environment), and nothing generated a Woodpecker pipeline. So a Renovate PR
+# that bumps a chart whose values schema changed merged green and reached the
+# running platform.
+#
+# This is the same static validation CI runs upstream, pointed at the one
+# environment this repo describes. It answers "would this deploy?" — not "does
+# the deployed thing work?", which is validate-e2e.sh against the live cluster.
+write_env_ci() {
+    local dest="$1"
+
+    cat > "${dest}/.woodpecker.yml" <<EOF
+# Woodpecker CI — ${ENV} platform repository
+#
+# Runs the same static validation devhub's own CI runs: YAML parses and has no
+# duplicate keys, config.yaml has the keys the scripts read, every
+# \${PLACEHOLDER} is in the envsubst allow-list, the base/overlay pairs the
+# platform ApplicationSet references exist, and every chart still renders.
+#
+# Why this file exists: ArgoCD syncs this repository automatically with
+# selfHeal, so a merge lands on the running platform with no further step. A
+# single-environment repo has nowhere to rehearse, which makes the pull request
+# the only gate there is.
+#
+# Activate the repository in Woodpecker once (https://ci.\${DOMAIN} → add
+# repository) or nothing here ever runs. Consider requiring the check on the
+# default branch too, so a Renovate PR cannot merge red.
+#
+# Steps run as unprivileged pods on the tainted CI node pool; a Kyverno
+# mutation adds the nodeSelector and toleration.
+
+when:
+  - event: [push, pull_request]
+
+steps:
+  # No cluster, no cloud credentials, no network beyond apk: this step is the
+  # one that must always be green.
+  #
+  # findutils: validate-overlays.sh discovers environments with \`find -printf\`,
+  # which busybox find does not implement. Not reached while the env is named
+  # explicitly below, but one \`--helm\` invocation without it is enough.
+  # gettext supplies envsubst, py3-yaml the duplicate-key parser.
+  - name: validate
+    image: alpine:3.21
+    commands:
+      - apk add --no-cache bash python3 py3-yaml gettext findutils
+      - bash k8s/scripts/validate-overlays.sh ${ENV}
+
+  # Renders every chart with this environment's values. Separate step because it
+  # needs the network (chart repositories) and is therefore the one that can
+  # fail for reasons that are not this commit's fault — a major chart bump whose
+  # values schema moved fails precisely here, which is the point.
+  #
+  # The repository list mirrors the chart pins in k8s/scripts/deploy.sh: a new
+  # platform component from a new chart repository needs a line added.
+  - name: validate-helm
+    image: alpine:3.21
+    commands:
+      - apk add --no-cache bash python3 py3-yaml gettext findutils helm
+      - helm repo add jetstack https://charts.jetstack.io
+      - helm repo add hashicorp https://helm.releases.hashicorp.com
+      - helm repo add external-secrets https://charts.external-secrets.io
+      - helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+      - helm repo add grafana https://grafana.github.io/helm-charts
+      - helm repo add argo https://argoproj.github.io/argo-helm
+      - helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/
+      - helm repo add headlamp https://kubernetes-sigs.github.io/headlamp/
+      - helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+      - helm repo add woodpecker https://woodpecker-ci.org/
+      - helm repo add kyverno https://kyverno.github.io/kyverno
+      - helm repo add stakater https://stakater.github.io/stakater-charts
+      - helm repo add jameswynn https://jameswynn.github.io/helm-charts
+      - helm repo update
+      - bash k8s/scripts/validate-overlays.sh --helm ${ENV}
+EOF
+
+    log_info "Generated .woodpecker.yml (validate-overlays on push and pull_request)"
+}
+
 # The environment repo's .gitignore is not this repository's. Two entries are
 # deliberately absent: backend.hcl and *.tfvars have to be committed for the
 # environment to be operable by someone who never had this checkout.
@@ -325,6 +710,13 @@ k8s/scripts/*/
 # Locally generated TLS material (local-ca environments).
 k8s/certs/
 k8s/overlays/*/tls-secret.yaml
+
+# End-to-end suite: installed dependencies and run artefacts. k8s/e2e/.auth
+# holds a signed-in browser storage state — a live session cookie.
+k8s/e2e/node_modules/
+k8s/e2e/.auth/
+k8s/e2e/report/
+k8s/e2e/results/
 
 # Editor / OS
 *.swp
@@ -382,6 +774,8 @@ upgrade path back. This repository is now maintained on its own terms. See
 | \`k8s/overlays/${ENV}/\` | this environment's config.yaml and value overrides |
 | \`k8s/argocd/\` | app-of-apps, AppProjects, the platform ApplicationSet |
 | \`k8s/scripts/\` | deploy and day-two scripts |
+| \`k8s/e2e/\` | Playwright end-to-end checks against this live environment |
+| \`.woodpecker.yml\` | CI: static validation on every push and pull request |
 $([[ "$CLOUD" != "local" ]] && echo "| \`tofu/${CLOUD}/\` | infrastructure: cluster, data services, IAM |")
 
 ## Day two
@@ -394,14 +788,36 @@ cd k8s/scripts
 \`\`\`
 
 Everything ArgoCD owns changes through a commit here, not through a script.
-Full procedures — backups, restore, rotation, access — are in
+Full procedures — backups, restore, rotation, upgrades, access — are in
 \`k8s/docs/OPERATIONS.md\`.
+
+## Checks
+
+\`.woodpecker.yml\` runs the static validation on every push and pull request —
+YAML, config keys, placeholders, and \`helm template\` for every component.
+Activate this repository in Woodpecker once, or nothing runs and a Renovate pull
+request merges unchecked.
+
+\`\`\`bash
+cd k8s/e2e && npm ci                     # once
+./k8s/scripts/validate-overlays.sh ${ENV}      # would this deploy?
+./k8s/scripts/validate-e2e.sh --env ${ENV}     # does what is deployed work?
+\`\`\`
 
 ## Chart updates
 
 \`renovate.json\` ships with this repository so chart pins keep moving after the
 link to devhub was cut. Point Renovate at this repository, or bump the pins by
 hand in \`k8s/scripts/deploy.sh\` and \`k8s/argocd/platform-appset.yaml\`.
+
+A bump in \`platform-appset.yaml\` takes effect because of the generated
+\`k8s/argocd/apps/platform-config.yaml\` Application: it reconciles the
+ApplicationSet and the AppProjects from this repository, so merging is the whole
+procedure. Bumps in \`k8s/scripts/deploy.sh\` cover the bootstrap components and
+still need \`./deploy.sh --env ${ENV} <component>\` to be run.
+
+Bringing later devhub improvements in is a merge, not an upgrade — the recipe is
+in \`k8s/docs/OPERATIONS.md\` ("Keeping the platform up to date").
 EOF
 }
 
@@ -434,10 +850,43 @@ scan_for_secrets() {
         findings=$((findings + 1))
     done < <(grep -rlE -- "-----BEGIN [A-Z ]*PRIVATE KEY-----|LS0tLS1CRUdJTiBQUklWQVRFIEtFWS" "$dest" 2>/dev/null || true)
 
+    # Content, not just filenames — for the tofu tree specifically, because this
+    # script deliberately inverts .gitignore there and *commits* backend.hcl and
+    # *.tfvars. Those two files are gitignored in devhub for a reason: nothing
+    # stops an operator from putting a real value where a variable reference
+    # belongs (`db_password = "..."` in terraform.tfvars is the obvious one, a
+    # Cloudflare API token the next), and the basename and PEM checks above see
+    # neither. The published repo is private, but "private repository" is not a
+    # secret store: everyone with read access to the environment gets it, the
+    # push mirror copies it off-cluster, and git keeps it after the fix.
+    #
+    # Assignment-shaped only, and the key name has to *end* in the suspicious
+    # word — `token_endpoint = "https://..."` is not a credential, `admin_token`
+    # is. A right-hand side that is a variable reference (`= var.x`, `= data.x`,
+    # `= local.x`) cannot match, because a quoted literal is required; the
+    # second grep drops the interpolation-only form `= "${var.x}"` as well.
+    # *.example files are excluded by the include globs — their whole job is to
+    # show the shape of a value.
+    if [[ -d "${dest}/tofu" ]]; then
+        local hit
+        while IFS= read -r hit; do
+            log_error "Refusing to publish ${hit} — that reads as a credential, not configuration"
+            findings=$((findings + 1))
+        done < <(cd "$dest" && grep -rniE \
+                    --include='*.tf' --include='*.tfvars' --include='*.hcl' \
+                    --exclude='*.example' \
+                    -- '^[^#]*[[:alnum:]_]*(access_key|secret_key|password|passwd|token|client_secret|api_key)[[:space:]]*=[[:space:]]*"[^"]+"' \
+                    tofu 2>/dev/null \
+                 | grep -vE '=[[:space:]]*"\$\{[^"]*\}"' \
+                 | sed -E 's/(=[[:space:]]*").*/\1REDACTED"/' || true)
+    fi
+
     if [[ $findings -gt 0 ]]; then
         log_error ""
         log_error "${findings} problem(s) found — nothing was published."
-        log_error "Fix the staging rules in setup-gitops-repo.sh before retrying."
+        log_error "For a filename or a key file: fix the staging rules in this script."
+        log_error "For a tofu assignment: the value belongs in Vault or in the gitignored"
+        log_error "_setup/${ENV}/manual-secrets.env, and the variable should have no default."
         exit 1
     fi
 
@@ -639,6 +1088,49 @@ See .devhub-origin for provenance."
     log_info "devhub is no longer part of this environment — clone ${GITOPS_REPO_URL} to work on it."
 }
 
+# The repository this script creates in Forgejo is private, and deliberately so:
+# it names every hostname, bucket and CIDR the environment uses, and it commits
+# backend.hcl and *.tfvars. None of that was ever checked for the *mirror*, which
+# receives an identical copy — a public GitHub repository is one paste of a URL
+# away from publishing the environment's whole topology.
+#
+# Best effort, and a warning rather than an abort: a 200 could legitimately be an
+# authenticated proxy, an enterprise SSO edge that serves a page to everyone, or
+# a self-hosted Forgejo/GitLab whose landing page is public while the repository
+# is not. A missing answer is not evidence either way. Redirects are deliberately
+# not followed: GitLab answers an anonymous request for a private repository with
+# a 302 to its sign-in page, and following it would turn every private GitLab
+# mirror into a false 200.
+check_mirror_visibility() {
+    command -v curl >/dev/null 2>&1 || return 0
+
+    local probe="${GITOPS_MIRROR_URL%.git}" code
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$probe" 2>/dev/null || echo "")"
+
+    case "$code" in
+        200)
+            log_warn ""
+            log_warn "The mirror target answered 200 to an unauthenticated request:"
+            log_warn "  ${probe}"
+            log_warn "If that page is the repository, this environment's hostnames, bucket"
+            log_warn "names, allowed API CIDRs and admin group IDs are about to be public."
+            log_warn "Check, before the first sync:"
+            log_warn "  - the repository's visibility is private"
+            log_warn "  - the mirror token is scoped to that one repository, not the org"
+            log_warn "  - no fork or CI artefact of it is public"
+            log_warn "Continuing — a 200 can also be a public landing page in front of a"
+            log_warn "private repository, which this check cannot tell apart."
+            log_warn ""
+            ;;
+        ""|000)
+            log_info "Mirror visibility not checked (no answer from ${probe})"
+            ;;
+        *)
+            log_info "Mirror target is not readable anonymously (HTTP ${code}) — as expected"
+            ;;
+    esac
+}
+
 # The off-cluster copy. Forgejo pushes to it on every commit, so the mirror is
 # seconds behind rather than hours — but it carries git refs only. Issues, pull
 # requests, packages and registry blobs live on Forgejo's PVC and are Velero's
@@ -661,6 +1153,8 @@ configure_push_mirror() {
     fi
 
     log_step "Configuring the push mirror to ${GITOPS_MIRROR_URL}..."
+
+    check_mirror_visibility
 
     local existing
     existing="$(forgejo_api GET "/repos/${org}/${repo}/push_mirrors" "$token" \
