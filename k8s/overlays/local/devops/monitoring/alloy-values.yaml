@@ -1,0 +1,19 @@
+# Alloy local overlay — Rancher Desktop / k3s on WSL2
+# Merged with base/devops/monitoring/alloy-values.yaml
+#
+# Rancher Desktop runs the dockerd (moby) container runtime, not containerd. On
+# a containerd cluster — every cloud target here — /var/log/pods/<pod>/<container>/N.log
+# is a real file and mounting /var/log is enough. Under dockerd those files are
+# symlinks:
+#
+#   /var/log/pods/<ns>_<pod>_<uid>/<container>/3.log
+#     -> /var/lib/docker/containers/<id>/<id>-json.log
+#
+# The symlink resolves inside the *container's* filesystem, where
+# /var/lib/docker is not mounted, so every tail failed with
+# "stat …: no such file or directory" and Loki received nothing on local.
+#
+# The chart has a first-class switch for exactly this.
+alloy:
+  mounts:
+    dockercontainers: true

@@ -21,9 +21,16 @@ alloy:
           action        = "drop"
         }
 
-        // Build path to the container log file
+        // Build path to the container log file.
+        //
+        // __meta_kubernetes_pod_container_name, not __meta_kubernetes_container_name:
+        // the pod role publishes the former, and the latter does not exist, so it
+        // interpolated as empty and every target got
+        //   /var/log/pods/*<uid>//*.log
+        // which matches nothing. Alloy logged "failed to tail file, stat failed"
+        // per container and shipped no logs at all.
         rule {
-          source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_container_name"]
+          source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
           separator     = "/"
           target_label  = "__path__"
           replacement   = "/var/log/pods/*$1/*.log"
@@ -55,9 +62,22 @@ alloy:
         }
       }
 
-      // Tail log files discovered above
+      // Expand the __path__ globs into real files.
+      //
+      // loki.source.file does not glob — it stats each __path__ literally, so
+      // feeding it the relabel output directly logged
+      //   failed to tail file, stat failed: /var/log/pods/*<uid>/<container>/*.log
+      // for every container and shipped nothing. local.file_match is the
+      // component that resolves the wildcards (the pod directory is
+      // <namespace>_<pod>_<uid>, which is why the path starts with '*'), and it
+      // keeps watching for files that appear later.
+      local.file_match "pod_logs" {
+        path_targets = discovery.relabel.pod_logs.output
+      }
+
+      // Tail the files discovered above
       loki.source.file "pod_logs" {
-        targets    = discovery.relabel.pod_logs.output
+        targets    = local.file_match.pod_logs.targets
         forward_to = [loki.process.pipeline.receiver]
       }
 

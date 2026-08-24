@@ -15,6 +15,7 @@
 
 const { chromium } = require('@playwright/test');
 const { services, credentials, realm } = require('../lib/env');
+const { clickLoginTrigger, WOODPECKER_LOGIN_BUTTON } = require('../lib/sso');
 
 const log = (msg) => process.stderr.write(`[mint-token] ${msg}\n`);
 
@@ -64,17 +65,11 @@ async function appears(locator, timeout) {
     log('Woodpecker sign-in…');
     await page.goto(services.woodpecker, { waitUntil: 'domcontentloaded' });
     // The login page's forge button is labeled with the forge's hostname
-    // ("Sign in to Woodpecker with <git host>"), not "login".
-    const gitHost = new URL(services.forgejo).host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const loginName = new RegExp(`login with|sign in with|^log ?in$|${gitHost}`, 'i');
-    const login = page
-      .getByRole('link', { name: loginName })
-      .or(page.getByRole('button', { name: loginName }))
-      .first();
-    if (await appears(login, 10_000)) {
-      await login.click();
-      await page.waitForLoadState('networkidle', { timeout: 60_000 }).catch(() => {});
-    }
+    // ("Sign in to Woodpecker with <git host>"), not "login" — and that hostname
+    // is the *internal* Service name when the server reaches Forgejo in-cluster,
+    // so clickLoginTrigger falls back to the page's only button.
+    await clickLoginTrigger(page, WOODPECKER_LOGIN_BUTTON);
+
     const authorize = page.getByRole('button', { name: /^authorize/i }).first();
     if (await appears(authorize, 5_000)) {
       await authorize.click();

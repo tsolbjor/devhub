@@ -50,3 +50,59 @@ kubeEtcd:
 
 kubeProxy:
   enabled: false
+
+# ─── No notification channel on local ────────────────────────────────
+# The platform-slack receiver reads its URL from api_url_file, and the
+# alertmanager-slack secret is created with an empty webhook-url here — nobody
+# wires a Slack workspace to a laptop. An empty file is not "delivers nothing":
+# every notification fails with `unsupported protocol scheme ""`, Alertmanager
+# retries until it gives up, and Prometheus then fires
+# AlertmanagerFailedToSendAlerts and AlertmanagerClusterFailedToSendAlerts. A
+# fresh local install sat with two critical alerts firing, caused entirely by
+# having nowhere to send alerts — and `validate --e2e` failed on
+# "critical alerts are firing" with nothing actually wrong.
+#
+# Routing to the null receiver keeps every alert visible in the Alertmanager and
+# Grafana UIs, which is all a laptop can honestly offer. Helm replaces lists
+# wholesale, so `routes` below fully overrides the base list.
+#
+# To deliver alerts from a real environment, leave its overlay routing to
+# platform-slack and set the webhook:
+#   vault kv put secret/platform/alertmanager webhook-url=https://hooks.slack.com/...
+alertmanager:
+  config:
+    route:
+      receiver: platform-null
+      routes:
+        - matchers:
+            - alertname = "Watchdog"
+          receiver: platform-null
+          repeat_interval: 1h
+        - matchers:
+            - severity = "critical"
+          receiver: platform-null
+          group_wait: 10s
+          repeat_interval: 1h
+        - matchers:
+            - severity = "warning"
+          receiver: platform-null
+
+# ─── WSL2's clock makes two rules meaningless ────────────────────────
+# process_start_time_seconds is derived from the node's boot time
+# (wall_clock - uptime). WSL2's wall clock jumps forward in bursts — measurably
+# ~7s of clock per 3s of real time — so that subtraction drifts and the metric
+# reports a *new* process start on nearly every scrape, while the pod's restart
+# count stays 0.
+#
+# AlertmanagerClusterCrashlooping counts exactly that
+# (changes(process_start_time_seconds[10m]) > 4), so on WSL2 it fires
+# permanently against an Alertmanager that has run untouched for hours — and
+# `validate --e2e` then fails "no critical alert is firing" on a perfectly
+# healthy environment. Same reason as the k3s components above: a check that
+# cannot be true here hides the ones that can.
+#
+# NodeClockNotSynchronising is the honest report of this and stays enabled — it
+# is a warning, and it is describing something real about the host.
+defaultRules:
+  disabled:
+    AlertmanagerClusterCrashlooping: true

@@ -33,9 +33,20 @@ server:
     WOODPECKER_AUTHENTICATE_PUBLIC_REPOS: "true"
     WOODPECKER_LOG_LEVEL: info
     WOODPECKER_HOST: https://ci.${DOMAIN}
-    WOODPECKER_GITEA_URL: https://git.${DOMAIN}
     # Server-side calls stay in-cluster: *.localhost resolves to 127.0.0.1 inside
-    # glibc containers, so the public URL is browser-facing only.
+    # the container, so the public URL is browser-facing only. Without the split
+    # the OAuth code exchange dies on
+    #   Post "https://git.localhost/login/oauth/access_token": dial tcp 127.0.0.1:443
+    # and every Woodpecker sign-in fails with "Error while authenticating against
+    # OAuth provider".
+    #
+    # forge-url is what the server calls; EXPERT_FORGE_OAUTH_HOST is the URL the
+    # browser is redirected to. Off local the two are equal.
+    WOODPECKER_GITEA_URL: ${FORGEJO_URL_INTERNAL}
+    WOODPECKER_EXPERT_FORGE_OAUTH_HOST: https://git.${DOMAIN}
+    # Same problem in the other direction: Forgejo's webhooks are called from the
+    # Forgejo pod, which cannot resolve ci.${DOMAIN} on local either.
+    WOODPECKER_EXPERT_WEBHOOK_HOST: ${WOODPECKER_URL_INTERNAL}
     WOODPECKER_GITEA_SKIP_VERIFY: "false"
 
   # Client id/secret for the Forgejo OAuth application, plus the shared agent

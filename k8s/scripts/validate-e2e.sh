@@ -141,6 +141,13 @@ export DEVHUB_ADMIN_USER="platform-admin"
 export DEVHUB_ADMIN_PASSWORD="$PLATFORM_ADMIN_PASSWORD"
 export DEVHUB_GITOPS_REPO_URL="${GITOPS_REPO_URL:-}"
 
+# Headlamp authenticates at the gateway, then asks for a ServiceAccount token to
+# reach the API — the same token `./deploy.sh --env <env> headlamp-token` prints.
+# Handing it to the suite is what lets the Headlamp spec assert that the curated
+# read-only RBAC actually works, instead of stopping at the token screen.
+export DEVHUB_HEADLAMP_TOKEN="$(kubectl get secret headlamp-view-token -n headlamp \
+    -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)"
+
 $HEADED && PW_ARGS+=(--headed)
 
 log_step "Running the suite..."

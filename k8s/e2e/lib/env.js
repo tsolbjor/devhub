@@ -35,10 +35,17 @@ const credentials = {
 
 const realm = process.env.DEVHUB_REALM || 'devops';
 
+// The read-only ServiceAccount token Headlamp asks for at its token screen.
+// Headlamp deliberately runs without its own OIDC (see
+// k8s/base/devops/headlamp/values.yaml): the gateway does the Keycloak round
+// trip, and cluster access is this token. Empty when the suite is run without
+// validate-e2e.sh, in which case the spec asserts what it can without it.
+const headlampToken = process.env.DEVHUB_HEADLAMP_TOKEN || '';
+
 // gitops.repoUrl from the overlay's config.yaml: the repository ArgoCD
 // reconciles this environment from. Its web page is what the Forgejo tests
 // open, because "some repository exists" is a weaker claim than "the one the
 // platform depends on is there".
 const gitopsRepoUrl = (process.env.DEVHUB_GITOPS_REPO_URL || '').replace(/\.git$/, '');
 
-module.exports = { DOMAIN, ENV, services, credentials, realm, gitopsRepoUrl, host };
+module.exports = { DOMAIN, ENV, services, credentials, realm, gitopsRepoUrl, headlampToken, host };

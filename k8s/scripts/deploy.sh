@@ -320,10 +320,16 @@ EOSQL
     kubectl delete job minio-init-buckets -n data-services --ignore-not-found >/dev/null
     kubectl apply -f "${DATA_SERVICES_DIR}/minio.yaml"
 
+    # 120s was not enough for a cold node: postgres/minio/valkey pull ~200MB
+    # between them and the first pull alone can take two minutes. A timeout here
+    # is not fatal — later steps wait again — but it must not pass silently,
+    # because the failure then surfaces as an unexplained db-users error.
     log_info "Waiting for data services to be ready..."
-    kubectl wait --for=condition=ready pod -l app=postgresql -n data-services --timeout=120s || true
-    kubectl wait --for=condition=ready pod -l app=valkey -n data-services --timeout=120s || true
-    kubectl wait --for=condition=ready pod -l app=minio -n data-services --timeout=120s || true
+    local svc
+    for svc in postgresql valkey minio; do
+        kubectl wait --for=condition=ready pod -l "app=${svc}" -n data-services --timeout=300s \
+            || log_warn "${svc} not ready after 300s — continuing; check: kubectl -n data-services describe pod -l app=${svc}"
+    done
 
     log_info "Shared data services installed"
 }
@@ -523,16 +529,79 @@ install_vault() {
         fi
     fi
 
+    # Same problem ArgoCD has, for the same reason: Vault's OIDC discovery call
+    # targets keycloak.${DOMAIN}, and on local that is a *.localhost name which
+    # resolves to 127.0.0.1. Vault is a Go binary, so its resolver reads
+    # /etc/hosts and the alias takes effect (glibc-based images ignore it — see
+    # install_argocd). Without this, `setup-vault.sh configure` cannot enable OIDC
+    # and Vault has no human SSO.
+    local extra_args=""
+    if [[ "$ENV" == "local" ]]; then
+        local gw_ip
+        gw_ip="$(kubectl get svc -n envoy-gateway-system \
+            -l gateway.envoyproxy.io/owning-gateway-name=devhub \
+            -o jsonpath='{.items[0].spec.clusterIP}' 2>/dev/null || true)"
+        if [[ -n "$gw_ip" ]]; then
+            extra_args="--set server.hostAliases[0].ip=${gw_ip} --set server.hostAliases[0].hostnames[0]=keycloak.${DOMAIN}"
+            log_info "Vault hostAlias: keycloak.${DOMAIN} -> ${gw_ip}"
+        else
+            log_warn "Envoy data-plane service not found — Vault OIDC discovery may fail"
+        fi
+    fi
+
     helm upgrade --install vault hashicorp/vault \
         --namespace vault \
         --version "$CHART_VAULT" \
         $values_args \
+        $extra_args \
         --atomic --timeout 5m
 
     # Scheduled raft snapshots (consistent backups Vault can actually restore).
     kubectl apply -f "${BASE_DIR}/devops/vault/raft-snapshot-cronjob.yaml"
 
+    warn_if_vault_pods_stale
+
     log_info "Vault installed"
+}
+
+# The Vault chart sets updateStrategy: OnDelete, so a `helm upgrade` that changes
+# the pod template (hostAliases, resources, the raft config) updates the
+# StatefulSet and nothing else — the running pods keep the old spec indefinitely
+# and the change appears to have been applied. Restarting is deliberately left to
+# the operator: without cloud KMS every restarted pod comes back sealed, so an
+# unattended restart takes Vault down until someone unseals it.
+warn_if_vault_pods_stale() {
+    local want stale=()
+    want="$(kubectl get sts vault -n vault \
+        -o jsonpath='{.status.updateRevision}' 2>/dev/null || true)"
+    [[ -n "$want" ]] || return 0
+
+    local pod have
+    for pod in $(kubectl get pods -n vault -l app.kubernetes.io/name=vault \
+                     -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+        have="$(kubectl get pod "$pod" -n vault \
+            -o jsonpath='{.metadata.labels.controller-revision-hash}' 2>/dev/null || true)"
+        [[ -n "$have" && "$have" != "$want" ]] && stale+=("$pod")
+    done
+    [[ ${#stale[@]} -gt 0 ]] || return 0
+
+    log_warn "Vault pods still run the previous spec: ${stale[*]}"
+    log_warn "The chart uses updateStrategy: OnDelete — they will not roll on their own."
+    local kms_seal=false
+    case "$CLOUD" in
+        aws)   [[ -n "${VAULT_KMS_KEY_ID:-}" ]]     && kms_seal=true ;;
+        azure) [[ -n "${VAULT_KEY_VAULT_NAME:-}" ]] && kms_seal=true ;;
+        gcp)   [[ -n "${VAULT_KMS_KEY_RING:-}" ]]   && kms_seal=true ;;
+    esac
+
+    if $kms_seal; then
+        log_warn "Restart them (cloud KMS unseals each one automatically):"
+        log_warn "  kubectl delete pod -n vault ${stale[*]}"
+    else
+        log_warn "Restart them, then unseal — no cloud KMS here, so each comes back sealed:"
+        log_warn "  kubectl delete pod -n vault ${stale[*]}"
+        log_warn "  ./setup-vault.sh --env ${ENV} unseal"
+    fi
 }
 
 install_external_dns() {
@@ -657,13 +726,13 @@ install_monitoring() {
             --from-literal=client-secret="placeholder"
     fi
 
-    # Alertmanager mounts this; an empty webhook keeps the config valid while
-    # alerts remain visible in the Alertmanager UI.
+    # Alertmanager mounts this. An empty webhook is normal (local, and any
+    # environment where nobody has set one yet) and is handled by routing to the
+    # null receiver below — not by pointing the Slack receiver at an empty file,
+    # which fails every notify and fires critical alerts about itself.
     if ! kubectl get secret alertmanager-slack -n monitoring &>/dev/null; then
         kubectl create secret generic alertmanager-slack -n monitoring \
             --from-literal=webhook-url=""
-        log_warn "Alertmanager Slack webhook is empty — alerts fire but are not delivered"
-        log_warn "Set one: vault kv put secret/platform/alertmanager webhook-url=https://hooks.slack.com/..."
     fi
 
     # Prometheus stack uses monitoring overlay
@@ -675,6 +744,27 @@ install_monitoring() {
     if [[ -f "$overlay_values" ]]; then
         template_values "$overlay_values" "${dir}/monitoring-overlay-values.yaml"
         prom_args="$prom_args -f ${dir}/monitoring-overlay-values.yaml"
+    fi
+
+    # An empty webhook is not merely undelivered mail: the platform-slack
+    # receiver reads its URL from api_url_file, and an empty file fails every
+    # notify with `unsupported protocol scheme ""`, which fires
+    # AlertmanagerFailedToSendAlerts and AlertmanagerClusterFailedToSendAlerts —
+    # critical alerts whose only cause is having nowhere to send alerts.
+    #
+    # The fix belongs in the overlay, not here: monitoring is reconciled by
+    # ArgoCD after the GitOps handover, so anything applied only from this script
+    # is reverted on the next sync. local ships the override already.
+    local webhook
+    webhook="$(kubectl get secret alertmanager-slack -n monitoring \
+        -o jsonpath='{.data.webhook-url}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+    if [[ -z "$webhook" ]] && ! grep -q 'receiver: platform-null' "$overlay_values" 2>/dev/null; then
+        log_warn "No Alertmanager webhook, and this overlay still routes to platform-slack."
+        log_warn "Alertmanager will fail every notification and alert about the failure."
+        log_warn "Either set a webhook:"
+        log_warn "  vault kv put secret/platform/alertmanager webhook-url=https://hooks.slack.com/..."
+        log_warn "or route to the null receiver in ${overlay_values#"${K8S_DIR}/"}"
+        log_warn "(see k8s/overlays/local/devops/monitoring/values.yaml for the shape)."
     fi
 
     helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \

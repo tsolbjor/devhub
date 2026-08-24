@@ -211,7 +211,9 @@ grafana:
     - name: Tempo
       type: tempo
       uid: tempo
-      url: http://tempo.monitoring.svc.cluster.local:3100
+      # 3200 is Tempo's HTTP API; 3100 is Loki's. With the wrong port the
+      # datasource health check times out and every trace query returns 502.
+      url: http://tempo.monitoring.svc.cluster.local:3200
       access: proxy
       isDefault: false
       jsonData:

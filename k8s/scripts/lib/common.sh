@@ -232,12 +232,20 @@ parse_config() {
     # same reason Keycloak's server-side endpoints use KEYCLOAK_INTERNAL_URL).
     # ArgoCD therefore addresses Forgejo by its Service, over plain HTTP inside
     # the cluster. Everywhere else the two URLs are identical.
+    # Same split, for the service-to-service calls that are not git clones:
+    # Woodpecker's OAuth code exchange against Forgejo, and Forgejo's webhook
+    # calls back into Woodpecker. Both are made by a pod, so on local both need
+    # the Service address; the public URL stays for anything a browser follows.
     if [[ "$DOMAIN" == "localhost" || "$DOMAIN" == *.localhost ]]; then
         local repo_path="${GITOPS_REPO_URL#*://}"
         repo_path="${repo_path#*/}"
         export GITOPS_REPO_URL_INTERNAL="http://forgejo-http.forgejo.svc.cluster.local:3000/${repo_path}"
+        export FORGEJO_URL_INTERNAL="http://forgejo-http.forgejo.svc.cluster.local:3000"
+        export WOODPECKER_URL_INTERNAL="http://woodpecker-server.woodpecker.svc.cluster.local"
     else
         export GITOPS_REPO_URL_INTERNAL="$GITOPS_REPO_URL"
+        export FORGEJO_URL_INTERNAL="https://git.${DOMAIN}"
+        export WOODPECKER_URL_INTERNAL="https://ci.${DOMAIN}"
     fi
 
     load_tofu_outputs
@@ -317,20 +325,48 @@ default_infra_vars() {
 # Created by setup_paths in the top-level shell — creating it lazily from inside a
 # command substitution (get_values_args) meant the cleanup trap fired when that
 # subshell exited, deleting the files before helm could read them.
+#
+# RENDER_DIR is exported, so a script invoked by another (quickstart.sh →
+# deploy.sh → setup-*.sh) inherits it and reuses the same scratch directory, and
+# every subshell inherits it too. That makes the *owner* matter: without
+# RENDER_DIR_OWNER the first of those to exit ran the trap below and deleted the
+# directory its parent was still rendering into — helm then failed with "no such
+# file or directory" on a values file written seconds earlier. Ownership is keyed
+# on BASHPID, not $$: a subshell keeps its parent's $$, so $$ cannot tell the two
+# apart. A stale inherited path (owner already gone) is replaced, not trusted.
 init_render_dir() {
-    [[ -n "${RENDER_DIR:-}" ]] && return 0
+    # Installed unconditionally, and deliberately *not* exported: every shell
+    # that sources common.sh needs its own EXIT trap to revoke the tokens it
+    # minted. Reusing an inherited directory used to return before this line, so
+    # a called script never cleaned up after itself.
+    _DEVHUB_TRAP_OWNER="$BASHPID"
+    trap '_devhub_on_exit' EXIT
+
+    if [[ -n "${RENDER_DIR:-}" ]]; then
+        [[ -d "$RENDER_DIR" ]] && return 0
+        log_warn "Inherited scratch directory ${RENDER_DIR} is gone — creating a new one"
+    fi
     RENDER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/devhub-render.XXXXXX")"
     chmod 700 "$RENDER_DIR"
-    export RENDER_DIR
-    trap '_devhub_on_exit' EXIT
+    RENDER_DIR_OWNER="$BASHPID"
+    export RENDER_DIR RENDER_DIR_OWNER
 }
 
 # Single EXIT handler shared by every cleanup concern (only one EXIT trap can
 # exist per shell): scratch directory removal and ephemeral Forgejo token
 # revocation. Failures inside must not mask the script's own exit code.
+#
+# Both concerns are per-shell. A subshell inherits the trap, RENDER_DIR and the
+# token array, so without the BASHPID gate a command substitution exiting would
+# delete a directory and revoke credentials that the enclosing script is still
+# using.
 _devhub_on_exit() {
+    [[ "${_DEVHUB_TRAP_OWNER:-}" == "$BASHPID" ]] || return 0
+
     forgejo_cleanup_tokens || true
-    [[ -n "${RENDER_DIR:-}" ]] && rm -rf "${RENDER_DIR}"
+    if [[ -n "${RENDER_DIR:-}" && "${RENDER_DIR_OWNER:-}" == "$BASHPID" ]]; then
+        rm -rf "${RENDER_DIR}"
+    fi
     return 0
 }
 
@@ -358,7 +394,8 @@ ${VAULT_KMS_KEY_ID} ${VAULT_KMS_IRSA_ROLE_ARN} ${VAULT_IDENTITY_CLIENT_ID}
 ${VAULT_KEY_VAULT_NAME} ${VAULT_KEY_NAME} ${VAULT_GSA_EMAIL}
 ${VAULT_KMS_REGION} ${VAULT_KMS_KEY_RING} ${VAULT_KMS_CRYPTO_KEY}
 ${ENTRA_TENANT_ID} ${PLATFORM_LOKI_URL} ${PLATFORM_VAULT_URL}
-${ENV} ${GITOPS_REPO_URL} ${GITOPS_REPO_URL_INTERNAL} ${GITOPS_REVISION}'
+${ENV} ${GITOPS_REPO_URL} ${GITOPS_REPO_URL_INTERNAL} ${GITOPS_REVISION}
+${FORGEJO_URL_INTERNAL} ${WOODPECKER_URL_INTERNAL}'
 
 # Template a file with the allow-listed environment variables.
 template_values() {

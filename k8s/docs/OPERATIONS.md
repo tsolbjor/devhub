@@ -527,13 +527,16 @@ not proceed until the pod is Ready, so an unattended `helm upgrade` stalls
 half-done with Vault unavailable. Have the keys file open before you start:
 
 ```bash
-for i in 0 1 2; do
-  for k in 1 2 3; do
-    kubectl exec -n vault vault-$i -- vault operator unseal <key-$k>
-  done
-done
+./devhub vault --env <env> unseal    # every pod, threshold read from the keys file
 kubectl exec -n vault vault-0 -- vault status      # Sealed: false, HA mode: active
 ```
+
+Use the script rather than `vault operator unseal <key>` by hand: that CLI takes
+the key only as an argument, which `kubectl exec` writes into the Kubernetes API
+audit log and exposes in `ps` on the node. The script submits each share in the
+body of a `PUT /v1/sys/unseal` instead, and fails loudly if a pod is still sealed
+afterwards. It needs `_setup/<env>/vault-init-keys.json` — if that file has been
+moved to offline storage (it should be), put it back for the duration.
 
 ### GitOps components — by commit
 

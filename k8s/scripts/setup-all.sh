@@ -218,6 +218,16 @@ phase_keycloak() {
         log_warn "Keycloak configuration had issues - may need manual review"
     }
 
+    # Vault's OIDC auth needs the client secret Keycloak creates above, so it
+    # cannot be done in phase 4: at that point vault-oidc-secret does not exist
+    # and setup-vault.sh skips the step with a warning. Nothing used to come back
+    # to it, so a fresh install ended with no human SSO into Vault at all.
+    log_step "Configuring Vault OIDC auth (needs the Keycloak client)..."
+    "${SCRIPT_DIR}/setup-vault.sh" --env "${ENV}" oidc || {
+        log_warn "Vault OIDC auth not configured — signing in to Vault with Keycloak will not work"
+        log_warn "  ./setup-vault.sh --env ${ENV} oidc"
+    }
+
     log_info "Keycloak configuration complete"
 }
 

@@ -268,23 +268,64 @@ unseal_vault() {
     log_step "Unsealing Vault..."
     require_keys_file
 
-    local keys
-    keys="$(jq -r '.unseal_keys_b64[]' "${KEYS_FILE}" | head -3)"
+    # Threshold comes from the file Vault itself wrote, rather than a hardcoded 3,
+    # so changing unsealShares/unsealThreshold does not silently submit too few.
+    local threshold keys
+    threshold="$(jq -r '.unseal_threshold // 3' "${KEYS_FILE}")"
+    keys="$(jq -r '.unseal_keys_b64[]' "${KEYS_FILE}" | head -n "$threshold")"
 
+    local unsealed_any=0
     for pod in vault-0 vault-1 vault-2; do
         kubectl get pod "$pod" -n vault &>/dev/null || continue
         log_info "Unsealing $pod..."
         for key in $keys; do
-            # The key goes in on stdin (`unseal -`). As an argument it would be
-            # written into the Kubernetes API audit log — the exec subresource
-            # records the whole command — and be visible in `ps` on the node.
-            printf '%s\n' "$key" | kubectl exec -i -n vault "$pod" -- \
-                env VAULT_ADDR=http://127.0.0.1:8200 \
-                vault operator unseal - >/dev/null 2>&1 || true
+            vault_submit_unseal_key "$pod" "$key" || true
         done
+
+        if pod_is_sealed "$pod"; then
+            log_error "$pod is still sealed after submitting ${threshold} key shares"
+            log_error "Check the keys in ${KEYS_FILE} against this Vault's initialisation"
+            return 1
+        fi
+        log_info "$pod unsealed"
+        unsealed_any=1
     done
 
+    if [[ "$unsealed_any" -eq 0 ]]; then
+        log_error "No Vault pod found in namespace vault — nothing to unseal"
+        return 1
+    fi
+
     log_info "Vault unsealed"
+}
+
+# Submit one unseal key share to a pod, over the HTTP API rather than the CLI.
+#
+# `vault operator unseal` takes the key as an argument only: it refuses a piped
+# key outright ("file descriptor 0 is not a terminal"), and `unseal -` is not a
+# stdin sentinel — the literal "-" is sent as the key, which fails with "'key'
+# must be a valid hex or base64 string". An argument is what we are trying to
+# avoid: `kubectl exec` records the whole command in the Kubernetes API audit log
+# and it shows up in `ps` on the node. A request body does neither, so the key
+# goes into the JSON body of PUT /v1/sys/unseal, piped in on stdin.
+#
+# wget, not curl: the Vault image ships busybox only.
+vault_submit_unseal_key() {
+    local pod="$1" key="$2"
+
+    printf '{"key":"%s"}' "$key" | kubectl exec -i -n vault "$pod" -- \
+        sh -c 'wget -q -O- --post-file /dev/stdin http://127.0.0.1:8200/v1/sys/unseal' \
+        >/dev/null 2>&1
+}
+
+# True when the pod reports Sealed=true. `vault status` exits 2 when sealed, so
+# the exit code cannot be used to tell "sealed" from "unreachable".
+pod_is_sealed() {
+    local pod="$1" sealed
+    sealed="$(kubectl exec -n vault "$pod" -- \
+        env VAULT_ADDR=http://127.0.0.1:8200 vault status -format=json 2>/dev/null \
+        | jq -r '.sealed' 2>/dev/null)"
+    [[ "$sealed" != "false" ]]
 }
 
 # =============================================================================
@@ -376,11 +417,34 @@ configure_oidc_auth() {
 
     vault_admin auth enable oidc 2>/dev/null || log_info "oidc auth already enabled"
 
-    vault_admin write auth/oidc/config \
+    # Vault fetches the discovery document itself, so it has to trust the
+    # certificate on https://keycloak.${DOMAIN}. With a local CA that is not in
+    # any system trust store, and the write fails with "error checking oidc
+    # discovery URL". oidc_discovery_ca_pem takes the CA inline; it is a public
+    # certificate, so passing it as an argument leaks nothing.
+    local ca_args=()
+    if [[ "$TLS_TYPE" == "local-ca" && -f "${CERTS_DIR}/ca/ca.crt" ]]; then
+        ca_args=("oidc_discovery_ca_pem=$(cat "${CERTS_DIR}/ca/ca.crt")")
+        log_info "Using the local CA for OIDC discovery"
+    fi
+
+    # Not silenced and not ignored: this failing is what leaves Vault with no
+    # human SSO at all, and it used to be followed by an unconditional
+    # "OIDC auth configured".
+    if ! vault_admin write auth/oidc/config \
         oidc_discovery_url="https://keycloak.${DOMAIN}/realms/devops" \
         oidc_client_id="vault" \
         oidc_client_secret="${client_secret}" \
-        default_role="default" >/dev/null
+        "${ca_args[@]+"${ca_args[@]}"}" \
+        default_role="default" >/dev/null; then
+        log_error "Could not configure OIDC auth against https://keycloak.${DOMAIN}/realms/devops"
+        log_error "Vault must be able to reach Keycloak and trust its certificate."
+        if [[ "$ENV" == "local" ]]; then
+            log_error "On local this needs the keycloak.${DOMAIN} hostAlias on the Vault pod:"
+            log_error "  ./deploy.sh --env ${ENV} vault && ./setup-vault.sh --env ${ENV} oidc"
+        fi
+        return 1
+    fi
 
     vault_admin write auth/oidc/role/default \
         bound_audiences="vault" \

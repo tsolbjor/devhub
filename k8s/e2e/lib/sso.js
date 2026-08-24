@@ -56,6 +56,63 @@ async function keycloakLogin(page) {
   }
 }
 
+// Woodpecker's forge button, for the spec and for the token-minting tool. The
+// label is the forge host, so this pattern is a best effort — clickLoginTrigger's
+// fallback is what actually carries local.
+const WOODPECKER_LOGIN_BUTTON = /login with|sign in with|^log ?in$/i;
+
+// Click whatever starts the OIDC flow on a service's own login page.
+//
+// Matching on the label alone is not enough: Woodpecker labels its button with
+// the *forge host*, and that host is a cluster Service name wherever the server
+// talks to Forgejo in-cluster (local — see WOODPECKER_GITEA_URL). The label then
+// reads "forgejo-http.forgejo.svc.cluster.local" and no pattern spelled in terms
+// of the public URL can match it, so the click silently never happened and the
+// failure surfaced much later as "401 User not authorized".
+//
+// The fallback is structural: these login pages carry exactly one button. It is
+// used only when the label did not match, and only when the button is unique, so
+// a page offering several ways in is never clicked at random.
+async function clickLoginTrigger(page, button) {
+  const byLabel = page
+    .getByRole('link', { name: button })
+    .or(page.getByRole('button', { name: button }))
+    .first();
+
+  let trigger = null;
+  if (await appears(byLabel)) {
+    trigger = byLabel;
+  } else {
+    const buttons = page.getByRole('button');
+    if ((await buttons.count()) === 1) trigger = buttons.first();
+  }
+  if (!trigger) return false;
+
+  // The click starts a redirect chain (service → Keycloak → service), so
+  // wait for the network to settle rather than for one navigation.
+  await trigger.click();
+  await page.waitForLoadState('networkidle', { timeout: 60_000 }).catch(() => {});
+  return true;
+}
+
+// Woodpecker delegates to Forgejo, which delegates to Keycloak — two hops, not
+// one. A browser that carries the realm session but has never visited Forgejo
+// stops at Forgejo's own login page, exactly as a human would, and one click on
+// its OIDC link finishes the chain silently. Without this the Woodpecker specs
+// failed with "still shows its own login form (at …/user/login)", blaming
+// Woodpecker for a Forgejo session that had simply never been established.
+//
+// The link's href always contains /user/oauth2/, whatever the auth source was
+// named. No-op on every service that is not Forgejo.
+async function followForgejoSso(page) {
+  const sso = page.locator('a[href*="/user/oauth2/"]').first();
+  if (!(await appears(sso, 5_000))) return false;
+
+  await sso.click();
+  await page.waitForLoadState('networkidle', { timeout: 60_000 }).catch(() => {});
+  return true;
+}
+
 // Services differ in how they start the flow: some redirect straight to
 // Keycloak (the Homepage gateway policy), others show their own page with a
 // "sign in with…" button. Click the button when it is there, then wait for the
@@ -63,19 +120,9 @@ async function keycloakLogin(page) {
 async function signIn(page, url, { button } = {}) {
   await page.goto(url, { waitUntil: 'domcontentloaded' });
 
-  if (button) {
-    const trigger = page
-      .getByRole('link', { name: button })
-      .or(page.getByRole('button', { name: button }))
-      .first();
+  if (button) await clickLoginTrigger(page, button);
 
-    if (await appears(trigger)) {
-      // The click starts a redirect chain (service → Keycloak → service), so
-      // wait for the network to settle rather than for one navigation.
-      await trigger.click();
-      await page.waitForLoadState('networkidle', { timeout: 60_000 }).catch(() => {});
-    }
-  }
+  await followForgejoSso(page);
 
   // Forgejo's OAuth consent screen, shown the first time Woodpecker asks for
   // access. Absent once granted.
@@ -98,4 +145,13 @@ async function signIn(page, url, { button } = {}) {
   ).toBe(0);
 }
 
-module.exports = { keycloakLogin, signIn, fillKeycloakForm, onKeycloakLogin, appears };
+module.exports = {
+  keycloakLogin,
+  WOODPECKER_LOGIN_BUTTON,
+  signIn,
+  clickLoginTrigger,
+  followForgejoSso,
+  fillKeycloakForm,
+  onKeycloakLogin,
+  appears,
+};

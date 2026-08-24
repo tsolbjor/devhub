@@ -49,8 +49,11 @@ alloy:
           action        = "drop"
         }
 
+        // __meta_kubernetes_pod_container_name is the label the pod role
+        // publishes; __meta_kubernetes_container_name does not exist and left the
+        // container segment of the path empty, so nothing was ever tailed.
         rule {
-          source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_container_name"]
+          source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
           separator     = "/"
           target_label  = "__path__"
           replacement   = "/var/log/pods/*$1/*.log"
@@ -82,8 +85,14 @@ alloy:
         }
       }
 
+      // loki.source.file stats each __path__ literally instead of globbing it,
+      // so the wildcards have to be expanded first or nothing is ever tailed.
+      local.file_match "pod_logs" {
+        path_targets = discovery.relabel.pod_logs.output
+      }
+
       loki.source.file "pod_logs" {
-        targets    = discovery.relabel.pod_logs.output
+        targets    = local.file_match.pod_logs.targets
         forward_to = [loki.process.parse.receiver]
       }
 

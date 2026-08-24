@@ -26,12 +26,16 @@ spec:
     # k8s/argocd/projects/ are applied verbatim by deploy.sh — there is no
     # template_values pass for them, so a ${GITOPS_REPO_URL_INTERNAL}
     # placeholder would reach the cluster unsubstituted and match nothing.
-    # These are prefix globs over the two shapes the repo URL takes instead
-    # (ArgoCD's glob matching lets '*' span '/'):
+    # These are prefix globs over the two shapes the repo URL takes instead:
     #   http://forgejo-http.forgejo.svc.cluster.local:3000/<org>/<repo>.git
     #   https://git.<domain>/<org>/<repo>.git
-    - 'http://forgejo-http.forgejo.svc.cluster.local:3000/*'
-    - 'https://git.*'
+    #
+    # '**', not '*': ArgoCD matches sourceRepos with '/' as a glob separator, so
+    # a single '*' stops at the first path segment and '…:3000/*' does not match
+    # '…:3000/devhub/devhub.git'. Every Application then sits at sync status
+    # Unknown with "application repo … is not permitted in project 'platform'".
+    - 'http://forgejo-http.forgejo.svc.cluster.local:3000/**'
+    - 'https://git.**'
     # Upstream chart repositories, one per entry in platform-appset.yaml. A new
     # platform component means a new line here as well.
     - 'https://charts.jetstack.io'                              # cert-manager

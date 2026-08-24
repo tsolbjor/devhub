@@ -326,6 +326,18 @@ det_keycloak() {
         "/api/v1/namespaces/keycloak/services/keycloak-service:8080/proxy/realms/devops/.well-known/openid-configuration" \
         2>/dev/null | grep -q authorization_endpoint
 }
+# Vault's OIDC auth is configured *after* Keycloak, because it needs the client
+# secret Keycloak creates — `vault --env <env>` alone runs too early and skips it.
+# Reading auth/oidc/config needs a token, so the mount listing is the marker:
+# the mount exists only once `setup-vault.sh oidc` has run.
+det_vaultoidc() {
+    local token
+    token="$(jq -r '.admin_token // empty' "${ENV_DIR}/vault-init-keys.json" 2>/dev/null)"
+    [[ -n "$token" ]] || return 1
+    kc exec -n vault vault-0 -- env VAULT_ADDR=http://127.0.0.1:8200 \
+        VAULT_TOKEN="$token" vault auth list -format=json 2>/dev/null \
+        | jq -e '."oidc/"' >/dev/null 2>&1
+}
 det_secrets()    { kc get externalsecret forgejo-db-secret -n forgejo >/dev/null; }
 det_appofapps()  { kc get application devhub-apps -n argocd >/dev/null; }
 # CI secrets: the stored Woodpecker token is the marker (ci-secrets stores it
@@ -372,6 +384,7 @@ if [[ "$ENV" == "local" ]]; then
     step policy    "Kyverno policies active"                 det_policy    "deploy --env ${ENV} kyverno"
     step vault     "Vault initialised and unsealed"          det_vault     "vault --env ${ENV}"
     step keycloak  "Keycloak realm and OIDC clients"         det_keycloak  "keycloak --env ${ENV}"
+    step vaultoidc "Vault OIDC (sign in with Keycloak)"      det_vaultoidc "vault --env ${ENV} oidc"
     step secrets   "Credentials moved into Vault"            det_secrets   "secrets --env ${ENV}"
     step cisecrets "Woodpecker CI secrets (auto-activation)"  det_cisecrets "deploy --env ${ENV} ci-secrets"
     step appofapps "ArgoCD app-of-apps"                      det_appofapps "deploy --env ${ENV} bootstrap"
@@ -405,6 +418,7 @@ else
     step policy    "Kyverno policies active"                 det_policy    "deploy --env ${ENV} kyverno"
     step vault     "Vault initialised and unsealed"          det_vault     "vault --env ${ENV}"
     step keycloak  "Keycloak realm and OIDC clients"         det_keycloak  "keycloak --env ${ENV}"
+    step vaultoidc "Vault OIDC (sign in with Keycloak)"      det_vaultoidc "vault --env ${ENV} oidc"
     step secrets   "Credentials moved into Vault"            det_secrets   "secrets --env ${ENV}"
     step cisecrets "Woodpecker CI secrets (auto-activation)"  det_cisecrets "deploy --env ${ENV} ci-secrets"
     step appofapps "ArgoCD app-of-apps"                      det_appofapps "deploy --env ${ENV} bootstrap"

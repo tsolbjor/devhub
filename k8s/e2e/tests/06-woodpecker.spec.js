@@ -7,12 +7,12 @@
 
 const { test, expect } = require('@playwright/test');
 const { services } = require('../lib/env');
-const { signIn } = require('../lib/sso');
+const { signIn, WOODPECKER_LOGIN_BUTTON } = require('../lib/sso');
 const { apiJson } = require('../lib/http');
 
 test.describe('woodpecker', () => {
   test('logs in through Forgejo and knows the user', async ({ page }) => {
-    await signIn(page, services.woodpecker, { button: /login with|sign in with|^login$/i });
+    await signIn(page, services.woodpecker, { button: WOODPECKER_LOGIN_BUTTON });
 
     const res = await apiJson(page, `${services.woodpecker}/api/user`);
     expect(res.status, 'Woodpecker did not accept the Forgejo OAuth login').toBe(200);
@@ -20,7 +20,7 @@ test.describe('woodpecker', () => {
   });
 
   test('has at least one agent connected', async ({ page }) => {
-    await signIn(page, services.woodpecker, { button: /login with|sign in with|^login$/i });
+    await signIn(page, services.woodpecker, { button: WOODPECKER_LOGIN_BUTTON });
 
     const res = await apiJson(page, `${services.woodpecker}/api/agents`);
     // /api/agents is admin-only; a non-admin session gets 401/403 and the check
@@ -32,7 +32,7 @@ test.describe('woodpecker', () => {
   });
 
   test('can see repositories from Forgejo', async ({ page }) => {
-    await signIn(page, services.woodpecker, { button: /login with|sign in with|^login$/i });
+    await signIn(page, services.woodpecker, { button: WOODPECKER_LOGIN_BUTTON });
 
     // Not "there is at least one repo": a fresh platform legitimately has none
     // enabled. The signal is that Woodpecker can talk to Forgejo at all.
