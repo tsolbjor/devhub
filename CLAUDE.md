@@ -27,14 +27,27 @@ What follows from that:
   cut away, and the overlay's `devops/` symlink is dereferenced into real files
 - the generated repo **commits** `backend.hcl` and `*.tfvars` (inverting this
   repo's `.gitignore`) — without them nobody can `tofu init` the environment
-- `renovate.json` ships, so chart pins keep moving after the link is cut
+- `renovate.json` ships, so chart pins keep moving after the link is cut — and a
+  generated `k8s/argocd/apps/platform-config.yaml` Application is what makes those
+  bumps *take effect*, reconciling `platform-appset.yaml` and `projects/` from git
+  (`deploy.sh gitops` applies them once, so without it a merged chart-pin PR
+  changes nothing). A generated `.woodpecker.yml` runs `validate-overlays.sh` on
+  every push and pull request, and `k8s/e2e/` ships so `validate --e2e` works
 - installer-only scripts (`quickstart.sh`, `setup-env.sh`, `preflight.sh`,
   `setup-gitops-repo.sh`) do not ship; `devhub` reports that rather than failing
   on a missing file
-- the staged tree is scanned for credentials and key material before any commit;
+- the staged tree is scanned for credentials and key material before any commit,
+  including assignment-shaped secrets in the committed `backend.hcl`/`*.tfvars`;
   publishing aborts rather than warns
+- the wizard's answers are baked into the published `config.yaml`, with the key
+  list *derived from* `_setup/<env>/config.yaml` — a new question ships the
+  operator's answer, not the committed sample
 - `.devhub-origin` records the generating version. Provenance only — nothing
-  reads it
+  reads it, but it is the input to the re-sync recipe: staging the same
+  environment at that commit and at latest, then merging the diff, is how later
+  devhub improvements arrive (`k8s/docs/OPERATIONS.md`, "Keeping the platform up
+  to date"). "No upstream dependency" therefore means **merge-based updates**,
+  not "no upgrade path"
 
 The environment's Forgejo is the source of truth; an off-cluster **push mirror**
 (`GITOPS_MIRROR_URL`) is the copy that survives losing the cluster. It carries git
@@ -429,7 +442,7 @@ devhub/
 - Scripts never edit committed files — no exceptions; generated output (including `setup-env.sh`'s answers file `config.yaml`) goes to `_setup/<env>/` at the repo root (gitignored, mode 600/700). `./devhub reset --env <env>` deletes the regenerable ones to start over; `vault-init-keys.json` and `manual-secrets.env` survive unless `--force` (see `_setup/README.md`)
 - Every script calls `use_env_kubeconfig` + `require_cluster_match` before touching a cluster
 - Rendered Helm values go to a per-run `mktemp -d` directory, not fixed `/tmp` paths
-- Helm chart versions are pinned in three places (deploy scripts, `platform-appset.yaml`, docs) — Renovate groups them into one PR
+- Helm chart pins live in two places: the deploy scripts (`CHART_X="1.2.3" # renovate: helm depName=<chart> registryUrl=<url>`) and `platform-appset.yaml`. `validate-overlays.sh` derives its coordinates from the deploy scripts rather than keeping a third copy, and Renovate's `groupName: helm chart {{depName}}` lands both pins of a chart in one PR — so `depName` must equal the appset's `chart:` value. The two OCI charts (forgejo, gateway-helm) have no `index.yaml`, so they use the docker datasource instead
 - `.terraform.lock.hcl` **is** committed; `backend.hcl` and `*.tfvars` are not — in *this* repo. A generated environment repo commits them (see Lifecycle)
 - Adding a `${VAR}` to a values file means adding it to `TEMPLATE_VARS` too, or `validate-overlays.sh` fails
 - YAML files must not have duplicate keys (silent override) — the validator enforces this

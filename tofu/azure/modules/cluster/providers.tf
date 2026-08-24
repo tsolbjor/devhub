@@ -14,5 +14,10 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.0"
     }
+    # Drives the two-year rotation of the Entra IdP client secret.
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.12"
+    }
   }
 }

@@ -115,9 +115,26 @@ resource "azurerm_kubernetes_cluster" "main" {
   oidc_issuer_enabled       = true
   workload_identity_enabled = true
 
+  # Without an upgrade channel the cluster keeps whatever version it was created
+  # with until Azure force-upgrades it off an unsupported release — outside tofu,
+  # unannounced. "patch" takes security patches within the current minor and
+  # leaves minor upgrades a deliberate act (bump aks_kubernetes_version, apply).
+  automatic_upgrade_channel = var.aks_upgrade_channel == "none" ? null : var.aks_upgrade_channel
+
+  maintenance_window_auto_upgrade {
+    frequency   = "Weekly"
+    interval    = 1
+    duration    = 4
+    day_of_week = "Sunday"
+    start_time  = "02:00"
+    utc_offset  = "+00:00"
+  }
+
   lifecycle {
-    # Node count is owned by the AKS autoscaler once it is running.
-    ignore_changes = [default_node_pool[0].node_count]
+    # Node count is owned by the AKS autoscaler once it is running. The patch
+    # version is owned by the upgrade channel — without this, every plan after
+    # an automatic patch upgrade would try to roll the cluster back.
+    ignore_changes = [default_node_pool[0].node_count, kubernetes_version]
   }
 }
 
@@ -272,8 +289,14 @@ resource "azurerm_postgresql_flexible_server_database" "forgejo" {
 # leak or rotate — a client authenticates as a managed identity that has been
 # granted an azurerm_managed_redis_access_policy_assignment. Nothing on the
 # platform consumes Redis today (Forgejo runs its default memory/leveldb
-# backends); this is capacity for workloads, keyless from the start.
+# backends, and developer apps get a per-app in-cluster Redis from the
+# devhub-app chart on the workload cluster, which has no network path to this
+# VPC), so it is off by default — a Balanced_B1 with HA is real monthly spend
+# for an unused service. Set enable_cache = true when a workload needs it;
+# keyless from the start.
 resource "azurerm_managed_redis" "main" {
+  count = var.enable_cache ? 1 : 0
+
   name                      = "${var.prefix}-redis"
   resource_group_name       = azurerm_resource_group.main.name
   location                  = azurerm_resource_group.main.location
@@ -302,6 +325,23 @@ resource "azurerm_storage_account" "main" {
   account_tier             = "Standard"
   account_replication_type = var.storage_replication
   min_tls_version          = "TLS1_2"
+
+  # Entra-only data plane. The two account keys are the one credential on this
+  # platform that cannot be scoped, expired or attributed to a caller — and both
+  # consumers already avoid them: Loki authenticates with useFederatedToken and
+  # Velero with useAAD, each as its own user-assigned identity holding
+  # "Storage Blob Data Contributor" (platform.tf). Turning shared keys off is
+  # what makes those identities the *only* way in. Anything added later must
+  # come with a federated credential + role assignment, not an account key.
+  #
+  # Container and lifecycle-policy management stay fine: the provider drives
+  # those through Resource Manager (hence storage_account_id, not the account
+  # name), which authenticates as the identity running tofu.
+  shared_access_key_enabled = false
+
+  # No blob or container may be flipped to anonymous read, whatever a later
+  # container_access_type says.
+  allow_nested_items_to_be_public = false
 
   # Blob versioning + soft delete so a bad backup overwrite is recoverable.
   blob_properties {
@@ -413,11 +453,37 @@ resource "azuread_service_principal" "keycloak_idp" {
   owners                       = [data.azuread_client_config.current.object_id]
 }
 
+# The client secret is dated, not immortal: end_date used to be 2099, which is a
+# credential that outlives the platform. time_rotating carries a timestamp two
+# years out and re-creates itself once that passes; rotate_when_changed keys the
+# password off it, so the first apply after expiry mints a new secret instead of
+# leaving a dead one in place.
+resource "time_rotating" "keycloak_idp_secret" {
+  rotation_years = 2
+}
+
 resource "azuread_application_password" "keycloak_idp" {
   application_id = azuread_application.keycloak_idp.id
   display_name   = "keycloak-idp-secret"
-  end_date       = "2099-01-01T00:00:00Z"
+  end_date       = time_rotating.keycloak_idp_secret.rotation_rfc3339
+
+  rotate_when_changed = {
+    rotation = time_rotating.keycloak_idp_secret.id
+  }
 }
+
+# A rotation only reaches Entra ID — Keycloak keeps the old secret until it is
+# pushed there, and until then "Sign in with Microsoft" fails with
+# invalid_client. After any apply that replaces the password:
+#   ./devhub sync     --env azure-<env>   # entra_keycloak_client_secret (below)
+#                                         # → _setup/<env>/secrets.env
+#   ./devhub keycloak --env azure-<env>   # setup-keycloak.sh
+# Caveat: setup-keycloak.sh only *creates* the entra IdP — an existing instance
+# is skipped, so the re-run does not overwrite the stored secret. Either delete
+# the instance first, or push the new value directly:
+#   kubectl exec -n keycloak keycloak-0 -- /opt/keycloak/bin/kcadm.sh \
+#     update identity-provider/instances/entra -r devops \
+#     -s "config.clientSecret=$ENTRA_KEYCLOAK_CLIENT_SECRET"
 
 # ─── External-DNS Workload Identity ──────────────────────────────────
 # Allows external-dns to manage Azure DNS records for the cluster's domain.

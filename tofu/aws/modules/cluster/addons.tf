@@ -9,6 +9,19 @@
 locals {
   # OIDC issuer hostname+path, used in all IRSA trust policies.
   oidc_url = replace(aws_iam_openid_connect_provider.eks.url, "https://", "")
+
+  # Add-ons managed below. Versions are resolved explicitly (most recent for the
+  # cluster's Kubernetes version) so they show up in state and plans instead of
+  # drifting behind EKS defaults.
+  eks_addons = toset(["aws-ebs-csi-driver", "vpc-cni", "kube-proxy", "coredns"])
+}
+
+data "aws_eks_addon_version" "this" {
+  for_each = local.eks_addons
+
+  addon_name         = each.key
+  kubernetes_version = aws_eks_cluster.main.version
+  most_recent        = true
 }
 
 # Reusable trust policy for a namespace/service-account pair.
@@ -16,6 +29,7 @@ data "aws_iam_policy_document" "irsa_trust" {
   for_each = {
     ebs_csi            = "system:serviceaccount:kube-system:ebs-csi-controller-sa"
     cluster_autoscaler = "system:serviceaccount:kube-system:cluster-autoscaler"
+    cert_manager       = "system:serviceaccount:cert-manager:cert-manager"
     loki               = "system:serviceaccount:monitoring:loki"
     velero             = "system:serviceaccount:velero:velero"
     vault              = "system:serviceaccount:vault:vault"
@@ -61,6 +75,7 @@ resource "aws_iam_role_policy_attachment" "ebs_csi" {
 resource "aws_eks_addon" "ebs_csi" {
   cluster_name                = aws_eks_cluster.main.name
   addon_name                  = "aws-ebs-csi-driver"
+  addon_version               = data.aws_eks_addon_version.this["aws-ebs-csi-driver"].version
   service_account_role_arn    = aws_iam_role.ebs_csi.arn
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
@@ -75,6 +90,7 @@ resource "aws_eks_addon" "ebs_csi" {
 resource "aws_eks_addon" "vpc_cni" {
   cluster_name                = aws_eks_cluster.main.name
   addon_name                  = "vpc-cni"
+  addon_version               = data.aws_eks_addon_version.this["vpc-cni"].version
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
   tags                        = var.tags
@@ -83,6 +99,7 @@ resource "aws_eks_addon" "vpc_cni" {
 resource "aws_eks_addon" "kube_proxy" {
   cluster_name                = aws_eks_cluster.main.name
   addon_name                  = "kube-proxy"
+  addon_version               = data.aws_eks_addon_version.this["kube-proxy"].version
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
   tags                        = var.tags
@@ -91,6 +108,7 @@ resource "aws_eks_addon" "kube_proxy" {
 resource "aws_eks_addon" "coredns" {
   cluster_name                = aws_eks_cluster.main.name
   addon_name                  = "coredns"
+  addon_version               = data.aws_eks_addon_version.this["coredns"].version
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
   tags                        = var.tags

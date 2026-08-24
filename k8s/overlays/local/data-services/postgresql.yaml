@@ -1,6 +1,6 @@
 # Shared PostgreSQL for local development
 # Creates databases for Keycloak and Forgejo
-# NOTE: The postgresql-init ConfigMap is created by deploy.sh with actual passwords
+# NOTE: The postgresql-init Secret is created by deploy.sh with actual passwords
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -68,8 +68,13 @@ spec:
             periodSeconds: 5
       volumes:
         - name: init-scripts
-          configMap:
-            name: postgresql-init
+          # A Secret, not a ConfigMap: the init SQL contains the Keycloak and
+          # Forgejo database passwords in plaintext, and a ConfigMap is readable
+          # by anything with namespace get access and shows up verbatim in
+          # `kubectl describe`. deploy.sh creates it and deletes the leftover
+          # ConfigMap once this reference is a Secret.
+          secret:
+            secretName: postgresql-init
   volumeClaimTemplates:
     - metadata:
         name: data

@@ -8,6 +8,27 @@
 # secrets on the devhub org (`deploy.sh <env> ci-secrets`), scoped to push
 # events so pull-request builds from untrusted code cannot read them. Nothing
 # to add per repository; a missing secret means ci-secrets has not been run.
+#
+# CREDENTIAL MAP — registry_token is not a read-only registry key. It is a
+# Forgejo access token with repo write, and this pipeline uses it as three
+# different things: registry password, chart-download credential, and the git
+# push credential for the deploy step. So it is requested per step, never
+# pipeline-wide, and only where a step cannot work without it:
+#
+#   lint    yes — Forgejo runs with REQUIRE_SIGNIN_VIEW, so even the public
+#                 devhub-app-chart archive needs a token to download
+#   test    NO  — deliberately. Test code pulls third-party packages and runs
+#                 arbitrary code from them; it gets no credential to exfiltrate
+#   build   yes — registry push (+ registry_user)
+#   deploy  yes — pushes the tag-bump commit back to this repo
+#
+# The org secrets are themselves scoped to push events, so a pull-request
+# pipeline running untrusted code gets nothing regardless of what a step asks
+# for — lint and deploy additionally decline to run at all on a PR, and build
+# runs with PUSH=false.
+#
+# If you add a step, do not add the token to it "for symmetry". Ask whether the
+# step would fail without it.
 
 when:
   - event: [push, pull_request]
@@ -20,7 +41,9 @@ steps:
   #
   # Push events only: Forgejo requires sign-in for every view, so the download
   # authenticates with the registry_token secret — which is deliberately absent
-  # from pull-request builds (untrusted code must not read it).
+  # from pull-request builds (untrusted code must not read it). This step only
+  # needs to *read* a public chart; it holds a write-scoped token because that
+  # is the only credential the platform hands to CI today.
   - name: lint
     image: alpine/helm:3.16.2
     when:
@@ -35,6 +58,9 @@ steps:
       - helm template APP_NAME devhub-app-chart -f k8s/values.yaml >/dev/null
       - echo "values.yaml renders cleanly"
 
+  # No `environment:` block on purpose — see the credential map at the top. Tests
+  # restore third-party NuGet packages and execute their code; there is nothing
+  # here for that code to steal.
   - name: test
     image: mcr.microsoft.com/dotnet/sdk:8.0
     commands:
@@ -68,6 +94,14 @@ steps:
         cat > ~/.docker/config.json <<EOF
         {"auths":{"git.DOMAIN":{"username":"$REGISTRY_USER","password":"$REGISTRY_TOKEN"}}}
         EOF
+      # The two tags are not two ways to deploy. `:$CI_COMMIT_SHA` is the
+      # deployable artefact — immutable, and the only tag that ever reaches
+      # k8s/values.yaml (the deploy step below writes it there). `:latest` is a
+      # BuildKit cache pointer and nothing else: --import-cache reads the
+      # previous build's inline cache from it, --export-cache writes this
+      # build's back, which is why it is still pushed. Never deploy `:latest` —
+      # it is mutable, so two clusters could pull different images under the
+      # same name and a rollback would have nothing to roll back to.
       - |
         PUSH=false
         if [ "$CI_PIPELINE_EVENT" = "push" ]; then PUSH=true; fi
@@ -79,7 +113,21 @@ steps:
           --export-cache type=inline \
           --output type=image,\"name=git.DOMAIN/devhub/APP_NAME:$CI_COMMIT_SHA,git.DOMAIN/devhub/APP_NAME:latest\",push=$PUSH
 
-  # ArgoCD watches k8s/ and syncs whatever image tag is committed there.
+  # ArgoCD watches k8s/ and syncs whatever image tag is committed there, so
+  # "deploy" is a commit: rewrite app.image.tag to this build's SHA and push it.
+  # The deployed version is therefore always readable in git history — and
+  # ROLLBACK IS `git revert` of the tag-bump commit (or an edit of
+  # k8s/values.yaml to an older SHA). Those images are immutable and still in
+  # the registry; no CI re-run is needed to go back.
+  #
+  # `[skip ci]` in the commit message is LOAD-BEARING, not tidiness: this push
+  # is a push to the default branch, which is exactly what triggers this
+  # pipeline. Without the marker the build would trigger itself forever. Keep it
+  # if you touch the message, and keep the `git diff --cached --quiet` guard —
+  # it is the second brake, stopping the commit when the tag has not changed.
+  #
+  # GIT_TOKEN is registry_token again (see the credential map at the top): the
+  # same Forgejo token, used here for its repo-write scope.
   - name: deploy
     image: alpine/git:latest
     environment:

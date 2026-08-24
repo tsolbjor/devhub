@@ -5,14 +5,18 @@ set -euo pipefail
 # Vault Initialization and Configuration
 # =============================================================================
 # Usage: ./setup-vault.sh --env <env> <action>
-#   all | init | unseal | configure | seed-secrets
+#   all | init | unseal | configure | seed-secrets | audit
 #   admin-token | renew-admin | new-root | revoke-root | status
 #
 # Key handling
 # ------------
 # With cloud KMS auto-unseal (tofu provisions the key; deploy.sh wires it up)
-# Vault unseals itself and the only sensitive artefacts are *recovery* keys,
-# which are printed once and never written into the cluster.
+# Vault unseals itself and the only sensitive artefacts are *recovery* keys.
+#
+# No key material is ever printed to stdout: quickstart tees every step through
+# _setup/<env>/logs/*.log, so printing would give the "only copy" a second
+# plaintext home on disk. The gitignored mode-600 file is the copy; the scripts
+# print its path and the jq command to read it.
 #
 # Without KMS, unseal keys are written to a gitignored file with mode 600. They
 # are deliberately NOT copied into a Kubernetes secret any more: keeping unseal
@@ -37,6 +41,10 @@ if [[ ${#ARGS[@]} -gt 0 ]]; then set -- "${ARGS[@]}"; else set --; fi
 setup_paths
 parse_config
 use_env_kubeconfig
+# Repo convention: never touch a cluster without checking it is the right one.
+# Without this, `--env local` while a prod kubeconfig was active would initialise
+# (or re-seed) the prod cluster's Vault and cross-write its key file.
+require_cluster_match
 
 # Keys file stored per-environment (gitignored, mode 600)
 KEYS_FILE="${SCRIPT_ENV_DIR}/vault-init-keys.json"
@@ -79,41 +87,109 @@ require_keys_file() {
     fi
 }
 
+# Resolve the token every vault_admin call runs with, and refuse to hand back
+# anything that is not token-shaped.
+#
 # The admin token replaces root for day-to-day platform work, and — since Vault
-# 2.0 made sys/generate-root an authenticated endpoint (CVE-2026-5807) — it is also
-# what makes root regeneration possible at all. Unseal keys alone are no longer
-# enough.
-root_token() {
-    require_keys_file
-    local token
-    token="$(jq -r '.admin_token // .root_token // empty' "${KEYS_FILE}")"
+# 2.0 made sys/generate-root an authenticated endpoint (CVE-2026-5807) — it is
+# also what makes root regeneration possible at all. Unseal keys alone are no
+# longer enough.
+#
+# This deliberately does not `exit`: it is always called from inside a `$( )`,
+# where `exit` only kills the substitution's subshell. That is exactly how the
+# previous `local token="${VAULT_TOKEN:-$(root_token)}"` went wrong — root_token's
+# `exit 1` ended the subshell, `token` came out empty, and every following call
+# ran with VAULT_TOKEN="". Vault answered 403 to all of them, so the run's errors
+# pointed at Vault instead of at the missing token. Returning non-zero makes the
+# caller's assignment fail, which `set -e` turns into a real stop.
+resolve_vault_token() {
+    local token="${VAULT_TOKEN:-}"
+
+    if [[ -z "$token" ]]; then
+        if [[ ! -f "${KEYS_FILE}" ]]; then
+            log_error "Vault key material not found: ${KEYS_FILE}"
+            log_error "It is written once, at init, and never stored in the cluster."
+            log_error "Pass another token instead: VAULT_TOKEN=<token> $0 --env ${ENV} ..."
+            return 1
+        fi
+        token="$(jq -r '.admin_token // .root_token // empty' "${KEYS_FILE}" 2>/dev/null || true)"
+    fi
+
     if [[ -z "$token" ]]; then
         log_error "No admin or root token in ${KEYS_FILE}."
         log_error "Vault 2.0 requires a valid token to regenerate root, so the key"
         log_error "quorum on its own cannot recover admin access. Options:"
         log_error "  - use another token: VAULT_TOKEN=<token> ./setup-vault.sh --env ${ENV} ..."
         log_error "  - or re-initialise Vault (destroys its data)"
-        exit 1
+        return 1
     fi
-    echo "$token"
+
+    # Vault tokens are opaque single words (hvs.* today, s.* / 26 chars before).
+    # Anything with whitespace or shorter than that is a truncated file or an
+    # error message that leaked through a pipeline — using it would produce a
+    # confusing 403 several steps later.
+    if [[ ${#token} -lt 20 || "$token" == *[[:space:]]* ]]; then
+        log_error "The token from ${KEYS_FILE} is not token-shaped (${#token} chars)"
+        log_error "Expected something like hvs.<random>. Refusing to continue."
+        return 1
+    fi
+
+    printf '%s' "$token"
 }
 
 # Run a vault command with an admin token.
 vault_admin() {
-    local token="${VAULT_TOKEN:-$(root_token)}"
+    local token
+    token="$(resolve_vault_token)" || return 1
     kubectl exec -n vault vault-0 -- env \
         VAULT_ADDR=http://127.0.0.1:8200 \
         VAULT_TOKEN="$token" \
         vault "$@"
 }
 
-# Same, but forwards stdin (policy writes).
+# Same, but forwards stdin (policy writes, and KV values that must stay off argv).
 vault_admin_stdin() {
-    local token="${VAULT_TOKEN:-$(root_token)}"
+    local token
+    token="$(resolve_vault_token)" || return 1
     kubectl exec -i -n vault vault-0 -- env \
         VAULT_ADDR=http://127.0.0.1:8200 \
         VAULT_TOKEN="$token" \
         vault "$@"
+}
+
+# Like vault_admin, but prefers the *root* token.
+#
+# sys/audit is root-only on purpose — the platform-admin policy denies it, so a
+# leaked admin token cannot switch auditing off. That also means enabling the
+# audit device cannot go through vault_admin once an admin token exists.
+vault_root() {
+    local token="${VAULT_TOKEN:-}"
+    if [[ -z "$token" && -f "${KEYS_FILE}" ]]; then
+        token="$(jq -r '.root_token // .admin_token // empty' "${KEYS_FILE}" 2>/dev/null || true)"
+    fi
+    [[ -n "$token" ]] || return 1
+    kubectl exec -n vault vault-0 -- env \
+        VAULT_ADDR=http://127.0.0.1:8200 \
+        VAULT_TOKEN="$token" \
+        vault "$@"
+}
+
+# True when the keys file still holds a usable root token.
+have_root_token() {
+    [[ -n "${VAULT_TOKEN:-}" ]] && return 0
+    [[ -f "${KEYS_FILE}" ]] || return 1
+    [[ -n "$(jq -r '.root_token // empty' "${KEYS_FILE}" 2>/dev/null || true)" ]]
+}
+
+# kv_put <path> <json-object> — write a KV secret with the values on stdin.
+#
+# `vault kv put <path> key=value` puts every value in the exec'd command's
+# arguments, which are recorded in the Kubernetes API audit log (the exec
+# subresource carries the full command) and visible in `ps` on the node. Vault's
+# CLI reads a JSON object from stdin when the data argument is `-`.
+kv_put() {
+    local path="$1" json="$2"
+    printf '%s' "$json" | vault_admin_stdin kv put "$path" - >/dev/null
 }
 
 # =============================================================================
@@ -162,12 +238,22 @@ init_vault() {
     log_warn "It is the only copy — nothing writes it back into the cluster."
     echo ""
 
+    # The keys are deliberately NOT printed. quickstart runs every step through
+    # `tee _setup/<env>/logs/*.log`, so printing them would put the "only copy"
+    # into a second plaintext file on disk — plus shell scrollback and whatever
+    # terminal recording or shared screen is in play. The file is the copy.
     if auto_unseal_enabled; then
-        echo "Recovery keys (needed only to generate a new root token):"
-        echo "$init_output" | jq -r '.recovery_keys_b64[]' | sed 's/^/  /'
+        echo "Recovery keys (5, threshold 3 — needed only to generate a new root token):"
     else
-        echo "Unseal keys (3 of 5 required at every restart):"
-        echo "$init_output" | jq -r '.unseal_keys_b64[]' | sed 's/^/  /'
+        echo "Unseal keys (5, 3 required at every restart):"
+    fi
+    echo "  ${KEYS_FILE}"
+    echo ""
+    echo "  Read them when you actually need them, then move the file off this machine:"
+    if auto_unseal_enabled; then
+        echo "    jq -r '.recovery_keys_b64[]' ${KEYS_FILE}"
+    else
+        echo "    jq -r '.unseal_keys_b64[]' ${KEYS_FILE}"
     fi
     echo ""
 }
@@ -189,8 +275,12 @@ unseal_vault() {
         kubectl get pod "$pod" -n vault &>/dev/null || continue
         log_info "Unsealing $pod..."
         for key in $keys; do
-            kubectl exec -n vault "$pod" -- env VAULT_ADDR=http://127.0.0.1:8200 \
-                vault operator unseal "$key" >/dev/null 2>&1 || true
+            # The key goes in on stdin (`unseal -`). As an argument it would be
+            # written into the Kubernetes API audit log — the exec subresource
+            # records the whole command — and be visible in `ps` on the node.
+            printf '%s\n' "$key" | kubectl exec -i -n vault "$pod" -- \
+                env VAULT_ADDR=http://127.0.0.1:8200 \
+                vault operator unseal - >/dev/null 2>&1 || true
         done
     done
 
@@ -206,15 +296,61 @@ configure_k8s_auth() {
 
     vault_admin auth enable kubernetes 2>/dev/null || log_info "kubernetes auth already enabled"
 
-    kubectl exec -n vault vault-0 -- sh -c "
+    # Resolved here, not inline in the command below: `$(root_token)` inside the
+    # heredoc runs in a subshell, so a failure there produced VAULT_TOKEN='' and
+    # a 403 rather than a stop.
+    local token
+    token="$(resolve_vault_token)" || return 1
+
+    kubectl exec -n vault vault-0 -- env VAULT_TOKEN="$token" sh -c "
         export VAULT_ADDR=http://127.0.0.1:8200
-        export VAULT_TOKEN='${VAULT_TOKEN:-$(root_token)}'
         vault write auth/kubernetes/config \
             kubernetes_host=https://\$KUBERNETES_SERVICE_HOST:\$KUBERNETES_SERVICE_PORT \
             kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
     "
 
     log_info "Kubernetes authentication configured"
+}
+
+# Audit logging. Vault's audit devices are opt-in: until one is enabled Vault
+# keeps no request log at all. The platform provisioned audit storage
+# (auditStorage in the Vault chart values, mounted at /vault/audit) and the
+# platform-admin policy denies sys/audit* "so a leaked admin token cannot switch
+# auditing off" — but nothing ever enabled a device, so that denial was guarding
+# a log that did not exist.
+#
+# Must run BEFORE the root token is revoked, and before create_admin_token makes
+# vault_admin prefer the admin token: sys/audit is exactly what platform-admin
+# cannot touch. Hence vault_root.
+enable_audit_device() {
+    log_step "Enabling the file audit device..."
+
+    if vault_root audit list -format=json 2>/dev/null | jq -e 'has("file/")' >/dev/null 2>&1; then
+        log_info "Audit device file/ already enabled"
+        return 0
+    fi
+
+    if vault_root audit enable file file_path=/vault/audit/audit.log >/dev/null; then
+        log_info "Audit device enabled: file → /vault/audit/audit.log (PVC vault-audit)"
+        log_info "Vault refuses requests it cannot audit, so watch this volume's free space."
+        return 0
+    fi
+
+    # No root token left: an environment set up before this step existed. Say
+    # how to fix it rather than failing a configure re-run that is otherwise fine.
+    if ! have_root_token; then
+        log_warn "Could not enable the audit device: sys/audit needs a root token and"
+        log_warn "the initial one has been revoked. Enable it with:"
+        log_warn "  ./setup-vault.sh --env ${ENV} new-root"
+        log_warn "  ./setup-vault.sh --env ${ENV} audit"
+        log_warn "  ./setup-vault.sh --env ${ENV} revoke-root"
+        return 0
+    fi
+
+    log_error "Could not enable the audit device even though a root token is available."
+    log_error "Check that the Vault pod has /vault/audit mounted and writable"
+    log_error "(server.auditStorage.enabled in k8s/base/devops/vault/values.yaml)."
+    return 1
 }
 
 # Human SSO: the Keycloak realm (which brokers Entra) becomes an OIDC auth
@@ -421,13 +557,14 @@ seed_platform_secrets() {
         if [[ "$force" == "--force" ]] || ! _kv_exists platform/postgres; then
             # The usernames are here because the Keycloak Operator wants both keys
             # in one secret, and keeping them together means a rotation is a single
-            # `vault kv put` rather than a put plus a manifest edit.
-            vault_admin kv put secret/platform/postgres \
-                admin-password="${pg_admin}" \
-                keycloak-username="keycloak" \
-                keycloak-password="${pg_keycloak}" \
-                forgejo-username="forgejo" \
-                forgejo-password="${pg_forgejo}" >/dev/null
+            # `vault kv patch` rather than a patch plus a manifest edit.
+            kv_put secret/platform/postgres "$(jq -n \
+                --arg admin "$pg_admin" \
+                --arg kc "$pg_keycloak" \
+                --arg fj "$pg_forgejo" \
+                '{"admin-password":$admin,
+                  "keycloak-username":"keycloak","keycloak-password":$kc,
+                  "forgejo-username":"forgejo","forgejo-password":$fj}')"
             log_info "  secret/platform/postgres"
         else
             log_info "  secret/platform/postgres (exists, left as-is)"
@@ -443,7 +580,7 @@ seed_platform_secrets() {
     local redis_pw="${REDIS_PASSWORD:-}"
     if [[ -n "$redis_pw" ]]; then
         if [[ "$force" == "--force" ]] || ! _kv_exists platform/redis; then
-            vault_admin kv put secret/platform/redis password="${redis_pw}" >/dev/null
+            kv_put secret/platform/redis "$(jq -n --arg p "$redis_pw" '{password:$p}')"
             log_info "  secret/platform/redis"
         else
             log_info "  secret/platform/redis (exists, left as-is)"
@@ -456,9 +593,9 @@ seed_platform_secrets() {
     graf_pw="$(_read_k8s monitoring grafana-admin-secret admin-password)"
     if [[ -n "$graf_pw" ]]; then
         if [[ "$force" == "--force" ]] || ! _kv_exists platform/grafana; then
-            vault_admin kv put secret/platform/grafana \
-                admin-user="${graf_user:-admin}" \
-                admin-password="${graf_pw}" >/dev/null
+            kv_put secret/platform/grafana "$(jq -n \
+                --arg u "${graf_user:-admin}" --arg p "$graf_pw" \
+                '{"admin-user":$u,"admin-password":$p}')"
             log_info "  secret/platform/grafana"
         else
             log_info "  secret/platform/grafana (exists, left as-is)"
@@ -473,7 +610,7 @@ seed_platform_secrets() {
     [[ -n "$apps_oidc" ]] || apps_oidc="$(grep -s '^APPS_OIDC_SECRET=' "${SCRIPT_ENV_DIR}/oidc-secrets.env" | tail -1 | cut -d= -f2-)"
     if [[ -n "$apps_oidc" ]]; then
         if [[ "$force" == "--force" ]] || ! _kv_exists apps/oidc-gateway; then
-            vault_admin kv put secret/apps/oidc-gateway client-secret="${apps_oidc}" >/dev/null
+            kv_put secret/apps/oidc-gateway "$(jq -n --arg s "$apps_oidc" '{"client-secret":$s}')"
             log_info "  secret/apps/oidc-gateway"
         else
             log_info "  secret/apps/oidc-gateway (exists, left as-is)"
@@ -484,11 +621,16 @@ seed_platform_secrets() {
     if [[ "$force" == "--force" ]] || ! _kv_exists platform/alertmanager; then
         local webhook
         webhook="$(_read_k8s monitoring alertmanager-slack webhook-url)"
-        vault_admin kv put secret/platform/alertmanager webhook-url="${webhook}" >/dev/null
+        kv_put secret/platform/alertmanager "$(jq -n --arg w "$webhook" '{"webhook-url":$w}')"
         log_info "  secret/platform/alertmanager${webhook:+ (webhook set)}"
     fi
 
-    log_info "Rotate any of these with: vault kv put secret/platform/<name> <key>=<value>"
+    # `kv patch`, not `kv put`: KV v2 writes are whole-version replacements, so a
+    # `put` of one key on a multi-property secret — secret/platform/postgres holds
+    # the admin, keycloak and forgejo credentials together — deletes the others.
+    # ExternalSecrets then fails on its next refresh and Keycloak or Forgejo stops
+    # authenticating at the next restart.
+    log_info "Rotate any of these with: vault kv patch secret/platform/<name> <key>=<value>"
 }
 
 # Regenerate a *root* token. Rarely needed — the admin token covers normal work —
@@ -516,6 +658,10 @@ new_root_token() {
 
     local vx=(kubectl exec -n vault vault-0 -- env
               VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN="$admin")
+    # Same, forwarding stdin: the unseal shares go in that way rather than as
+    # arguments, which the Kubernetes API audit log records verbatim.
+    local vxi=(kubectl exec -i -n vault vault-0 -- env
+               VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN="$admin")
 
     # Cancel any half-finished attempt; a stale nonce makes every share fail.
     "${vx[@]}" vault operator generate-root -cancel >/dev/null 2>&1 || true
@@ -532,7 +678,8 @@ new_root_token() {
     for ((i = 0; i < threshold; i++)); do
         key="$(jq -r ".unseal_keys_b64[$i] // .recovery_keys_b64[$i] // empty" "${KEYS_FILE}")"
         [[ -n "$key" ]] || { log_error "Only $i keys available, need ${threshold}"; exit 1; }
-        out="$("${vx[@]}" vault operator generate-root -nonce="$nonce" -format=json "$key" 2>/dev/null || echo '{}')"
+        out="$(printf '%s\n' "$key" | "${vxi[@]}" \
+            vault operator generate-root -nonce="$nonce" -format=json - 2>/dev/null || echo '{}')"
         encoded="$(echo "$out" | jq -r '.encoded_token // empty')"
     done
     [[ -n "$encoded" ]] || { log_error "Root generation did not complete"; exit 1; }
@@ -591,7 +738,9 @@ print_summary() {
         echo "              Provision the KMS key with tofu to remove this step."
     fi
     echo "  Keys:       ${KEYS_FILE}  (mode 600, gitignored, NOT in the cluster)"
-    echo "  Root token: revoked — regenerate with './setup-vault.sh --env '"${ENV}"' new-root'"
+    echo "              never printed — read with: jq -r '.unseal_keys_b64[]' <file>"
+    echo "  Audit:      file device → /vault/audit/audit.log (PVC vault-audit)"
+    echo "  Root token: revoked — regenerate with './setup-vault.sh --env ${ENV} new-root'"
     echo "  Snapshots:  CronJob vault-raft-snapshot every 6h → PVC vault-snapshots"
     echo ""
     echo "  Platform credentials live at secret/platform/* and are delivered by"
@@ -618,6 +767,10 @@ main() {
             configure_k8s_auth
             create_platform_roles
             configure_oidc_auth
+            # Before create_admin_token (which makes vault_admin prefer the
+            # admin token, whose policy denies sys/audit*) and before
+            # revoke_root_token (which throws root away).
+            enable_audit_device
             create_admin_token
             seed_platform_secrets
             revoke_root_token
@@ -625,7 +778,9 @@ main() {
             ;;
         init)          init_vault ;;
         unseal)        unseal_vault ;;
-        configure)     configure_k8s_auth && create_platform_roles && configure_oidc_auth && create_admin_token ;;
+        configure)     configure_k8s_auth && create_platform_roles && configure_oidc_auth \
+                           && enable_audit_device && create_admin_token ;;
+        audit)         enable_audit_device ;;
         oidc)          configure_oidc_auth ;;
         seed-secrets)  seed_platform_secrets "${2:-}" ;;
         admin-token)   create_admin_token ;;
@@ -634,7 +789,7 @@ main() {
         revoke-root)   revoke_root_token ;;
         status)        $VAULT_EXEC vault status || true ;;
         *)
-            echo "Usage: $0 --env <env> [all|init|unseal|configure|oidc|seed-secrets|admin-token|renew-admin|new-root|revoke-root|status]"
+            echo "Usage: $0 --env <env> [all|init|unseal|configure|oidc|audit|seed-secrets|admin-token|renew-admin|new-root|revoke-root|status]"
             exit 1
             ;;
     esac

@@ -12,11 +12,18 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const PORT = Number(process.env.PORT || 8080);
 const DOMAIN = process.env.DOMAIN || 'localhost';
 const FORGEJO_URL = process.env.FORGEJO_URL || 'http://forgejo-http.forgejo.svc.cluster.local:3000';
 const FORGEJO_TOKEN = process.env.FORGEJO_TOKEN || '';
+// Whose token that is: a dedicated non-admin bot account, an org member via the
+// `portal-bot` team, NOT the Forgejo site admin. Used only for log messages and
+// error text — the portal never reads /user back (its token scopes cannot), so
+// the name is configuration, taken from the token secret's `username` key.
+// Keep it in step with PORTAL_BOT_USER in deploy.sh.
+const FORGEJO_BOT_USER = (process.env.FORGEJO_BOT_USER || 'devhub-bot').trim();
 const APPS_ORG = process.env.APPS_ORG || 'devhub';
 const TEMPLATES_ORG = process.env.TEMPLATES_ORG || 'devhub-templates';
 // Optional: set by `deploy.sh <env> ci-secrets`. Without a token the wizard
@@ -24,6 +31,26 @@ const TEMPLATES_ORG = process.env.TEMPLATES_ORG || 'devhub-templates';
 const WOODPECKER_URL = process.env.WOODPECKER_URL || 'http://woodpecker-server.woodpecker.svc.cluster.local';
 const WOODPECKER_TOKEN = (process.env.WOODPECKER_TOKEN || '').trim();
 const CAN_ACTIVATE_CI = WOODPECKER_TOKEN !== '' && WOODPECKER_TOKEN !== 'placeholder';
+// Keycloak's JWKS endpoint, for verifying the gateway-forwarded access token
+// (defense in depth — see userFromRequest). Always the in-cluster Service URL,
+// never the public hostname: on local, glibc answers *.localhost with the
+// pod's own loopback.
+const KEYCLOAK_JWKS_URL = (process.env.KEYCLOAK_JWKS_URL || '').trim();
+// Groups whose members may provision (create apps, enable add-ons). Read
+// endpoints stay open to every authenticated user. Keycloak's groups client
+// scope maps membership into the access token's `groups` claim.
+const PROVISION_GROUPS = new Set(
+  (process.env.PROVISION_GROUPS || 'developers,devops-admins')
+    .split(',').map((s) => s.trim().replace(/^\//, '')).filter(Boolean),
+);
+
+if (!KEYCLOAK_JWKS_URL) {
+  console.warn(
+    '[WARN] KEYCLOAK_JWKS_URL is not set — access tokens will be parsed WITHOUT '
+    + 'signature verification, relying on the gateway SecurityPolicy and the '
+    + 'NetworkPolicy alone. Set it to Keycloak\'s in-cluster JWKS endpoint.',
+  );
+}
 
 const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
 
@@ -80,24 +107,163 @@ const RESERVED = new Set([
 
 // Identity comes from the gateway: the SecurityPolicy authenticates the
 // browser and forwards the Keycloak access token upstream
-// (forwardAccessToken). The token is deliberately not re-verified here — the
-// NetworkPolicy admits only the gateway, and the gateway never forwards an
-// unauthenticated request, so parsing the payload is enough to know WHO the
-// gateway let in. Forgejo usernames match Keycloak's preferred_username
-// because Forgejo accounts are created by the same Keycloak OIDC login.
-function userFromRequest(req) {
+// (forwardAccessToken). The NetworkPolicy admits only the gateway and the
+// gateway never forwards an unauthenticated request — but as defense in depth
+// the token's RS256 signature is verified here too, against Keycloak's JWKS
+// (KEYCLOAK_JWKS_URL, in-cluster). Only if no JWKS URL is configured does the
+// portal fall back to trusting the perimeter and parsing the payload as-is
+// (startup warning above). Forgejo usernames match Keycloak's
+// preferred_username because Forgejo accounts are created by the same
+// Keycloak OIDC login.
+
+// JWKS cache: kid → KeyObject. Refetched on an unknown kid (key rotation),
+// rate-limited so a stream of garbage kids cannot hammer Keycloak. Throws
+// only when the endpoint itself is unreachable/broken AND no keys are cached
+// — an infrastructure failure the caller may distinguish from a bad token.
+const jwks = { keys: new Map(), lastFetch: 0, lastError: null };
+const JWKS_REFETCH_MIN_MS = 30 * 1000;
+
+async function jwksKeyFor(kid) {
+  if (jwks.keys.has(kid)) return jwks.keys.get(kid);
+  if (Date.now() - jwks.lastFetch >= JWKS_REFETCH_MIN_MS) {
+    jwks.lastFetch = Date.now();
+    try {
+      const res = await fetch(KEYCLOAK_JWKS_URL);
+      if (!res.ok) throw new Error(`JWKS fetch: ${res.status} ${res.statusText}`);
+      const body = await res.json();
+      const fresh = new Map();
+      for (const k of body.keys || []) {
+        if (k.kty !== 'RSA' || (k.use && k.use !== 'sig') || !k.kid) continue;
+        try { fresh.set(k.kid, crypto.createPublicKey({ key: k, format: 'jwk' })); }
+        catch (e) { console.error(`JWKS key ${k.kid}: ${e.message}`); }
+      }
+      jwks.keys = fresh; // replace wholesale: rotated-out keys must stop verifying
+      jwks.lastError = null;
+    } catch (e) {
+      jwks.lastError = e;
+      if (jwks.keys.size === 0) throw e;
+    }
+  } else if (jwks.keys.size === 0 && jwks.lastError) {
+    throw jwks.lastError;
+  }
+  return jwks.keys.get(kid) || null;
+}
+
+// Verify signature and expiry; returns the claims or null. Any surprise about
+// the TOKEN (bad alg, unknown kid, bad signature, expired) is an
+// unauthenticated request; only a JWKS infrastructure failure propagates.
+async function verifyToken(parts) {
+  let header;
+  try { header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')); }
+  catch { return null; }
+  if (header.alg !== 'RS256' || !header.kid) return null;
+  const key = await jwksKeyFor(header.kid); // may throw: JWKS unreachable
+  if (!key) return null;
+  try {
+    const ok = crypto.verify(
+      'RSA-SHA256',
+      Buffer.from(`${parts[0]}.${parts[1]}`),
+      key,
+      Buffer.from(parts[2], 'base64url'),
+    );
+    if (!ok) return null;
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    if (typeof claims.exp === 'number' && claims.exp * 1000 < Date.now()) return null;
+    return claims;
+  } catch (e) {
+    console.error(`token verification: ${e.message}`);
+    return null;
+  }
+}
+
+let lastJwksWarn = 0;
+function parsePayloadUnverified(parts) {
+  try { return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')); }
+  catch { return null; }
+}
+
+async function userFromRequest(req) {
   const m = (req.headers.authorization || '').match(/^Bearer (.+)$/i);
   if (!m) return null;
   const parts = m[1].split('.');
   if (parts.length !== 3) return null;
-  try {
-    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-    return claims.preferred_username ? { username: claims.preferred_username } : null;
-  } catch { return null; }
+  let claims = null;
+  if (KEYCLOAK_JWKS_URL) {
+    try {
+      claims = await verifyToken(parts);
+    } catch (e) {
+      // JWKS endpoint unreachable and no keys cached. Verification here is
+      // defense in depth — the gateway + NetworkPolicy perimeter is the
+      // primary control — so degrade to perimeter trust rather than locking
+      // everyone out, and say so loudly (at most once a minute). Note: the
+      // keycloak namespace's ingress NetworkPolicy must admit the portal for
+      // the JWKS fetch to work at all.
+      if (Date.now() - lastJwksWarn > 60 * 1000) {
+        lastJwksWarn = Date.now();
+        console.error(`[WARN] JWKS unavailable (${e.message}) — falling back to unverified token parsing (perimeter trust)`);
+      }
+      claims = parsePayloadUnverified(parts);
+    }
+  } else {
+    // Perimeter-trust fallback: gateway + NetworkPolicy only.
+    claims = parsePayloadUnverified(parts);
+  }
+  if (!claims || !claims.preferred_username) return null;
+  // Keycloak's groups mapper emits plain names (full.path: false); strip a
+  // leading slash anyway so a full-path realm config still matches.
+  const groups = Array.isArray(claims.groups)
+    ? claims.groups.map((g) => String(g).replace(/^\//, ''))
+    : [];
+  return { username: claims.preferred_username, groups };
+}
+
+// Provisioning (creating apps, enabling add-ons) is gated on group
+// membership; reading stays open to everyone the gateway signed in.
+function requireProvisioner(user) {
+  if (!user) {
+    throw Object.assign(
+      new Error('No identity on the request — the gateway must forward the access token (forwardAccessToken).'),
+      { status: 401 },
+    );
+  }
+  if (!user.groups.some((g) => PROVISION_GROUPS.has(g))) {
+    throw Object.assign(
+      new Error(
+        `Provisioning requires membership of one of: ${[...PROVISION_GROUPS].join(', ')} — `
+        + `${user.username} is in [${user.groups.join(', ') || 'no groups'}]. Ask a platform admin.`,
+      ),
+      { status: 403 },
+    );
+  }
+  return user;
+}
+
+// Run fn over items with at most `limit` in flight; resolves in input order.
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
 }
 
 // The user's effective permission on an app repo ('owner', 'admin', 'write',
 // 'read', 'none'). Org owners come back as admin/owner too.
+//
+// Forgejo only answers this for a caller that is admin on the repo, and the
+// portal's bot deliberately is not admin everywhere: its team in the apps org
+// has includes_all_repositories=false, so it administers the repos it created
+// (Forgejo makes the creator an admin collaborator) and the ones deploy.sh
+// adopted — but not, say, a repo a human made by hand, and not the private
+// GitOps repository. Keeping the bot out of those is the point of the
+// arrangement, so a 403 here is expected operation, not an error: report "no
+// permission" for that one repo rather than failing the whole listing. Logged,
+// because it is also how a missing adoption shows up.
 async function userRepoPermission(username, name) {
   try {
     const p = await forgejo(
@@ -107,6 +273,13 @@ async function userRepoPermission(username, name) {
     return (p && p.permission) || 'none';
   } catch (e) {
     if (e.status === 404 || e.status === 422) return 'none';
+    if (e.status === 403) {
+      console.error(
+        `permission lookup on ${APPS_ORG}/${name} denied — ${FORGEJO_BOT_USER} is not admin there; `
+        + `treating as no access for ${username} (a platform admin can adopt the repo: deploy.sh <env> portal-token)`,
+      );
+      return 'none';
+    }
     throw e;
   }
 }
@@ -117,6 +290,11 @@ const CAN_DEPROVISION = (perm) => perm === 'admin' || perm === 'owner';
 // scaffolding templates; enabled add-ons live in the apps org under the same
 // name, so the prefix is reserved on both sides.
 const ADDON_PREFIX = 'addon-';
+
+// The one "name is taken" verdict. createApp has to recognise it to decide
+// whether to try resuming an orphaned repo, so it lives in one place rather
+// than being compared as a duplicated literal in two functions.
+const repoExistsReason = (name) => `Repository ${APPS_ORG}/${name} already exists.`;
 
 // One answer for both the live check (/api/validate-name) and the create path:
 // syntactically a DNS label, not a platform hostname, not an existing repo.
@@ -135,7 +313,7 @@ async function validateName(name) {
   }
   try {
     await forgejo('GET', `/repos/${APPS_ORG}/${name}`);
-    return { available: false, reason: `Repository ${APPS_ORG}/${name} already exists.` };
+    return { available: false, reason: repoExistsReason(name) };
   } catch (e) {
     if (e.status !== 404) throw e;
   }
@@ -146,6 +324,14 @@ async function validateName(name) {
 // APP_NAME and DOMAIN, in both file content and file names — APP_NAME first, so
 // APP_NAME.DOMAIN resolves to <name>.<domain> — plus POSTGRES_ENABLED and
 // REDIS_ENABLED, which become the values.yaml opt-in flags.
+//
+// WARNING for template authors: replacement is a global, literal string swap
+// on EVERY file — there is no word-boundary or escaping mechanism. A template
+// that uses the bare words APP_NAME, DOMAIN, POSTGRES_ENABLED or
+// REDIS_ENABLED in prose (a README sentence, a code comment) gets them
+// substituted too. Treat the four tokens as reserved; write "domain name",
+// "the app's name", etc. in prose. Documented in k8s/templates/
+// TEMPLATE-AUTHORING.md.
 function substitute(text, name, options) {
   return text
     .split('APP_NAME').join(name)
@@ -236,14 +422,38 @@ async function fileContent(templateRepo, filePath) {
   return Buffer.from(entry.content, 'base64').toString('utf8');
 }
 
+// A previous run may have created the repository and crashed before the
+// scaffold commit landed. Such a repo is empty (zero branches) and safe to
+// resume into — returns the repo object if so, null if the name is free, and
+// throws a 409 if the repo exists with content (genuinely taken).
+async function resumableOrphan(name) {
+  let repo;
+  try {
+    repo = await forgejo('GET', `/repos/${APPS_ORG}/${name}`);
+  } catch (e) {
+    if (e.status === 404) return null;
+    throw e;
+  }
+  const branches = await forgejo('GET', `/repos/${APPS_ORG}/${name}/branches`).catch(() => [{}]);
+  if (Array.isArray(branches) && branches.length === 0) return repo;
+  throw Object.assign(new Error(repoExistsReason(name)), { status: 409 });
+}
+
 async function createApp({ name, description, template, options, creator }) {
   const steps = [];
   const step = (title, detail) => steps.push({ title, detail });
 
   // Fail before creating anything: bad label, platform hostname, taken repo.
+  // Exception: a repo that exists but is EMPTY is the debris of a crashed
+  // earlier run — resume it instead of declaring the name taken forever.
   const verdict = await validateName(name);
+  let created = null;
   if (!verdict.available) {
-    throw Object.assign(new Error(verdict.reason), { status: NAME_RE.test(name || '') ? 409 : 400 });
+    if (verdict.reason !== repoExistsReason(name)) {
+      throw Object.assign(new Error(verdict.reason), { status: NAME_RE.test(name || '') ? 409 : 400 });
+    }
+    created = await resumableOrphan(name); // throws 409 when non-empty
+    step('Repository resumed', `${APPS_ORG}/${name} existed but was empty (a previous run failed) — continuing`);
   }
 
   // Read the template, substitute, route optional files.
@@ -269,92 +479,110 @@ async function createApp({ name, description, template, options, creator }) {
   // nothing to build.
   const hasCI = paths.includes('.woodpecker.yml');
 
-  const created = await forgejo('POST', `/orgs/${APPS_ORG}/repos`, {
-    name,
-    description: description || `${name} — scaffolded by the devhub portal`,
-    private: false,
-    auto_init: false,
-    default_branch: 'main',
-  });
-  step('Repository created', `${APPS_ORG}/${name}`);
-
-  // Record who provisioned this: the signed-in user becomes repository admin,
-  // which is also what authorises them to deprovision it later. Best-effort —
-  // a user who has never opened Forgejo (so no account yet) just isn't added.
-  if (creator) {
-    try {
-      await forgejo('PUT',
-        `/repos/${APPS_ORG}/${name}/collaborators/${encodeURIComponent(creator.username)}`,
-        { permission: 'admin' });
-      step('Owner recorded', `${creator.username} is repository admin — and may deprovision it here`);
-    } catch (err) {
-      console.error(`collaborator ${creator.username} on ${name}: ${err.message}`);
-      step('Owner not recorded', `${err.message} — sign in to Forgejo once, then ask an admin to add you`);
-    }
+  if (!created) {
+    created = await forgejo('POST', `/orgs/${APPS_ORG}/repos`, {
+      name,
+      description: description || `${name} — scaffolded by the devhub portal`,
+      private: false,
+      auto_init: false,
+      default_branch: 'main',
+    });
+    step('Repository created', `${APPS_ORG}/${name}`);
   }
 
-  // CI activation happens BEFORE the first commit, so Woodpecker's webhook is
-  // in place when the scaffold lands — the very first push builds and publishes
-  // the image, and the app comes up with no human involved. Best-effort: the
-  // scaffold is complete without it, so a Woodpecker hiccup must not fail the
-  // wizard. Falls back to a starter issue.
-  let ciActivated = false;
-  let wpRepo = null;
-  if (CAN_ACTIVATE_CI && hasCI) {
-    try {
-      wpRepo = await woodpeckerActivate(created.id);
-      ciActivated = true;
-      step('CI activated', 'enabled in Woodpecker before the first commit — the scaffold itself builds');
-    } catch (err) {
-      console.error(`woodpecker activation for ${name}: ${err.message}`);
-      step('CI activation failed', `${err.message} — left as a starter issue`);
+  // Everything from here to the scaffold commit must not leave an orphan: a
+  // failure before the commit deletes the empty repo again (best-effort), so
+  // the name does not become permanently "taken". After the commit the repo
+  // is a valid scaffold and is never rolled back.
+  let committed = false;
+  try {
+    // Record who provisioned this: the signed-in user becomes repository admin,
+    // which is also what authorises them to deprovision it later. Best-effort —
+    // a user who has never opened Forgejo (so no account yet) just isn't added.
+    if (creator) {
+      try {
+        await forgejo('PUT',
+          `/repos/${APPS_ORG}/${name}/collaborators/${encodeURIComponent(creator.username)}`,
+          { permission: 'admin' });
+        step('Owner recorded', `${creator.username} is repository admin — and may deprovision it here`);
+      } catch (err) {
+        console.error(`collaborator ${creator.username} on ${name}: ${err.message}`);
+        step('Owner not recorded', `${err.message} — sign in to Forgejo once, then ask an admin to add you`);
+      }
     }
+
+    // CI activation happens BEFORE the first commit, so Woodpecker's webhook is
+    // in place when the scaffold lands — the very first push builds and publishes
+    // the image, and the app comes up with no human involved. Best-effort: the
+    // scaffold is complete without it, so a Woodpecker hiccup must not fail the
+    // wizard. Falls back to a starter issue.
+    let ciActivated = false;
+    let wpRepo = null;
+    if (CAN_ACTIVATE_CI && hasCI) {
+      try {
+        wpRepo = await woodpeckerActivate(created.id);
+        ciActivated = true;
+        step('CI activated', 'enabled in Woodpecker before the first commit — the scaffold itself builds');
+      } catch (err) {
+        console.error(`woodpecker activation for ${name}: ${err.message}`);
+        step('CI activation failed', `${err.message} — left as a starter issue`);
+      }
+    }
+
+    // One commit with every file. The batch contents endpoint initialises an
+    // empty repository, so no auto_init README to collide with the template's.
+    await forgejo('POST', `/repos/${APPS_ORG}/${name}/contents`, {
+      message: `Scaffold ${name} from ${TEMPLATES_ORG}/${template}`,
+      files,
+    });
+    committed = true;
+    step('Files committed', `${files.length} files on main${ciActivated ? ' — CI is building the first image' : ''}`);
+
+    if (options.issues) {
+      // Group the starter issues under one milestone. This is the best grouping
+      // the API offers: Forgejo has no Projects (kanban) endpoints yet
+      // (forgejo/forgejo#5330), so board creation stays a starter issue.
+      let milestoneId = null;
+      try {
+        const milestone = await forgejo('POST', `/repos/${APPS_ORG}/${name}/milestones`, {
+          title: 'Getting started',
+          description: 'Scaffold follow-ups created by the portal.',
+        });
+        milestoneId = milestone && milestone.id ? milestone.id : null;
+      } catch (err) {
+        console.error(`milestone for ${name}: ${err.message}`);
+      }
+      let count = 0;
+      for (const issue of STARTER_ISSUES(name, options, ciActivated || !hasCI)) {
+        await forgejo('POST', `/repos/${APPS_ORG}/${name}/issues`,
+          milestoneId ? { ...issue, milestone: milestoneId } : issue);
+        count += 1;
+      }
+      step('Starter issues created', `${count} work items${milestoneId ? ' under the "Getting started" milestone' : ''}`);
+    }
+
+    return {
+      steps,
+      repo: `https://git.${DOMAIN}/${APPS_ORG}/${name}`,
+      issues: `https://git.${DOMAIN}/${APPS_ORG}/${name}/issues`,
+      board: `https://git.${DOMAIN}/${APPS_ORG}/${name}/projects`,
+      ci: ciActivated && wpRepo && wpRepo.id
+        ? `https://ci.${DOMAIN}/repos/${wpRepo.id}`
+        : `https://ci.${DOMAIN}/repos/add`,
+      ciActivated,
+      argocd: `https://argocd.${DOMAIN}/applications`,
+      image: `git.${DOMAIN}/${APPS_ORG}/${name}`,
+      url: `https://${name}.${DOMAIN}`,
+    };
+  } catch (err) {
+    if (!committed) {
+      // Roll the empty repo back so the name is not permanently "taken" —
+      // best-effort: if this fails too, the next attempt resumes the orphan.
+      await forgejo('DELETE', `/repos/${APPS_ORG}/${name}`)
+        .catch((e) => console.error(`rollback of ${APPS_ORG}/${name}: ${e.message}`));
+    }
+    throw err;
   }
-
-  // One commit with every file. The batch contents endpoint initialises an
-  // empty repository, so no auto_init README to collide with the template's.
-  await forgejo('POST', `/repos/${APPS_ORG}/${name}/contents`, {
-    message: `Scaffold ${name} from ${TEMPLATES_ORG}/${template}`,
-    files,
-  });
-  step('Files committed', `${files.length} files on main${ciActivated ? ' — CI is building the first image' : ''}`);
-
-  if (options.issues) {
-    // Group the starter issues under one milestone. This is the best grouping
-    // the API offers: Forgejo has no Projects (kanban) endpoints yet
-    // (forgejo/forgejo#5330), so board creation stays a starter issue.
-    let milestoneId = null;
-    try {
-      const milestone = await forgejo('POST', `/repos/${APPS_ORG}/${name}/milestones`, {
-        title: 'Getting started',
-        description: 'Scaffold follow-ups created by the portal.',
-      });
-      milestoneId = milestone && milestone.id ? milestone.id : null;
-    } catch (err) {
-      console.error(`milestone for ${name}: ${err.message}`);
-    }
-    let count = 0;
-    for (const issue of STARTER_ISSUES(name, options, ciActivated || !hasCI)) {
-      await forgejo('POST', `/repos/${APPS_ORG}/${name}/issues`,
-        milestoneId ? { ...issue, milestone: milestoneId } : issue);
-      count += 1;
-    }
-    step('Starter issues created', `${count} work items${milestoneId ? ' under the "Getting started" milestone' : ''}`);
-  }
-
-  return {
-    steps,
-    repo: `https://git.${DOMAIN}/${APPS_ORG}/${name}`,
-    issues: `https://git.${DOMAIN}/${APPS_ORG}/${name}/issues`,
-    board: `https://git.${DOMAIN}/${APPS_ORG}/${name}/projects`,
-    ci: ciActivated && wpRepo && wpRepo.id
-      ? `https://ci.${DOMAIN}/repos/${wpRepo.id}`
-      : `https://ci.${DOMAIN}/repos/add`,
-    ciActivated,
-    argocd: `https://argocd.${DOMAIN}/applications`,
-    image: `git.${DOMAIN}/${APPS_ORG}/${name}`,
-    url: `https://${name}.${DOMAIN}`,
-  };
 }
 
 // ── Add-ons ─────────────────────────────────────────────────────────────────
@@ -370,9 +598,9 @@ async function createApp({ name, description, template, options, creator }) {
 
 async function listAddons(username) {
   const repos = await forgejo('GET', `/orgs/${TEMPLATES_ORG}/repos`).catch(() => []);
-  const addons = [];
-  for (const t of repos || []) {
-    if (!t.name.startsWith(ADDON_PREFIX)) continue;
+  const templates = (repos || []).filter((t) => t.name.startsWith(ADDON_PREFIX));
+  // One enabled-check (+ permission lookup) per add-on — in parallel, bounded.
+  return mapLimit(templates, 8, async (t) => {
     let enabled = false;
     let canDisable = false;
     try {
@@ -382,7 +610,7 @@ async function listAddons(username) {
     } catch (e) {
       if (e.status !== 404) throw e;
     }
-    addons.push({
+    return {
       name: t.name,
       description: t.description || '',
       enabled,
@@ -390,9 +618,8 @@ async function listAddons(username) {
       repo: enabled ? `https://git.${DOMAIN}/${APPS_ORG}/${t.name}` : null,
       issues: enabled ? `https://git.${DOMAIN}/${APPS_ORG}/${t.name}/issues` : null,
       template: `https://git.${DOMAIN}/${TEMPLATES_ORG}/${t.name}`,
-    });
-  }
-  return addons;
+    };
+  });
 }
 
 async function enableAddon({ name, creator }) {
@@ -443,54 +670,66 @@ async function enableAddon({ name, creator }) {
   });
   step('Add-on enabled', `${APPS_ORG}/${name} — forgejo-appset deploys it to every registered workload cluster`);
 
-  // Whoever enabled it administers it — and is thereby authorised to disable it.
-  if (creator) {
-    try {
-      await forgejo('PUT',
-        `/repos/${APPS_ORG}/${name}/collaborators/${encodeURIComponent(creator.username)}`,
-        { permission: 'admin' });
-      step('Owner recorded', `${creator.username} is repository admin — and may disable the add-on here`);
-    } catch (err) {
-      console.error(`collaborator ${creator.username} on ${name}: ${err.message}`);
-      step('Owner not recorded', `${err.message} — sign in to Forgejo once, then ask an admin to add you`);
+  // Same rollback contract as createApp: a failure before the enabling commit
+  // deletes the empty repo (best-effort) so the add-on is not stuck half-on.
+  let committed = false;
+  try {
+    // Whoever enabled it administers it — and is thereby authorised to disable it.
+    if (creator) {
+      try {
+        await forgejo('PUT',
+          `/repos/${APPS_ORG}/${name}/collaborators/${encodeURIComponent(creator.username)}`,
+          { permission: 'admin' });
+        step('Owner recorded', `${creator.username} is repository admin — and may disable the add-on here`);
+      } catch (err) {
+        console.error(`collaborator ${creator.username} on ${name}: ${err.message}`);
+        step('Owner not recorded', `${err.message} — sign in to Forgejo once, then ask an admin to add you`);
+      }
     }
-  }
 
-  // Add-ons that build their own image ship a .woodpecker.yml; most run a
-  // stock upstream image and skip CI entirely.
-  if (CAN_ACTIVATE_CI && paths.includes('.woodpecker.yml')) {
-    try {
-      await woodpeckerActivate(created.id);
-      step('CI activated', 'enabled in Woodpecker before the first commit');
-    } catch (err) {
-      console.error(`woodpecker activation for ${name}: ${err.message}`);
-      step('CI activation failed', `${err.message} — activate manually at https://ci.${DOMAIN}/repos/add`);
+    // Add-ons that build their own image ship a .woodpecker.yml; most run a
+    // stock upstream image and skip CI entirely.
+    if (CAN_ACTIVATE_CI && paths.includes('.woodpecker.yml')) {
+      try {
+        await woodpeckerActivate(created.id);
+        step('CI activated', 'enabled in Woodpecker before the first commit');
+      } catch (err) {
+        console.error(`woodpecker activation for ${name}: ${err.message}`);
+        step('CI activation failed', `${err.message} — activate manually at https://ci.${DOMAIN}/repos/add`);
+      }
     }
-  }
 
-  await forgejo('POST', `/repos/${APPS_ORG}/${name}/contents`, {
-    message: `Enable ${name} from ${TEMPLATES_ORG}/${name}`,
-    files,
-  });
-  step('Files committed', `${files.length} files on main`);
-
-  // The template's SETUP.md is the handover: whatever a human must still do
-  // (tokens into Vault, upstream accounts, tuning) becomes the one open issue.
-  const setup = files.find((f) => f.path === 'SETUP.md');
-  if (setup) {
-    await forgejo('POST', `/repos/${APPS_ORG}/${name}/issues`, {
-      title: `Finish setting up ${name}`,
-      body: Buffer.from(setup.content, 'base64').toString('utf8'),
+    await forgejo('POST', `/repos/${APPS_ORG}/${name}/contents`, {
+      message: `Enable ${name} from ${TEMPLATES_ORG}/${name}`,
+      files,
     });
-    step('Setup issue created', 'the remaining manual steps, from the template\'s SETUP.md');
-  }
+    committed = true;
+    step('Files committed', `${files.length} files on main`);
 
-  return {
-    steps,
-    repo: `https://git.${DOMAIN}/${APPS_ORG}/${name}`,
-    issues: `https://git.${DOMAIN}/${APPS_ORG}/${name}/issues`,
-    argocd: `https://argocd.${DOMAIN}/applications`,
-  };
+    // The template's SETUP.md is the handover: whatever a human must still do
+    // (tokens into Vault, upstream accounts, tuning) becomes the one open issue.
+    const setup = files.find((f) => f.path === 'SETUP.md');
+    if (setup) {
+      await forgejo('POST', `/repos/${APPS_ORG}/${name}/issues`, {
+        title: `Finish setting up ${name}`,
+        body: Buffer.from(setup.content, 'base64').toString('utf8'),
+      });
+      step('Setup issue created', 'the remaining manual steps, from the template\'s SETUP.md');
+    }
+
+    return {
+      steps,
+      repo: `https://git.${DOMAIN}/${APPS_ORG}/${name}`,
+      issues: `https://git.${DOMAIN}/${APPS_ORG}/${name}/issues`,
+      argocd: `https://argocd.${DOMAIN}/applications`,
+    };
+  } catch (err) {
+    if (!committed) {
+      await forgejo('DELETE', `/repos/${APPS_ORG}/${name}`)
+        .catch((e) => console.error(`rollback of ${APPS_ORG}/${name}: ${e.message}`));
+    }
+    throw err;
+  }
 }
 
 // ── HTTP plumbing ───────────────────────────────────────────────────────────
@@ -546,23 +785,23 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/apps') {
       // The signed-in user's deprovisionable apps: every devhub-org repo they
       // hold admin on. The platform gitops repo is never offered.
-      const user = userFromRequest(req);
+      const user = await userFromRequest(req);
       if (!user) return send(res, 200, { user: null, apps: [] });
       const repos = await forgejo('GET', `/orgs/${APPS_ORG}/repos?limit=100`);
-      const apps = [];
-      for (const r of repos || []) {
-        if (r.name === 'devhub') continue;
+      const candidates = (repos || []).filter(
         // Enabled add-ons are managed on the add-ons view, not as apps.
-        if (r.name.startsWith(ADDON_PREFIX)) continue;
-        if (CAN_DEPROVISION(await userRepoPermission(user.username, r.name))) {
-          apps.push({
-            name: r.name,
-            description: r.description || '',
-            repo: `https://git.${DOMAIN}/${APPS_ORG}/${r.name}`,
-            url: `https://${r.name}.${DOMAIN}`,
-          });
-        }
-      }
+        (r) => r.name !== 'devhub' && !r.name.startsWith(ADDON_PREFIX),
+      );
+      // One permission check per repo — in parallel, bounded.
+      const perms = await mapLimit(candidates, 8, (r) => userRepoPermission(user.username, r.name));
+      const apps = candidates
+        .filter((r, i) => CAN_DEPROVISION(perms[i]))
+        .map((r) => ({
+          name: r.name,
+          description: r.description || '',
+          repo: `https://git.${DOMAIN}/${APPS_ORG}/${r.name}`,
+          url: `https://${r.name}.${DOMAIN}`,
+        }));
       return send(res, 200, { user: user.username, apps });
     }
     if (req.method === 'DELETE' && url.pathname.startsWith('/api/apps/')) {
@@ -570,7 +809,7 @@ const server = http.createServer(async (req, res) => {
       if (!NAME_RE.test(name) || name === 'devhub') {
         throw Object.assign(new Error('Not a deprovisionable application.'), { status: 400 });
       }
-      const user = userFromRequest(req);
+      const user = await userFromRequest(req);
       if (!user) {
         throw Object.assign(
           new Error('No identity on the request — the gateway must forward the access token (forwardAccessToken).'),
@@ -580,7 +819,12 @@ const server = http.createServer(async (req, res) => {
       const perm = await userRepoPermission(user.username, name);
       if (!CAN_DEPROVISION(perm)) {
         throw Object.assign(
-          new Error(`Deprovisioning needs admin on ${APPS_ORG}/${name}; ${user.username} has "${perm}".`),
+          new Error(
+            `Deprovisioning needs admin on ${APPS_ORG}/${name}; ${user.username} has "${perm}". `
+            + `(If you do hold admin there, the portal itself may not: ${FORGEJO_BOT_USER} can only `
+            + 'read permissions on repositories it administers — ask a platform admin to run '
+            + '`deploy.sh <env> portal-token`, which adopts pre-existing repositories.)',
+          ),
           { status: 403 },
         );
       }
@@ -601,7 +845,7 @@ const server = http.createServer(async (req, res) => {
       });
     }
     if (req.method === 'GET' && url.pathname === '/api/addons') {
-      const user = userFromRequest(req);
+      const user = await userFromRequest(req);
       return send(res, 200, {
         user: user ? user.username : null,
         addons: await listAddons(user ? user.username : null),
@@ -611,14 +855,14 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const result = await enableAddon({
         name: String(body.name || '').trim(),
-        creator: userFromRequest(req),
+        creator: requireProvisioner(await userFromRequest(req)),
       });
       return send(res, 201, result);
     }
     if (req.method === 'POST' && url.pathname === '/api/apps') {
       const body = await readBody(req);
       const result = await createApp({
-        creator: userFromRequest(req),
+        creator: requireProvisioner(await userFromRequest(req)),
         name: String(body.name || '').trim(),
         description: String(body.description || '').trim().slice(0, 255),
         template: NAME_RE.test(String(body.template || '')) ? String(body.template) : 'app-template',
@@ -639,5 +883,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`portal listening on :${PORT} (forgejo: ${FORGEJO_URL}, org: ${APPS_ORG})`);
+  console.log(
+    `portal listening on :${PORT} (forgejo: ${FORGEJO_URL} as ${FORGEJO_BOT_USER}, `
+    + `apps org: ${APPS_ORG}, templates org: ${TEMPLATES_ORG})`,
+  );
 });

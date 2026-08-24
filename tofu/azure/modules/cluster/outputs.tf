@@ -57,14 +57,15 @@ output "pg_forgejo_password" {
 
 # ─── Redis ────────────────────────────────────────────────────────────
 
+# null when enable_cache is false; sync-tofu-outputs.sh skips empty values.
 output "redis_host" {
-  description = "Azure Managed Redis hostname"
-  value       = azurerm_managed_redis.main.hostname
+  description = "Azure Managed Redis hostname (null unless enable_cache)"
+  value       = try(azurerm_managed_redis.main[0].hostname, null)
 }
 
 output "redis_port" {
-  description = "Managed Redis TLS port"
-  value       = azurerm_managed_redis.main.default_database[0].port
+  description = "Managed Redis TLS port (null unless enable_cache)"
+  value       = try(azurerm_managed_redis.main[0].default_database[0].port, null)
 }
 
 # No redis_password output: access keys are disabled — clients authenticate as
@@ -77,11 +78,9 @@ output "storage_account_name" {
   value       = azurerm_storage_account.main.name
 }
 
-output "storage_primary_access_key" {
-  description = "Storage Account primary access key (Loki and Velero use managed identity)"
-  value       = azurerm_storage_account.main.primary_access_key
-  sensitive   = true
-}
+# No storage_primary_access_key output: the account has
+# shared_access_key_enabled = false, so there is no key to hand out. Loki and
+# Velero reach Blob Storage as their own workload identities.
 
 # ─── Entra ID ────────────────────────────────────────────────────────
 

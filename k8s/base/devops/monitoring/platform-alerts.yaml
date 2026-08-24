@@ -14,26 +14,43 @@ spec:
   groups:
     - name: devhub.vault
       rules:
+        # Absence is the signal, not a gap in it. A sealed Vault answers 503 on
+        # /v1/sys/metrics, so the metric this alert is named after *disappears*
+        # exactly when it matters — `vault_core_unsealed == 0` alone can only
+        # fire in the narrow case where Vault still serves metrics while sealed.
+        # The three arms cover: target down, metric never present at all
+        # (a scrape that has never succeeded — e.g. the telemetry stanza in
+        # base/devops/vault/values.yaml missing, which is how this alert was
+        # silent), and the literal sealed reading.
         - alert: VaultSealed
-          expr: vault_core_unsealed == 0
+          expr: |
+            up{job=~".*vault.*"} == 0
+            or absent(vault_core_unsealed)
+            or vault_core_unsealed == 0
           for: 5m
           labels:
             severity: critical
           annotations:
-            summary: "Vault is sealed ({{ $labels.pod }})"
+            summary: "Vault is sealed or unreachable ({{ $labels.pod }})"
             description: >-
               A sealed Vault means External Secrets stops delivering credentials and
               every dependent workload degrades on its next secret refresh.
               With KMS auto-unseal configured this should never last past a restart.
+              An unreachable metrics endpoint counts: a sealed Vault returns 503
+              there, so silence and sealed look the same from outside.
 
         - alert: VaultNoLeader
-          expr: sum(vault_core_active) == 0
+          expr: |
+            absent(vault_core_active) or sum(vault_core_active) == 0
           for: 5m
           labels:
             severity: critical
           annotations:
             summary: "Vault has no active node"
-            description: "The raft cluster has no leader — writes are failing."
+            description: >-
+              The raft cluster has no leader — writes are failing. Absence of the
+              metric counts the same way: a quorum-less or sealed cluster stops
+              serving /v1/sys/metrics entirely.
 
     - name: devhub.certificates
       rules:
@@ -101,12 +118,33 @@ spec:
             summary: "Vault raft snapshot job failed"
             description: "Vault's own storage is not being snapshotted — restore would rely on cloud volume backups only."
 
+        # Failure is not the only way snapshots stop. A suspended, deleted or
+        # never-scheduled CronJob produces no failed Jobs at all, so the rule
+        # above stays quiet while nothing is being backed up. The schedule is
+        # every 6h; 12h without a success is two missed runs.
+        - alert: VaultSnapshotStale
+          expr: |
+            absent(kube_cronjob_status_last_successful_time{namespace="vault", cronjob="vault-raft-snapshot"})
+            or time() - kube_cronjob_status_last_successful_time{namespace="vault", cronjob="vault-raft-snapshot"} > 43200
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "No successful Vault raft snapshot in 12h"
+            description: >-
+              The vault-raft-snapshot CronJob has not completed successfully in two
+              scheduling windows — check whether it is suspended or has been deleted.
+
     - name: devhub.platform
       rules:
         - alert: PersistentVolumeFillingUp
+          # Joining on (namespace, persistentvolumeclaim), not the claim name
+          # alone: PVC names repeat across namespaces (`data`, `storage`), so a
+          # one-label join let an app's PVC in devhub-* satisfy the platform
+          # filter — and hid a genuinely full platform volume behind it.
           expr: |
             (kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes) < 0.15
-            and on(persistentvolumeclaim) kube_persistentvolumeclaim_labels{namespace=~"vault|monitoring|forgejo|woodpecker|data-services"}
+            and on(namespace, persistentvolumeclaim) kube_persistentvolumeclaim_labels{namespace=~"vault|monitoring|forgejo|woodpecker|data-services"}
           for: 30m
           labels:
             severity: warning
@@ -124,10 +162,25 @@ spec:
           annotations:
             summary: "{{ $labels.namespace }}/{{ $labels.pod }} is crash-looping"
 
-        - alert: IngressCertificateServedIsSelfSigned
-          expr: probe_ssl_earliest_cert_expiry == 0
+        # This was IngressCertificateServedIsSelfSigned, on
+        # probe_ssl_earliest_cert_expiry — a blackbox-exporter metric, and there
+        # is no blackbox exporter anywhere in this platform, so the rule could
+        # never fire. cert-manager's own metrics are the signal actually
+        # available: if it holds no Certificate at all, nothing has issued the
+        # gateway's TLS secret and Envoy is serving its self-signed fallback.
+        #
+        # The expiry half of the old intent is already covered, with exactly the
+        # expression you would write here, by CertificateExpiringSoon in the
+        # devhub.certificates group above — repeating it would only produce two
+        # alerts for one condition.
+        - alert: GatewayCertificateMissing
+          expr: absent(certmanager_certificate_expiration_timestamp_seconds)
           for: 1h
           labels:
             severity: warning
           annotations:
-            summary: "An ingress is serving a certificate with no expiry (default/self-signed)"
+            summary: "cert-manager holds no certificates — the gateway is serving a self-signed fallback"
+            description: >-
+              Either cert-manager is not running, its metrics are not being scraped,
+              or every Certificate has been deleted. In all three cases nobody would
+              notice an expiring listener certificate.

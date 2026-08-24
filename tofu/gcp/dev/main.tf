@@ -26,7 +26,8 @@ module "cluster" {
   pg_availability_type   = "ZONAL"
   pg_deletion_protection = false
 
-  # Memorystore Redis — BASIC (no HA) for dev
+  # Memorystore Redis — BASIC (no HA) for dev. Off by default (enable_cache):
+  # nothing on the platform consumes it; flip it on for workloads that need it.
   redis_tier           = "BASIC"
   redis_memory_size_gb = 1
 

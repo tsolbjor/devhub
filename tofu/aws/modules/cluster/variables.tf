@@ -65,9 +65,9 @@ variable "node_max_count" {
 }
 
 variable "kubernetes_version" {
-  description = "Kubernetes version for EKS (e.g., \"1.30\")"
+  description = "Kubernetes version for EKS (e.g., \"1.33\")"
   type        = string
-  default     = "1.30"
+  default     = "1.33"
 }
 
 # ─── CI node group (Woodpecker agents) ────────────────────────────────
@@ -135,6 +135,12 @@ variable "rds_performance_insights" {
 
 # ─── ElastiCache (Redis) ──────────────────────────────────────────────
 
+variable "enable_cache" {
+  description = "Provision the managed ElastiCache Redis replication group. No platform component consumes the cache today; enable for workloads that need it."
+  type        = bool
+  default     = false
+}
+
 variable "redis_node_type" {
   description = "ElastiCache node type (e.g., cache.t3.micro, cache.r5.large)"
   type        = string
@@ -184,6 +190,17 @@ variable "domain" {
 variable "cognito_domain_prefix" {
   description = "Cognito hosted UI domain prefix — must be globally unique across all AWS accounts"
   type        = string
+}
+
+variable "cognito_mfa_configuration" {
+  description = "TOTP MFA on the Cognito user pool: OFF, OPTIONAL (users may enrol) or ON (required). These accounts federate into Keycloak, including devops-admins."
+  type        = string
+  default     = "OPTIONAL"
+
+  validation {
+    condition     = contains(["OFF", "OPTIONAL", "ON"], var.cognito_mfa_configuration)
+    error_message = "cognito_mfa_configuration must be OFF, OPTIONAL or ON."
+  }
 }
 
 # ─── Tags ─────────────────────────────────────────────────────────────

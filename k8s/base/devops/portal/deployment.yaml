@@ -10,9 +10,14 @@
 # So the portal's whole job is a handful of Forgejo API calls: copy the
 # template repository, substitute APP_NAME/DOMAIN, create starter issues.
 #
-# One design rule: the portal writes git, never the cluster. It holds a Forgejo
-# token and no Kubernetes RBAC at all — every provision it makes is a commit
-# ArgoCD reconciles, auditable in git history and covered by the push mirror.
+# One design rule: the portal writes git, never the cluster. It holds one
+# Forgejo token and no Kubernetes RBAC at all — every provision it makes is a
+# commit ArgoCD reconciles, auditable in git history and covered by the push
+# mirror. The token belongs to a dedicated bot user (`devhub-bot`): not a site
+# admin, just an owner-team member of the devhub org with can_create_org_repo,
+# so the blast radius of a leaked token is the org's repos — never Forgejo
+# user administration or other orgs. Scaffolds and add-ons show up in history
+# as devhub-bot, distinct from any human account.
 #
 # Authentication is the gateway's job, exactly as for Homepage: the OIDC
 # SecurityPolicy in this directory runs the Keycloak flow in front of the
@@ -76,11 +81,34 @@ spec:
             # never itself land on a workload cluster.
             - name: TEMPLATES_ORG
               value: "devhub-templates"
+            # Keycloak's JWKS, so the portal verifies the RS256 signature of
+            # the gateway-forwarded access token (defense in depth on top of
+            # the SecurityPolicy + NetworkPolicy perimeter). In-cluster URL,
+            # same reason as FORGEJO_URL. Unset = perimeter trust only, with a
+            # startup warning.
+            - name: KEYCLOAK_JWKS_URL
+              value: "http://keycloak-service.keycloak.svc.cluster.local:8080/realms/devops/protocol/openid-connect/certs"
+            # Keycloak groups whose members may provision (create apps, enable
+            # add-ons). Everyone the gateway signs in can still browse.
+            - name: PROVISION_GROUPS
+              value: "developers,devops-admins"
             - name: FORGEJO_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: portal-forgejo-token
                   key: token
+            # Which account that token belongs to. The portal's token scopes
+            # cannot read /user back, so `deploy.sh <env> portal-token` records
+            # the name alongside the token; the portal uses it only in log and
+            # error messages ("devhub-bot is not admin on that repo"). Optional:
+            # a secret minted before the bot existed has no username key, and
+            # the code falls back to "devhub-bot".
+            - name: FORGEJO_BOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: portal-forgejo-token
+                  key: username
+                  optional: true
             # Woodpecker, for activating scaffolded repos at creation time.
             # Optional: Woodpecker only mints user tokens in its UI, so this
             # secret exists once someone ran `deploy.sh <env> ci-secrets`.

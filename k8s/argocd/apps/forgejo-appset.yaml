@@ -31,6 +31,21 @@ metadata:
 spec:
   goTemplate: true
   goTemplateOptions: ["missingkey=error"]
+
+  # Losing this file must not wipe the workload clusters. The app-of-apps prunes
+  # whatever disappears from k8s/argocd/apps/, so deleting or renaming this file
+  # deletes both ApplicationSets; the generated Applications are then garbage
+  # collected through their ownerReference, and the resources-finalizer below
+  # cascade-deletes every devhub-* namespace on every registered workload
+  # cluster. preserveResourcesOnDeletion breaks that chain: the controller drops
+  # the ownerReferences instead, and the Applications survive standalone.
+  #
+  # Deliberate app deletion is a different path and still works: dropping the
+  # repository from Forgejo removes it from the generator, and
+  # `deploy-workload.sh --env <env> cleanup-apps` sweeps the orphaned namespace.
+  syncPolicy:
+    preserveResourcesOnDeletion: true
+
   generators:
     - matrix:
         generators:
@@ -85,6 +100,18 @@ spec:
         syncOptions:
           - CreateNamespace=true
           - PrunePropagationPolicy=foreground
+        # Labels ArgoCD stamps on the namespace it creates. An app repository
+        # cannot influence them, which is what makes them usable as a trust
+        # boundary:
+        #   devhub.io/tenant  the Gateway's apps listener admits routes only
+        #                     from namespaces carrying it (base/workload/gateway.yaml)
+        #   devhub.io/app     the app this namespace belongs to, for humans and
+        #                     for the tenant-isolation policies in
+        #                     base/devops/kyverno/policies.yaml
+        managedNamespaceMetadata:
+          labels:
+            devhub.io/tenant: "true"
+            devhub.io/app: '{{.repository}}'
         retry:
           limit: 5
           backoff:
@@ -106,6 +133,13 @@ metadata:
 spec:
   goTemplate: true
   goTemplateOptions: ["missingkey=error"]
+
+  # Same reasoning as forgejo-workloads above: this file's deletion must not
+  # cascade through the generated Applications' resources-finalizer into every
+  # devhub-* namespace. Deliberate deletion stays the cleanup-apps sweep.
+  syncPolicy:
+    preserveResourcesOnDeletion: true
+
   generators:
     - matrix:
         generators:
@@ -159,6 +193,12 @@ spec:
         syncOptions:
           - CreateNamespace=true
           - PrunePropagationPolicy=foreground
+        # See forgejo-workloads above — the same namespace labels, set by ArgoCD
+        # rather than by the app repository.
+        managedNamespaceMetadata:
+          labels:
+            devhub.io/tenant: "true"
+            devhub.io/app: '{{.repository}}'
         retry:
           limit: 5
           backoff:

@@ -73,11 +73,29 @@ All services in the DevOps platform are configured to use Keycloak for centraliz
 - Secret: `vault-oidc-secret` in `vault` namespace
 - Auth method must be enabled via Vault CLI
 
+### 5. Homepage, Portal and every developer app — the gateway is the client
+
+These three have no OIDC code of their own. An Envoy Gateway `SecurityPolicy` runs
+the whole authorization-code flow at the gateway, so the pod never sees an
+anonymous request and never handles a token.
+
+| | Client | Redirect URI |
+|---|---|---|
+| Homepage | `homepage` | `https://home.<domain>/oauth2/callback` |
+| Portal | `portal` | `https://portal.<domain>/oauth2/callback` |
+| **every developer app** | **`apps` — one shared client** | **`https://*.<domain>/oauth2/callback`** |
+
+The `apps` row is the one to read twice: it is a single confidential client, with a
+wildcard redirect, whose secret is delivered into every app namespace. See
+[Every developer app shares one OIDC client](#every-developer-app-shares-one-oidc-client--know-the-blast-radius)
+under Security Considerations before you treat app namespaces as isolated from
+each other.
+
 ## Users and Groups
 
 ### Default Admin User
 - **Username**: `devops-admin`
-- **Password**: Generated during setup, saved in `k8s/scripts/local/oidc-secrets.env`
+- **Password**: Generated during setup, saved in `_setup/local/oidc-secrets.env`
 - **Groups**: `devops-admins`
 - **Note**: Password is temporary and must be changed on first login
 
@@ -126,7 +144,7 @@ Client secrets are stored in two places:
      login source in its database)
    - `vault-oidc-secret` (vault namespace)
 
-2. **Local File**: `k8s/scripts/local/oidc-secrets.env` (gitignored)
+2. **Local File**: `_setup/local/oidc-secrets.env` (gitignored)
    - Contains all client secrets and admin password
    - Used for reference and manual configuration if needed
 
@@ -190,10 +208,100 @@ All services use these Keycloak endpoints:
 
 ## Security Considerations
 
+### Every developer app shares one OIDC client — know the blast radius
+
+This is the most important thing on this page, and it is a deliberate trade-off
+rather than an oversight.
+
+Developer applications do **not** get an OIDC client each. They share one
+confidential client called `apps`:
+
+- **one client**, created by `setup-keycloak.sh` (`require_client_secret apps_secret "apps"`)
+- **one redirect URI**, a wildcard: `https://*.<domain>/oauth2/callback`. Keycloak
+  accepts a single-label host wildcard, and a scaffolded app's hostname is always
+  exactly `<app>.<domain>`, so one pattern covers every app that will ever exist
+- **one secret**, stored in Vault at `secret/apps/oidc-gateway` and delivered by
+  External Secrets into **every** app namespace, where the `devhub-app` chart's
+  gateway `SecurityPolicy` uses it to run the sign-in flow
+
+What follows from that, stated plainly:
+
+> Any person who can read a Secret in **their own** app's namespace — or can get
+> code to run in their own app's pod — holds the client credential that every
+> other app's sign-in depends on.
+
+Concretely, with that secret and the wildcard redirect, someone can:
+
+- complete the authorization-code flow for **any** `*.<domain>` host, including
+  apps they have no access to, and mint tokens as whoever signs in
+- stand up a look-alike host under the wildcard and collect authorization codes
+  that Keycloak will happily exchange
+- force a platform-wide outage by having the secret rotated: every app's login
+  breaks at once, because there is only one
+
+The reasons it is set up this way are real — one client means no per-app Keycloak
+provisioning step, no per-app redirect URI to register, and no per-app secret to
+seed, so the portal can scaffold an app that has working SSO with **zero**
+Keycloak interaction. That is a large part of why creating an app takes a minute.
+But it means the platform's app-to-app authentication boundary is *convention*, not
+enforcement, and it does not survive an app owner who is careless or hostile.
+
+**The hardening path is per-app clients.** If your apps are not all run by the same
+small trusted team, do this rather than documenting around it:
+
+1. Create a client per app (`app-<name>`) with an exact redirect URI
+   (`https://<name>.<domain>/oauth2/callback`) — no wildcard.
+2. Store its secret at `secret/apps/<name>/oidc` and scope the app namespace's
+   ExternalSecret to that path only, so a namespace can read its own credential
+   and nothing else.
+3. Give the client an audience mapper so its tokens are not accepted by other
+   apps' gateways.
+4. Add the client creation to the portal's scaffolding step (it already talks to
+   Forgejo; this makes it talk to Keycloak too) or to a `setup-keycloak.sh`
+   per-app action.
+
+Until then, treat "can deploy an app to this platform" as equivalent to "can
+impersonate the sign-in of every app on this platform", and choose who gets that
+accordingly.
+
+### Forgejo tokens are per-user, not per-repository
+
+Forgejo has no repository-scoped access token. An access token is minted **for a
+user** and carries that user's permissions across every repository and
+organisation they can reach, limited only by coarse scopes
+(`write:repository`, `write:organization`, `write:issue`). There is no
+"this token may only touch `devhub/myapp`".
+
+Two consequences worth knowing:
+
+- **The portal holds one such token.** It needs
+  `write:organization,write:repository,write:issue` to create a repository, seed
+  it from the template and open the starter issues. Minted against the *admin*
+  user, that token is administrative access to all of Forgejo, sitting in a pod
+  that serves HTTP. That is why the token should belong to a dedicated bot
+  account that is a member only of the `devhub` and `devhub-templates`
+  organisations — the scopes cannot be narrowed, so the *identity* is the only
+  place left to limit the blast radius. The portal's other defences (no
+  Kubernetes RBAC at all, and a NetworkPolicy admitting only the gateway, which
+  runs the Keycloak OIDC flow) exist because of this token.
+- **In the app CI template, the registry token is also the git push credential.**
+  `k8s/templates/app-template/.woodpecker.yml` uses the same `registry_token` org
+  secret to `docker login` for the image push, to download the chart, *and* as
+  `GIT_TOKEN` in the `deploy` step that commits the new image tag back to
+  `k8s/values.yaml`. It cannot be otherwise: a pull-only registry token could not
+  push the commit, and Forgejo cannot issue a token that pushes to one repository
+  only. So the token available to every pipeline in the `devhub` org can write to
+  every repository in it. It is deliberately scoped to **push events only**, so
+  pull-request builds of untrusted code never see it — that restriction is doing
+  most of the work here, and removing it (to "make PR builds green") would hand
+  the credential to anyone who can open a pull request.
+
 ### Client Secrets
 - Client secrets are stored in Kubernetes secrets (encrypted at rest if cluster encryption is enabled)
 - Secrets are not committed to git (oidc-secrets.env is gitignored)
-- Rotate secrets periodically in production environments
+- Rotate secrets periodically in production environments — remembering that
+  rotating the shared `apps` secret breaks every app's login until External
+  Secrets has refreshed each namespace
 
 ### Password Policy
 - Keycloak is configured with:

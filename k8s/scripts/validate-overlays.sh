@@ -239,6 +239,33 @@ stub_infra_vars() {
     export PG_PORT="${PG_PORT:-5432}" REDIS_PORT="${REDIS_PORT:-6379}"
 }
 
+# Chart versions are pinned in the deploy scripts; this validator used to keep a
+# third copy of them, which a Renovate bump silently left behind (the bump lands
+# in the scripts and in platform-appset.yaml — both annotated — and nowhere near
+# here). Parse the `CHART_*="<version>"` lines instead: one source of truth, and
+# a rename or a removed pin becomes a failure rather than a stale assertion.
+declare -A CHART_PINS=()
+load_chart_pins() {
+    local script line var version found=0
+    for script in "${SCRIPT_DIR}/deploy.sh" "${SCRIPT_DIR}/deploy-workload.sh"; do
+        # deploy-workload.sh is absent from a platform-only published repo; its
+        # pins all also appear in deploy.sh, so that is not an error.
+        if [[ ! -f "$script" ]]; then
+            [[ "$script" == *deploy.sh ]] && fail "chart pins: ${script} not found"
+            continue
+        fi
+        while IFS= read -r line; do
+            var="${line%%=*}"
+            version="${line#*=\"}"
+            version="${version%%\"*}"
+            [[ -n "$version" ]] || continue
+            CHART_PINS[$var]="$version"
+            found=$((found + 1))
+        done < <(grep -oE '^CHART_[A-Z_]+="[^"]+"' "$script")
+    done
+    (( found > 0 )) || fail "chart pins: no CHART_*= lines found in the deploy scripts"
+}
+
 check_helm_template() {
     local env="$1"
 
@@ -250,30 +277,35 @@ check_helm_template() {
     parse_config
     stub_infra_vars
 
-    # Chart coordinates mirror the pins in deploy.sh. OCI charts are referenced by
-    # URL; there is no repo to add.
+    # Chart *coordinates* live here (OCI charts by URL, the rest as repo/chart);
+    # the *versions* come from the deploy scripts, so a Renovate bump cannot
+    # leave this validator asserting a version nobody deploys any more.
     local -A charts=(
-        [vault]="hashicorp/vault:0.34.1"
-        [argocd]="argo/argo-cd:10.3.3"
-        [external-dns]="external-dns/external-dns:1.21.1"
-        [external-secrets]="external-secrets/external-secrets:2.9.0"
-        [headlamp]="headlamp/headlamp:0.44.0"
-        [homepage]="jameswynn/homepage:2.1.0"
-        [velero]="vmware-tanzu/velero:12.1.0"
-        [kyverno]="kyverno/kyverno:3.8.2"
-        [reloader]="stakater/reloader:2.2.16"
-        [woodpecker]="woodpecker/woodpecker:3.7.0"
-        [forgejo]="oci://code.forgejo.org/forgejo-helm/forgejo:17.1.4"
-        [gateway]="oci://docker.io/envoyproxy/gateway-helm:1.9.0"
-        [monitoring]="prometheus-community/kube-prometheus-stack:88.3.0"
+        [vault]="hashicorp/vault|CHART_VAULT"
+        [argocd]="argo/argo-cd|CHART_ARGOCD"
+        [external-dns]="external-dns/external-dns|CHART_EXTERNAL_DNS"
+        [external-secrets]="external-secrets/external-secrets|CHART_EXTERNAL_SECRETS"
+        [headlamp]="headlamp/headlamp|CHART_HEADLAMP"
+        [homepage]="jameswynn/homepage|CHART_HOMEPAGE"
+        [velero]="vmware-tanzu/velero|CHART_VELERO"
+        [kyverno]="kyverno/kyverno|CHART_KYVERNO"
+        [reloader]="stakater/reloader|CHART_RELOADER"
+        [woodpecker]="woodpecker/woodpecker|CHART_WOODPECKER"
+        [forgejo]="oci://code.forgejo.org/forgejo-helm/forgejo|CHART_FORGEJO"
+        [gateway]="oci://docker.io/envoyproxy/gateway-helm|CHART_ENVOY_GATEWAY"
+        [monitoring]="prometheus-community/kube-prometheus-stack|CHART_PROMETHEUS_STACK"
     )
 
-    local component spec chart version args
+    local component spec chart pin version args
     for component in "${!charts[@]}"; do
         spec="${charts[$component]}"
-        # OCI references contain a colon in the scheme, so split on the last one.
-        chart="${spec%:*}"
-        version="${spec##*:}"
+        chart="${spec%|*}"
+        pin="${spec#*|}"
+        version="${CHART_PINS[$pin]:-}"
+        if [[ -z "$version" ]]; then
+            fail "${env}: no ${pin} pin found in deploy.sh/deploy-workload.sh — cannot check ${component}"
+            continue
+        fi
 
         # Skip components this environment does not configure.
         if [[ "$component" == "monitoring" ]]; then
@@ -284,7 +316,7 @@ check_helm_template() {
 
         args="$(get_values_args "$component")"
         if ! helm template "$component" "$chart" --version "$version" $args >/dev/null 2>"${RENDER_DIR}/helm-${component}.err"; then
-            fail "${env}: helm template failed for ${component} — $(head -3 "${RENDER_DIR}/helm-${component}.err" | tr '\n' ' ')"
+            fail "${env}: helm template failed for ${component} ${version} — $(head -3 "${RENDER_DIR}/helm-${component}.err" | tr '\n' ' ')"
         fi
     done
 }
@@ -385,6 +417,10 @@ check_yaml_syntax
 check_placeholders
 check_appset_values
 check_devhub_app_chart
+
+if $RUN_HELM; then
+    load_chart_pins
+fi
 
 for env in "${ENVS[@]}"; do
     log_step "Checking environment: ${env}"

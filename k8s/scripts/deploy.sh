@@ -46,27 +46,38 @@ CLOUD="$(env_cloud)"
 # ─── Chart and component versions ─────────────────────────────────────
 # One place to bump, mirrored by k8s/argocd/platform-appset.yaml (which ArgoCD
 # reconciles after the GitOps handover) and grouped for Renovate.
-CHART_CERT_MANAGER="v1.21.1"
-CHART_EXTERNAL_DNS="1.21.1"
-CHART_EXTERNAL_SECRETS="2.9.0"
-CHART_VAULT="0.34.1"
-CHART_PROMETHEUS_STACK="88.3.0"
-CHART_LOKI="7.3.0"
-CHART_TEMPO="1.24.4"
-CHART_ALLOY="1.11.1"
-CHART_ARGOCD="10.3.3"
-CHART_HEADLAMP="0.44.0"
-CHART_HOMEPAGE="2.1.0"
-CHART_VELERO="12.1.0"
-CHART_CLUSTER_AUTOSCALER="9.59.0"
-CHART_FORGEJO="17.1.4"
-CHART_WOODPECKER="3.7.0"
-CHART_ENVOY_GATEWAY="1.9.0"
-CHART_KYVERNO="3.8.2"
-CHART_RELOADER="2.2.16"
+#
+# Each pin carries its own Renovate annotation, read by the custom regex manager
+# in renovate.json. `depName` is deliberately the *chart* name — the same value
+# platform-appset.yaml uses — so renovate.json's `groupName: helm chart
+# {{depName}}` lands both pins for a chart in a single PR. validate-overlays.sh
+# parses these same lines rather than keeping a third copy of the versions.
+CHART_CERT_MANAGER="v1.21.1" # renovate: helm depName=cert-manager registryUrl=https://charts.jetstack.io
+CHART_EXTERNAL_DNS="1.21.1" # renovate: helm depName=external-dns registryUrl=https://kubernetes-sigs.github.io/external-dns/
+CHART_EXTERNAL_SECRETS="2.9.0" # renovate: helm depName=external-secrets registryUrl=https://charts.external-secrets.io
+CHART_VAULT="0.34.1" # renovate: helm depName=vault registryUrl=https://helm.releases.hashicorp.com
+CHART_PROMETHEUS_STACK="88.3.0" # renovate: helm depName=kube-prometheus-stack registryUrl=https://prometheus-community.github.io/helm-charts
+CHART_LOKI="7.3.0" # renovate: helm depName=loki registryUrl=https://grafana.github.io/helm-charts
+CHART_TEMPO="1.24.4" # renovate: helm depName=tempo registryUrl=https://grafana.github.io/helm-charts
+CHART_ALLOY="1.11.1" # renovate: helm depName=alloy registryUrl=https://grafana.github.io/helm-charts
+CHART_ARGOCD="10.3.3" # renovate: helm depName=argo-cd registryUrl=https://argoproj.github.io/argo-helm
+CHART_HEADLAMP="0.44.0" # renovate: helm depName=headlamp registryUrl=https://kubernetes-sigs.github.io/headlamp/
+CHART_HOMEPAGE="2.1.0" # renovate: helm depName=homepage registryUrl=https://jameswynn.github.io/helm-charts
+CHART_VELERO="12.1.0" # renovate: helm depName=velero registryUrl=https://vmware-tanzu.github.io/helm-charts
+CHART_CLUSTER_AUTOSCALER="9.59.0" # renovate: helm depName=cluster-autoscaler registryUrl=https://kubernetes.github.io/autoscaler
+CHART_WOODPECKER="3.7.0" # renovate: helm depName=woodpecker registryUrl=https://woodpecker-ci.org/
+CHART_KYVERNO="3.8.2" # renovate: helm depName=kyverno registryUrl=https://kyverno.github.io/kyverno
+CHART_RELOADER="2.2.16" # renovate: helm depName=reloader registryUrl=https://stakater.github.io/stakater-charts
+# OCI charts: there is no index.yaml behind an oci:// reference, so the helm
+# datasource cannot enumerate versions for these two. The annotation keeps the
+# form the manager expects (and the grouping consistent); if Renovate reports a
+# lookup failure for them, they need a docker-datasource manager in
+# renovate.json instead — these are the only two OCI pins in the platform.
+CHART_FORGEJO="17.1.4" # renovate: helm depName=forgejo registryUrl=oci://code.forgejo.org/forgejo-helm
+CHART_ENVOY_GATEWAY="1.9.0" # renovate: helm depName=gateway-helm registryUrl=oci://docker.io/envoyproxy
 
 # The Keycloak Operator ships as plain manifests, not a chart.
-KEYCLOAK_OPERATOR_VERSION="26.7.1"
+KEYCLOAK_OPERATOR_VERSION="26.7.1" # renovate: github-releases depName=keycloak/keycloak-k8s-resources
 KEYCLOAK_MANIFEST_BASE="https://raw.githubusercontent.com/keycloak/keycloak-k8s-resources/${KEYCLOAK_OPERATOR_VERSION}/kubernetes"
 
 # Point at this environment's cluster rather than whatever context is active.
@@ -141,17 +152,44 @@ install_cert_manager() {
 
     log_step "Installing cert-manager..."
 
+    local dir; dir="$(render_dir)"
+
+    # Base + per-cloud overlay, the same two files platform-appset.yaml layers
+    # after handover. The overlay carries the DNS-01 solver's cloud identity
+    # (IRSA role on AWS, Workload Identity GSA on GCP, the workload-identity
+    # labels on Azure); installing without it left the bootstrap cert-manager
+    # unable to issue the wildcard certificate until ArgoCD took over.
+    template_values "${BASE_DIR}/devops/cert-manager/values.yaml" \
+        "${dir}/cert-manager-base.yaml"
+
+    local cm_values=(-f "${dir}/cert-manager-base.yaml")
+    local cm_overlay="${K8S_DIR}/overlays/${CLOUD}/devops/cert-manager/values.yaml"
+    if [[ -f "$cm_overlay" ]]; then
+        case "$CLOUD" in
+            aws) [[ -n "${CERT_MANAGER_ROLE_ARN:-}" ]] || log_warn "CERT_MANAGER_ROLE_ARN empty — run sync-tofu-outputs.sh, or the DNS-01 solver falls back to the node role and wildcard issuance fails" ;;
+            gcp) [[ -n "${CERT_MANAGER_GSA_EMAIL:-}" ]] || log_warn "CERT_MANAGER_GSA_EMAIL empty — run sync-tofu-outputs.sh, or the DNS-01 solver has no identity and wildcard issuance fails" ;;
+        esac
+        template_values "$cm_overlay" "${dir}/cert-manager-cloud.yaml"
+        cm_values+=(-f "${dir}/cert-manager-cloud.yaml")
+    fi
+
     helm upgrade --install cert-manager jetstack/cert-manager \
         --namespace cert-manager \
         --create-namespace \
         --version "$CHART_CERT_MANAGER" \
-        -f "${BASE_DIR}/devops/cert-manager/values.yaml" \
+        "${cm_values[@]}" \
         --atomic --timeout 5m
 
     kubectl wait --for=condition=ready pod -l app=webhook -n cert-manager --timeout=60s
 
-    # Apply cluster issuers with templated email
-    envsubst < "${BASE_DIR}/devops/cert-manager/cluster-issuers.yaml" | kubectl apply -f -
+    # Apply cluster issuers with templated email. Through template_values, not a
+    # raw envsubst: load_secrets has `set -a`-exported every credential in
+    # secrets.env, so an unrestricted envsubst would happily substitute any of
+    # them into a manifest — and would silently escape the TEMPLATE_VARS
+    # allow-list that validate-overlays.sh checks these files against.
+    template_values "${BASE_DIR}/devops/cert-manager/cluster-issuers.yaml" \
+        "${dir}/cluster-issuers.yaml"
+    kubectl apply -f "${dir}/cluster-issuers.yaml"
 
     log_info "cert-manager installed"
 }
@@ -168,41 +206,64 @@ install_data_services() {
 
     local DATA_SERVICES_DIR="${OVERLAY_DIR}/data-services"
 
-    # Generate PostgreSQL credentials if not exists
+    # Generate the PostgreSQL credentials once. Everything derived from them is
+    # created *outside* this guard: the consumer secrets used to be nested in
+    # here, so a crash after postgresql-credentials existed left keycloak's and
+    # forgejo's database secrets missing forever — and neither service can start
+    # without them. Re-running now repairs whatever is missing.
     if ! kubectl get secret postgresql-credentials -n data-services &>/dev/null; then
-        local PG_ADMIN_PASSWORD=$(openssl rand -base64 24)
-        local PG_KEYCLOAK_PASSWORD=$(openssl rand -base64 24)
-        local PG_FORGEJO_PASSWORD=$(openssl rand -base64 24)
-
         kubectl create secret generic postgresql-credentials -n data-services \
-            --from-literal=postgres-password="$PG_ADMIN_PASSWORD" \
-            --from-literal=keycloak-password="$PG_KEYCLOAK_PASSWORD" \
-            --from-literal=forgejo-password="$PG_FORGEJO_PASSWORD"
+            --from-literal=postgres-password="$(openssl rand -base64 24)" \
+            --from-literal=keycloak-password="$(openssl rand -base64 24)" \
+            --from-literal=forgejo-password="$(openssl rand -base64 24)"
+        log_info "Generated PostgreSQL credentials"
+    else
+        log_info "PostgreSQL credentials already exist"
+    fi
 
-        # Consumed by install_forgejo when there is no managed database.
-        kubectl create secret generic forgejo-db-credentials -n data-services \
-            --from-literal=password="$PG_FORGEJO_PASSWORD"
+    # The stored secret — not the locals above — is the source of truth: on a
+    # re-run the passwords must match the ones the database was initialised with.
+    local pg_keycloak_password pg_forgejo_password
+    pg_keycloak_password="$(kubectl get secret postgresql-credentials -n data-services \
+        -o jsonpath='{.data.keycloak-password}' | base64 -d)"
+    pg_forgejo_password="$(kubectl get secret postgresql-credentials -n data-services \
+        -o jsonpath='{.data.forgejo-password}' | base64 -d)"
+    [[ -n "$pg_keycloak_password" && -n "$pg_forgejo_password" ]] \
+        || { log_error "postgresql-credentials exists but is missing keycloak-password/forgejo-password"; exit 1; }
 
-        # Create corresponding secrets in consuming namespaces
-        kubectl create namespace keycloak 2>/dev/null || true
-        kubectl create secret generic keycloak-db-secret -n keycloak \
-            --from-literal=username=keycloak \
-            --from-literal=password="$PG_KEYCLOAK_PASSWORD" \
-            2>/dev/null || true
+    # Consumed by install_forgejo when there is no managed database.
+    kubectl create secret generic forgejo-db-credentials -n data-services \
+        --from-literal=password="$pg_forgejo_password" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-        kubectl create namespace forgejo 2>/dev/null || true
-        kubectl create secret generic forgejo-db-secret -n forgejo \
-            --from-literal=password="$PG_FORGEJO_PASSWORD" \
-            2>/dev/null || true
+    # The same secrets, in the namespaces that mount them. No `|| true` here:
+    # a failure to create these is the difference between a working platform and
+    # a Keycloak that never starts, so it has to surface.
+    kubectl create namespace keycloak 2>/dev/null || true
+    kubectl create secret generic keycloak-db-secret -n keycloak \
+        --from-literal=username=keycloak \
+        --from-literal=password="$pg_keycloak_password" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-        # Update init SQL with actual passwords
-        local INIT_SQL=$(kubectl get configmap postgresql-init -n data-services -o jsonpath='{.data.init\.sql}' 2>/dev/null || echo "")
-        if [[ -z "$INIT_SQL" ]]; then
-            cat <<EOSQL | kubectl create configmap postgresql-init -n data-services --from-file=init.sql=/dev/stdin
+    kubectl create namespace forgejo 2>/dev/null || true
+    kubectl create secret generic forgejo-db-secret -n forgejo \
+        --from-literal=password="$pg_forgejo_password" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+    log_info "Database secrets in place (data-services, keycloak, forgejo)"
+
+    # The init SQL PostgreSQL runs on first start. It embeds both passwords, so
+    # it belongs in a Secret rather than a ConfigMap — but which kind is mounted
+    # is decided by the StatefulSet's volume in the overlay manifest, which this
+    # script does not own. Create the kind the manifest asks for and delete the
+    # other, so switching that volume to `secret:` is all it takes for the
+    # plaintext ConfigMap to disappear from the cluster on the next deploy.
+    local init_sql
+    init_sql="$(cat <<EOSQL
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'keycloak') THEN
-    CREATE ROLE keycloak WITH LOGIN PASSWORD '${PG_KEYCLOAK_PASSWORD}';
+    CREATE ROLE keycloak WITH LOGIN PASSWORD '${pg_keycloak_password}';
   END IF;
 END \$\$;
 CREATE DATABASE keycloak OWNER keycloak;
@@ -210,14 +271,23 @@ CREATE DATABASE keycloak OWNER keycloak;
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'forgejo') THEN
-    CREATE ROLE forgejo WITH LOGIN PASSWORD '${PG_FORGEJO_PASSWORD}';
+    CREATE ROLE forgejo WITH LOGIN PASSWORD '${pg_forgejo_password}';
   END IF;
 END \$\$;
 CREATE DATABASE forgejo OWNER forgejo;
 EOSQL
-        fi
+)"
+    if grep -q 'secretName: postgresql-init' "${DATA_SERVICES_DIR}/postgresql.yaml"; then
+        printf '%s\n' "$init_sql" | kubectl create secret generic postgresql-init -n data-services \
+            --from-file=init.sql=/dev/stdin --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        kubectl delete configmap postgresql-init -n data-services --ignore-not-found >/dev/null
+        log_info "Init SQL stored in Secret data-services/postgresql-init"
     else
-        log_info "PostgreSQL credentials already exist"
+        printf '%s\n' "$init_sql" | kubectl create configmap postgresql-init -n data-services \
+            --from-file=init.sql=/dev/stdin --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        log_warn "Init SQL holds the database passwords in a ConfigMap. Point the"
+        log_warn "init-scripts volume in ${DATA_SERVICES_DIR}/postgresql.yaml at"
+        log_warn "'secret: secretName: postgresql-init' and re-run to move it into a Secret."
     fi
 
     # The StatefulSets mount these; Forgejo needs neither, but the services are
@@ -336,19 +406,26 @@ EOSQL
     # The pod runs inside the cluster, which is the only network with a route to
     # the private database endpoint.
     #
-    # The kubelet expands $(VAR) references in a container's command and args,
-    # and reduces every literal $$ to $ — which turned the SQL's `DO $$` into
-    # `DO $` inside the pod. Doubling each $ makes the kubelet reconstruct the
-    # string exactly (this also protects passwords that contain a dollar sign).
-    local sql_arg="${sql//$/\$\$}"
-    kubectl run "pg-init-$$" \
+    # Nothing secret goes on the command line or into the pod spec: `--env=
+    # PGPASSWORD=...` and `-c "<sql containing passwords>"` are readable by
+    # anyone with pod-read in this namespace and are recorded verbatim in the
+    # control-plane audit log, which this platform enables on purpose. Instead
+    # the pod reads the admin password from the first line of its stdin and the
+    # SQL from the rest (`psql -f -`) — POSIX `read` stops at the newline, so the
+    # remainder is still there for psql.
+    #
+    # This also retires the old $$-doubling hack: the kubelet expands $(VAR) and
+    # collapses $$ to $ in a container's argv, which used to mangle the SQL's
+    # `DO $$` blocks. Off argv, the SQL arrives byte-for-byte.
+    printf '%s\n%s\n' "$PG_ADMIN_PASSWORD" "$sql" | kubectl run "pg-init-$$" \
         --rm -i --restart=Never \
         --image=postgres:16 \
         --namespace=data-services \
-        --env="PGPASSWORD=${PG_ADMIN_PASSWORD}" \
-        --command -- psql \
-            -h "${PG_HOST}" -p "${PG_PORT}" -U "${admin_login}" -d postgres \
-            -v ON_ERROR_STOP=1 -c "$sql_arg"
+        --command -- sh -ce '
+            IFS= read -r PGPASSWORD
+            export PGPASSWORD
+            exec psql -h "$1" -p "$2" -U "$3" -d postgres -v ON_ERROR_STOP=1 -f -
+        ' sh "${PG_HOST}" "${PG_PORT}" "${admin_login}"
 
     # PostgreSQL 15 revoked PUBLIC's CREATE on schema public, so owning a
     # database is not enough — without an explicit grant *inside each
@@ -356,15 +433,17 @@ EOSQL
     # schema public". Runs in its own pod because the grant must execute
     # connected to the target database, not to postgres.
     log_step "Granting schema rights inside each database..."
-    kubectl run "pg-grant-$$" \
+    # Password over stdin here too; the grants themselves carry no secret.
+    printf '%s\n' "$PG_ADMIN_PASSWORD" | kubectl run "pg-grant-$$" \
         --rm -i --restart=Never \
         --image=postgres:16 \
         --namespace=data-services \
-        --env="PGPASSWORD=${PG_ADMIN_PASSWORD}" \
-        --env="PGHOST=${PG_HOST}" \
-        --env="PGPORT=${PG_PORT}" \
-        --env="PGUSER=${admin_login}" \
-        --command -- sh -ce "psql -d keycloak -v ON_ERROR_STOP=1 -c 'GRANT ALL ON SCHEMA public TO keycloak;'; psql -d forgejo -v ON_ERROR_STOP=1 -c 'GRANT ALL ON SCHEMA public TO forgejo;'"
+        --command -- sh -ce '
+            IFS= read -r PGPASSWORD
+            export PGPASSWORD PGHOST="$1" PGPORT="$2" PGUSER="$3"
+            psql -d keycloak -v ON_ERROR_STOP=1 -c "GRANT ALL ON SCHEMA public TO keycloak;"
+            psql -d forgejo  -v ON_ERROR_STOP=1 -c "GRANT ALL ON SCHEMA public TO forgejo;"
+        ' sh "${PG_HOST}" "${PG_PORT}" "${admin_login}"
 
     # Marker for quickstart's detector: nothing else this step creates is
     # observable from outside (the users live in the managed database), and the
@@ -536,8 +615,10 @@ setup_loki_auth() {
         password="$(openssl rand -base64 24 | tr -d '/+=')"
 
         # Envoy Gateway's BasicAuth reads an htpasswd file from the .htpasswd key.
+        # The password goes to openssl over stdin: as an argument it is visible
+        # in `ps` for the lifetime of the call.
         local htpasswd
-        htpasswd="workload:$(openssl passwd -apr1 "$password")"
+        htpasswd="workload:$(printf '%s\n' "$password" | openssl passwd -apr1 -stdin)"
 
         kubectl create secret generic loki-gateway-auth -n monitoring \
             --from-literal=.htpasswd="$htpasswd"
@@ -816,21 +897,18 @@ configure_woodpecker_oauth() {
     log_step "Registering Woodpecker as an OAuth application in Forgejo..."
 
     local pod
-    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    pod="$(forgejo_pod)"
     if [[ -z "$pod" ]]; then
         log_warn "Forgejo is not running yet — run this later:"
         log_warn "  ./deploy.sh --env ${ENV} woodpecker-oauth"
         return 0
     fi
 
-    # A short-lived admin token, used only for the two API calls below.
-    local admin_user token
-    admin_user="$(kubectl get secret forgejo-admin-secret -n forgejo \
-        -o jsonpath='{.data.username}' | base64 -d)"
-    token="$(kubectl exec -n forgejo "$pod" -- forgejo admin user generate-access-token \
-        --username "$admin_user" --token-name "woodpecker-setup-$(date +%s)" \
-        --scopes write:user --raw 2>/dev/null | tr -d '\r' | tail -1)"
+    # A short-lived admin token, used only for the API call below. Ephemeral:
+    # forgejo_token_create registers it for revocation on exit, so an aborted
+    # run does not leave a live admin credential behind.
+    local token
+    token="$(forgejo_token_create "$pod" "woodpecker-setup-$(date +%s)" write:user)" || token=""
 
     if [[ -z "$token" ]]; then
         log_warn "Could not mint a Forgejo admin token — register the application by hand:"
@@ -839,13 +917,12 @@ configure_woodpecker_oauth() {
         return 0
     fi
 
+    # The application is owned by the token's user, so this registers it under
+    # the Forgejo admin account — which is what Woodpecker's OAuth flow expects.
     local response
-    response="$(kubectl exec -n forgejo "$pod" -- curl -fsS \
-        -X POST "http://localhost:3000/api/v1/user/applications/oauth2" \
-        -H "Authorization: token ${token}" \
-        -H "Content-Type: application/json" \
-        -d "{\"name\":\"Woodpecker CI\",\"redirect_uris\":[\"https://ci.${DOMAIN}/authorize\"],\"confidential_client\":true}" \
-        2>/dev/null || echo "")"
+    response="$(forgejo_api "$pod" "$token" POST /user/applications/oauth2 \
+        "{\"name\":\"Woodpecker CI\",\"redirect_uris\":[\"https://ci.${DOMAIN}/authorize\"],\"confidential_client\":true}" \
+        || echo "")"
 
     local client_id client_secret
     client_id="$(echo "$response" | jq -r '.client_id // empty' 2>/dev/null)"
@@ -1027,22 +1104,156 @@ install_homepage() {
 # it installs before the platform's own registry and CI exist. After the
 # GitOps handover, k8s/argocd/apps/portal.yaml makes ArgoCD own it.
 
-# Mint the Forgejo token the portal calls the API with. Scoped to what the
-# wizard does: create repos in the devhub org, read templates, open issues.
+# The portal's Forgejo identity is a dedicated bot account — never the site
+# admin. Forgejo token scopes gate endpoint *categories*, not repositories, so a
+# token minted from the admin account can write every repository in the
+# instance, this environment's private GitOps repository included.
+#
+# Repository reach is granted the one way Forgejo actually scopes it, org
+# membership:
+#
+#   devhub / portal-bot            may create repositories, holds none
+#   devhub-templates / portal-bot  read-only, all repositories
+#
+# The bot administers the app repos it creates because Forgejo makes the creator
+# of an organisation repository its admin collaborator whenever no team already
+# grants that — which is why the devhub team deliberately keeps
+# includes_all_repositories=false. Setting it true would be simpler and would
+# hand the bot admin over devhub/devhub, the platform GitOps repository, which
+# is exactly the blast radius this replaces. Repos that predate the bot are
+# picked up one by one instead (see ensure_portal_bot).
+#
+# If a future Forgejo ever stops granting the creator that admin access, the
+# symptom is the portal reporting permission "none" and failing to deprovision
+# apps it just created; the fix is to add each new repo to the team (an org
+# owner action) rather than to flip includes_all_repositories.
+PORTAL_BOT_USER="devhub-bot"
+PORTAL_BOT_TEAM="portal-bot"
+# What the wizard's endpoints need, and no more: create repositories in the org
+# (organization + repository), commit the scaffold and manage its collaborators
+# (repository), open the starter issues and their milestone (issue).
+PORTAL_TOKEN_SCOPES="write:organization,write:repository,write:issue"
+
+# Create the bot, its teams and its memberships. Idempotent, and narrowing:
+# an environment whose team was created with wider rights is patched back.
+#   ensure_portal_bot <pod> <admin-token>
+ensure_portal_bot() {
+    local pod="$1" admin_token="$2"
+
+    # Both orgs must exist before a team can be created in them. Usually the
+    # gitops handover (devhub) and publish_app_templates (devhub-templates) got
+    # there first; on a fresh install portal-token can run before either.
+    local org
+    for org in devhub devhub-templates; do
+        if [[ -z "$(forgejo_api "$pod" "$admin_token" GET "/orgs/${org}" | jq -r '.id // empty' 2>/dev/null)" ]]; then
+            forgejo_api "$pod" "$admin_token" POST /orgs "{\"username\":\"${org}\"}" >/dev/null \
+                && log_info "Created Forgejo organisation: ${org}" \
+                || { log_warn "Could not create Forgejo organisation ${org}"; return 1; }
+        fi
+    done
+
+    # The account itself. --random-password: the bot never signs in
+    # interactively (the portal holds a token), so no password is stored
+    # anywhere, and none passes through this script's arguments.
+    if [[ -z "$(forgejo_api "$pod" "$admin_token" GET "/users/${PORTAL_BOT_USER}" | jq -r '.id // empty' 2>/dev/null)" ]]; then
+        kubectl exec -n forgejo "$pod" -- forgejo admin user create \
+            --username "$PORTAL_BOT_USER" --random-password \
+            --email "${PORTAL_BOT_USER}@${DOMAIN}" \
+            --must-change-password=false >/dev/null 2>&1 || true
+        if [[ -z "$(forgejo_api "$pod" "$admin_token" GET "/users/${PORTAL_BOT_USER}" | jq -r '.id // empty' 2>/dev/null)" ]]; then
+            log_warn "Could not create the Forgejo bot user ${PORTAL_BOT_USER}"
+            return 1
+        fi
+        log_info "Created Forgejo bot user: ${PORTAL_BOT_USER} (no admin rights)"
+    fi
+
+    local perm all_repos create_repo body team_id
+    for org in devhub devhub-templates; do
+        case "$org" in
+            # Apps org: the right to create repositories, and nothing else. The
+            # repos it then creates are its own to administer; every other repo
+            # in the org — the private GitOps repository first of all — stays
+            # out of reach.
+            devhub)           perm=read; all_repos=false; create_repo=true ;;
+            # Templates org: read the scaffolds and the devhub-app chart.
+            devhub-templates) perm=read; all_repos=true;  create_repo=false ;;
+        esac
+
+        body="$(jq -n --arg name "$PORTAL_BOT_TEAM" --arg perm "$perm" \
+            --argjson all "$all_repos" --argjson create "$create_repo" \
+            '{name: $name,
+              description: "devhub portal — scoped API access for the app wizard",
+              permission: $perm,
+              includes_all_repositories: $all,
+              can_create_org_repo: $create,
+              units: ["repo.code", "repo.issues"]}')"
+
+        team_id="$(forgejo_api "$pod" "$admin_token" GET "/orgs/${org}/teams" \
+            | jq -r --arg n "$PORTAL_BOT_TEAM" '.[]? | select(.name == $n) | .id' 2>/dev/null | head -1)"
+        if [[ -z "$team_id" ]]; then
+            team_id="$(forgejo_api "$pod" "$admin_token" POST "/orgs/${org}/teams" "$body" \
+                | jq -r '.id // empty' 2>/dev/null)"
+            [[ -n "$team_id" ]] || { log_warn "Could not create team ${org}/${PORTAL_BOT_TEAM}"; return 1; }
+            log_info "Forgejo team created: ${org}/${PORTAL_BOT_TEAM}"
+        else
+            forgejo_api "$pod" "$admin_token" PATCH "/teams/${team_id}" "$body" >/dev/null \
+                || log_warn "Could not update team ${org}/${PORTAL_BOT_TEAM} — verify its rights by hand"
+        fi
+
+        forgejo_api "$pod" "$admin_token" PUT "/teams/${team_id}/members/${PORTAL_BOT_USER}" >/dev/null \
+            || { log_warn "Could not add ${PORTAL_BOT_USER} to ${org}/${PORTAL_BOT_TEAM}"; return 1; }
+    done
+
+    # Apps created before the bot existed (or by the old site-admin token) are
+    # in no team the bot belongs to, so the portal can neither read their
+    # permissions nor deprovision them. Adopt them one repository at a time —
+    # every repository in the org except the GitOps repository, which is excluded
+    # by name: keeping *that* one unreachable is the point of this arrangement.
+    # Private app repositories are adopted too (the portal creates public ones,
+    # but a repo made private afterwards would otherwise vanish from its list) —
+    # unless gitops.repoUrl is unset, in which case there is no way to tell which
+    # private repo is the platform's and the conservative rule wins.
+    local gitops_repo repo private
+    gitops_repo="$(basename "${GITOPS_REPO_URL:-}" .git)"
+    while IFS=$'\t' read -r repo private; do
+        [[ -n "$repo" ]] || continue
+        [[ "$repo" != "$gitops_repo" ]] || continue
+        if [[ "$private" != "false" && -z "$gitops_repo" ]]; then
+            log_warn "gitops.repoUrl is unset — leaving private repo devhub/${repo} unadopted (it may be the platform repo)"
+            continue
+        fi
+        forgejo_api "$pod" "$admin_token" PUT \
+            "/repos/devhub/${repo}/collaborators/${PORTAL_BOT_USER}" \
+            '{"permission":"admin"}' >/dev/null \
+            || log_warn "Could not give ${PORTAL_BOT_USER} admin on devhub/${repo} (the portal will report its permission as none and cannot deprovision it)"
+    done < <(forgejo_api "$pod" "$admin_token" GET "/orgs/devhub/repos?limit=100" \
+        | jq -r '.[]? | [.name, (.private | tostring)] | @tsv' 2>/dev/null)
+
+    return 0
+}
+
+# Mint the Forgejo token the portal calls the API with, from the bot above.
 ensure_portal_forgejo_token() {
     kubectl create namespace portal 2>/dev/null || true
 
-    local existing
+    # The stored username is what tells a bot token from the pre-bot site-admin
+    # one: the portal's scopes cannot read /user back, so the secret records who
+    # the token belongs to.
+    local existing existing_user
     existing="$(kubectl get secret portal-forgejo-token -n portal \
         -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)"
+    existing_user="$(kubectl get secret portal-forgejo-token -n portal \
+        -o jsonpath='{.data.username}' 2>/dev/null | base64 -d || true)"
     if [[ -n "$existing" && "$existing" != "placeholder" ]]; then
-        log_info "Portal Forgejo token already exists"
-        return 0
+        if [[ "$existing_user" == "$PORTAL_BOT_USER" ]]; then
+            log_info "Portal Forgejo token already exists (user: ${PORTAL_BOT_USER})"
+            return 0
+        fi
+        log_warn "The portal's token predates ${PORTAL_BOT_USER} and carries site-admin reach — replacing it"
     fi
 
     local pod
-    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    pod="$(forgejo_pod)"
     if [[ -z "$pod" ]]; then
         log_warn "Forgejo is not running — seeding a placeholder token. Later, run:"
         log_warn "  ./deploy.sh --env ${ENV} portal-token"
@@ -1052,13 +1263,27 @@ ensure_portal_forgejo_token() {
         return 0
     fi
 
-    local admin_user token
-    admin_user="$(kubectl get secret forgejo-admin-secret -n forgejo \
-        -o jsonpath='{.data.username}' | base64 -d)"
-    token="$(kubectl exec -n forgejo "$pod" -- forgejo admin user generate-access-token \
-        --username "$admin_user" --token-name "portal-$(date +%s)" \
-        --scopes write:organization,write:repository,write:issue --raw 2>/dev/null \
-        | tr -d '\r' | tail -1)"
+    # Admin rights are needed to *set the bot up*, not to run the portal: this
+    # token is ephemeral and revoked when the script exits.
+    local admin_token
+    admin_token="$(forgejo_token_create "$pod" "portal-setup-$(date +%s)" \
+        write:organization,write:repository,read:user)" || admin_token=""
+    if [[ -z "$admin_token" ]]; then
+        log_warn "Could not mint a Forgejo admin token — re-run: ./deploy.sh --env ${ENV} portal-token"
+        return 0
+    fi
+
+    if ! ensure_portal_bot "$pod" "$admin_token"; then
+        log_warn "Portal bot not fully configured — re-run: ./deploy.sh --env ${ENV} portal-token"
+        return 0
+    fi
+
+    # A stable token name, deleted first: re-running replaces the portal's
+    # credential instead of leaving one live token per deploy behind. --keep
+    # because this one is stored and has to outlive the script.
+    forgejo_token_delete "$pod" "$PORTAL_BOT_USER" portal
+    local token
+    token="$(forgejo_token_create --keep "$pod" portal "$PORTAL_TOKEN_SCOPES" "$PORTAL_BOT_USER")" || token=""
     if [[ -z "$token" ]]; then
         log_warn "Could not mint a Forgejo token for the portal — re-run: ./deploy.sh --env ${ENV} portal-token"
         return 0
@@ -1066,9 +1291,10 @@ ensure_portal_forgejo_token() {
 
     kubectl create secret generic portal-forgejo-token -n portal \
         --from-literal=token="$token" \
+        --from-literal=username="$PORTAL_BOT_USER" \
         --dry-run=client -o yaml | kubectl apply -f - >/dev/null
     kubectl rollout restart deployment/portal -n portal >/dev/null 2>&1 || true
-    log_info "Portal Forgejo token created"
+    log_info "Portal Forgejo token created (user: ${PORTAL_BOT_USER}, scopes: ${PORTAL_TOKEN_SCOPES})"
 }
 
 # Publish k8s/templates/app-template into Forgejo as devhub-templates/app-template.
@@ -1086,33 +1312,27 @@ publish_app_templates() {
     log_step "Publishing the app template to Forgejo..."
 
     local pod
-    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    pod="$(forgejo_pod)"
     if [[ -z "$pod" ]]; then
         log_warn "Forgejo is not running — publish later with: ./deploy.sh --env ${ENV} portal-templates"
         return 0
     fi
 
-    local admin_user token
-    admin_user="$(kubectl get secret forgejo-admin-secret -n forgejo \
-        -o jsonpath='{.data.username}' | base64 -d)"
-    token="$(kubectl exec -n forgejo "$pod" -- forgejo admin user generate-access-token \
-        --username "$admin_user" --token-name "portal-templates-$(date +%s)" \
-        --scopes write:organization,write:repository --raw 2>/dev/null | tr -d '\r' | tail -1)"
+    # Ephemeral admin token: revoked by the exit trap, so an interrupted publish
+    # leaves nothing behind.
+    local token
+    token="$(forgejo_token_create "$pod" "portal-templates-$(date +%s)" \
+        write:organization,write:repository)" || token=""
     if [[ -z "$token" ]]; then
         log_warn "Could not mint a Forgejo admin token — publish later with: ./deploy.sh --env ${ENV} portal-templates"
         return 0
     fi
 
-    local api="http://localhost:3000/api/v1"
-    fapi() { # method path (body on stdin)
-        kubectl exec -i -n forgejo "$pod" -- curl -fsS -X "$1" "${api}$2" \
-            -H "Authorization: token ${token}" -H "Content-Type: application/json" \
-            --data-binary @- 2>/dev/null
+    fapi() { # method path [json-body]
+        forgejo_api "$pod" "$token" "$1" "$2" "${3:-}"
     }
-    fget() {
-        kubectl exec -n forgejo "$pod" -- curl -fsS "${api}$1" \
-            -H "Authorization: token ${token}" 2>/dev/null || true
+    fget() { # path
+        forgejo_api "$pod" "$token" GET "$1" || true
     }
 
     # Both orgs: devhub-templates for the template, devhub for the apps the
@@ -1120,7 +1340,7 @@ publish_app_templates() {
     local org
     for org in devhub devhub-templates; do
         if [[ -z "$(fget "/orgs/${org}" | jq -r '.id // empty')" ]]; then
-            echo "{\"username\":\"${org}\"}" | fapi POST /orgs >/dev/null \
+            fapi POST /orgs "{\"username\":\"${org}\"}" >/dev/null \
                 && log_info "Created Forgejo organisation: ${org}" \
                 || log_warn "Could not create Forgejo organisation ${org}"
         fi
@@ -1134,7 +1354,7 @@ publish_app_templates() {
         git_env=(env "GIT_SSL_CAINFO=${CERTS_DIR}/ca/ca.crt")
     fi
 
-    local dir name descr staging push_url
+    local dir name descr staging push_url f count
     for dir in "${K8S_DIR}/templates"/*/; do
         name="$(basename "$dir")"
         case "$name" in
@@ -1145,22 +1365,57 @@ publish_app_templates() {
         esac
 
         if [[ -z "$(fget "/repos/devhub-templates/${name}" | jq -r '.id // empty')" ]]; then
-            echo "{\"name\":\"${name}\",\"description\":\"${descr}\",\"private\":false,\"auto_init\":false,\"default_branch\":\"main\"}" \
-                | fapi POST /orgs/devhub-templates/repos >/dev/null \
+            fapi POST /orgs/devhub-templates/repos \
+                "{\"name\":\"${name}\",\"description\":\"${descr}\",\"private\":false,\"auto_init\":false,\"default_branch\":\"main\"}" \
+                >/dev/null \
                 || { log_warn "Could not create devhub-templates/${name}"; continue; }
         fi
 
         # Fresh single-commit tree, force-pushed over the public URL — same
         # reachability assumption (and same local-CA handling) as setup-gitops-repo.
+        #
+        # Only files git tracks, one at a time: a `cp -r` of the directory also
+        # copied gitignored build output (app-template/obj/ appears the moment
+        # anyone builds the sample locally), and every app the portal scaffolded
+        # then shipped that stale artifact. Copied from the working tree rather
+        # than from HEAD, so editing a template and re-running still publishes
+        # the edit.
         staging="$(mktemp -d "${TMPDIR:-/tmp}/devhub-template.XXXXXX")"
-        cp -r "${dir}." "$staging/"
+        count=0
+        if git -C "$dir" rev-parse --is-inside-work-tree &>/dev/null; then
+            while IFS= read -r -d '' f; do
+                [[ -f "${dir}${f}" ]] || continue   # tracked but deleted locally
+                mkdir -p "${staging}/$(dirname "$f")"
+                cp -p "${dir}${f}" "${staging}/${f}"
+                count=$((count + 1))
+            done < <(git -C "$dir" ls-files -z 2>/dev/null)
+        else
+            # An unpacked tarball rather than a checkout: nothing knows what is
+            # generated here, so copy the directory and say what that implies.
+            log_warn "k8s/templates/${name} is not in a git checkout — publishing the directory as-is (build output included)"
+            cp -r "${dir}." "$staging/"
+            count=1
+        fi
+        if (( count == 0 )); then
+            log_warn "No git-tracked files under k8s/templates/${name} — nothing published"
+            rm -rf "$staging"
+            continue
+        fi
+
         git -C "$staging" init -q -b main
         git -C "$staging" -c user.name=devhub -c user.email="devhub@${DOMAIN}" add -A
         git -C "$staging" -c user.name=devhub -c user.email="devhub@${DOMAIN}" \
             commit -q -m "Publish ${name} from devhub"
 
-        push_url="https://${admin_user}:${token}@git.${DOMAIN}/devhub-templates/${name}.git"
-        if "${git_env[@]+"${git_env[@]}"}" git -C "$staging" push -q --force "$push_url" main; then
+        # The token travels as an HTTP header, never in the URL: git echoes the
+        # remote URL in its error output, and quickstart tees that to a log file.
+        # Passed through git's environment config rather than `git -c`, so it
+        # stays out of argv as well (git >= 2.31).
+        push_url="https://git.${DOMAIN}/devhub-templates/${name}.git"
+        if GIT_CONFIG_COUNT=1 \
+           GIT_CONFIG_KEY_0=http.extraHeader \
+           GIT_CONFIG_VALUE_0="Authorization: token ${token}" \
+           "${git_env[@]+"${git_env[@]}"}" git -C "$staging" push -q --force "$push_url" main; then
             log_info "Published devhub-templates/${name} (re-run this command to republish)"
         else
             log_warn "Push failed for ${name}. Is git.${DOMAIN} reachable from this machine?"
@@ -1188,26 +1443,20 @@ configure_woodpecker_ci_secrets() {
     # platform-admin must be able to administer the devhub org's repositories.
     # Make it an org owner (idempotent) BEFORE any Woodpecker login: the login
     # is what syncs org membership into Woodpecker.
-    local fj_pod fj_admin fj_token
-    fj_pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    local fj_pod fj_token
+    fj_pod="$(forgejo_pod)"
     [[ -n "$fj_pod" ]] || { log_error "Forgejo is not running"; exit 1; }
-    fj_admin="$(kubectl get secret forgejo-admin-secret -n forgejo \
-        -o jsonpath='{.data.username}' | base64 -d)"
-    fj_token="$(kubectl exec -n forgejo "$fj_pod" -- forgejo admin user generate-access-token \
-        --username "$fj_admin" --token-name "ci-secrets-$(date +%s)" \
-        --scopes write:organization,write:package,write:repository --raw 2>/dev/null | tr -d '\r' | tail -1)"
+    # Ephemeral: revoked when this script exits, however it exits.
+    fj_token="$(forgejo_token_create "$fj_pod" "ci-secrets-$(date +%s)" \
+        write:organization,write:package,write:repository)" || fj_token=""
     [[ -n "$fj_token" ]] || { log_error "Could not mint a Forgejo admin token"; exit 1; }
-    fjapi() { # method path
-        kubectl exec -n forgejo "$fj_pod" -- curl -fsS -X "$1" "http://localhost:3000/api/v1$2" \
-            -H "Authorization: token ${fj_token}" 2>/dev/null
+    fjapi() { # method path [json-body]
+        forgejo_api "$fj_pod" "$fj_token" "$1" "$2" "${3:-}"
     }
     local owners_id
     owners_id="$(fjapi GET "/orgs/devhub/teams" | jq -r '.[] | select(.name=="Owners") | .id')"
     if [[ -n "$owners_id" ]]; then
-        if kubectl exec -n forgejo "$fj_pod" -- curl -fsS -X PUT \
-            "http://localhost:3000/api/v1/teams/${owners_id}/members/platform-admin" \
-            -H "Authorization: token ${fj_token}" >/dev/null 2>&1; then
+        if fjapi PUT "/teams/${owners_id}/members/platform-admin" >/dev/null 2>&1; then
             log_info "platform-admin is an owner of the devhub org"
         else
             log_warn "Could not add platform-admin to the devhub org owners (has it signed in to Forgejo yet?)"
@@ -1246,16 +1495,13 @@ configure_woodpecker_ci_secrets() {
     kubectl rollout restart deployment/portal -n portal >/dev/null 2>&1 || true
 
     # A Forgejo token that can push packages — the credential CI publishes with.
-    local pod
-    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
-    [[ -n "$pod" ]] || { log_error "Forgejo is not running"; exit 1; }
+    # --keep: Woodpecker stores it, so it must outlive this run. A stable token
+    # name, dropped first, keeps re-runs from leaving one live token per deploy.
     local admin_user registry_token
-    admin_user="$(kubectl get secret forgejo-admin-secret -n forgejo \
-        -o jsonpath='{.data.username}' | base64 -d)"
-    registry_token="$(kubectl exec -n forgejo "$pod" -- forgejo admin user generate-access-token \
-        --username "$admin_user" --token-name "registry-ci-$(date +%s)" \
-        --scopes write:package,write:repository --raw 2>/dev/null | tr -d '\r' | tail -1)"
+    admin_user="$(forgejo_admin_user)"
+    forgejo_token_delete "$fj_pod" "$admin_user" registry-ci
+    registry_token="$(forgejo_token_create --keep "$fj_pod" registry-ci \
+        write:package,write:repository)" || registry_token=""
     [[ -n "$registry_token" ]] || { log_error "Could not mint a Forgejo registry token"; exit 1; }
 
     # Woodpecker API over the public URL — the same reachability assumption as
@@ -1360,17 +1606,17 @@ ensure_argocd_repo_creds() {
     log_step "Registering ArgoCD credentials for app repositories..."
 
     local pod admin_user token
-    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    pod="$(forgejo_pod)"
     if [[ -z "$pod" ]]; then
         log_warn "Forgejo is not running — register later with: ./deploy.sh --env ${ENV} app-repo-creds"
         return 0
     fi
-    admin_user="$(kubectl get secret forgejo-admin-secret -n forgejo \
-        -o jsonpath='{.data.username}' | base64 -d)"
-    token="$(kubectl exec -n forgejo "$pod" -- forgejo admin user generate-access-token \
-        --username "$admin_user" --token-name "argocd-apps-$(date +%s)" \
-        --scopes read:organization,read:repository --raw 2>/dev/null | tr -d '\r' | tail -1)"
+    admin_user="$(forgejo_admin_user)"
+    # --keep: ArgoCD stores this one. Stable name, dropped first, so re-running
+    # really does replace the token rather than adding another.
+    forgejo_token_delete "$pod" "$admin_user" argocd-apps
+    token="$(forgejo_token_create --keep "$pod" argocd-apps \
+        read:organization,read:repository)" || token=""
     if [[ -z "$token" ]]; then
         log_warn "Could not mint a Forgejo token — register later with: ./deploy.sh --env ${ENV} app-repo-creds"
         return 0
@@ -1423,16 +1669,18 @@ enable_workload_target() {
     # 2. Registry pull token → Vault. Same flow as register-workload-cluster.sh:
     # a dedicated read-only Forgejo user, its token stored where the platform
     # ESO policy already grants read.
-    local pod token_out registry_token
-    pod="$(kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    local pod token_out
+    pod="$(forgejo_pod)"
     if [[ -n "$pod" ]]; then
-        token_out="$(kubectl exec -n forgejo "$pod" -- sh -c "
-            forgejo admin user create --username workload-registry-pull --random-password \
-                --email workload-registry-pull@${DOMAIN} --must-change-password=false 2>/dev/null || true
-            forgejo admin user generate-access-token --username workload-registry-pull \
-                --token-name single-cluster-$(date +%s) --scopes read:package --raw 2>&1 | tail -1
-        " 2>&1 | tr -d '\r' | tail -1)"
+        # The pull user is created here; its token is --keep (Vault stores it),
+        # with a stable name dropped first so re-running replaces it.
+        kubectl exec -n forgejo "$pod" -- forgejo admin user create \
+            --username workload-registry-pull --random-password \
+            --email "workload-registry-pull@${DOMAIN}" \
+            --must-change-password=false >/dev/null 2>&1 || true
+        forgejo_token_delete "$pod" workload-registry-pull single-cluster
+        token_out="$(forgejo_token_create --keep "$pod" single-cluster read:package \
+            workload-registry-pull)" || token_out=""
         local vault_token
         vault_token="$(jq -r '.admin_token // .root_token // empty' "${SCRIPT_ENV_DIR}/vault-init-keys.json" 2>/dev/null)"
         if [[ -n "$token_out" && "$token_out" != *rror* && -n "$vault_token" ]]; then
@@ -1450,49 +1698,10 @@ enable_workload_target() {
         log_warn "Forgejo is not running — registry pull token skipped"
     fi
 
-    # 3. DNS-01 issuer for the wildcard apps certificate (same solver
-    # deploy-workload.sh uses; the cloud DNS identity is external-dns's, which
-    # tofu also federates to cert-manager's service account).
-    local solver=""
-    case "$CLOUD" in
-        aws)
-            solver="      - dns01:
-          route53:
-            region: ${AWS_REGION:-eu-west-1}" ;;
-        azure)
-            solver="      - dns01:
-          azureDNS:
-            resourceGroupName: ${DNS_ZONE_RESOURCE_GROUP:-${AZURE_RESOURCE_GROUP:-}}
-            subscriptionID: ${AZURE_SUBSCRIPTION_ID:-}
-            hostedZoneName: ${DOMAIN}
-            environment: AzurePublicCloud
-            managedIdentity:
-              clientID: ${EXTERNAL_DNS_IDENTITY_CLIENT_ID:-}" ;;
-        gcp)
-            solver="      - dns01:
-          cloudDNS:
-            project: ${GCS_PROJECT_ID:-}" ;;
-        *)
-            log_warn "No DNS-01 solver for '${CLOUD}' — create the letsencrypt-dns01 ClusterIssuer manually"
-            ;;
-    esac
-    if [[ -n "$solver" ]]; then
-        cat <<EOF | kubectl apply -f -
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata:
-  name: letsencrypt-dns01
-spec:
-  acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
-    email: ${ACME_EMAIL}
-    privateKeySecretRef:
-      name: letsencrypt-dns01
-    solvers:
-${solver}
-EOF
-        log_info "letsencrypt-dns01 ClusterIssuer applied"
-    fi
+    # 3. DNS-01 issuer for the wildcard apps certificate. Shared with
+    # deploy-workload.sh via lib/common.sh — the per-cloud solver and the
+    # manifest lived in both scripts, verbatim.
+    apply_dns01_issuer "$CLOUD"
 
     # 4. The apps listener and wildcard Certificate live in the overlay's
     # gateway.yaml — re-apply so they exist.

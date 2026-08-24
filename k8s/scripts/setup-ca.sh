@@ -158,10 +158,24 @@ EOF
 }
 
 # Create Kubernetes TLS secret manifest
+#
+# Written to _setup/<env>/, not into k8s/overlays/<env>/. Two reasons:
+#
+#   1. It embeds the base64 TLS *private key*. The overlay directory is
+#      committed and the root .gitignore had no rule for this filename, so
+#      `git add -A` published the key. (A rule now exists as well — belt and
+#      braces for checkouts that still have the old files on disk.)
+#   2. Repo convention: scripts never write into committed files; generated
+#      output goes to _setup/<env>/ (gitignored, mode 700).
+#
+# Nothing consumes these two manifests — no kustomization references them, and
+# deploy.sh builds local-tls-secret directly from k8s/certs/ with
+# `kubectl create secret tls`. They are kept as a convenience for applying the
+# cert by hand.
 create_k8s_secret() {
     log_info "Creating Kubernetes TLS secret manifest..."
 
-    local SECRET_FILE="${OVERLAY_DIR}/tls-secret.yaml"
+    local SECRET_FILE="${SCRIPT_ENV_DIR}/tls-secret.yaml"
     local CERT_B64=$(base64 -w 0 "${DOMAIN_CERTS_DIR}/local-dev-fullchain.crt")
     local KEY_B64=$(base64 -w 0 "${DOMAIN_CERTS_DIR}/local-dev.key")
 
@@ -181,14 +195,28 @@ data:
   tls.key: ${KEY_B64}
 EOF
 
+    chmod 600 "${SECRET_FILE}"
     log_info "Kubernetes TLS secret manifest created: ${SECRET_FILE}"
+
+    # An older run wrote this into the committed overlay, where it is a private
+    # key one `git add -A` away from being published. Say so rather than leaving
+    # it there silently; deleting it is the operator's call because it may
+    # already be in the repository's history.
+    if [[ -f "${OVERLAY_DIR}/tls-secret.yaml" ]]; then
+        log_warn "A private key is still at ${OVERLAY_DIR}/tls-secret.yaml (from an older run)."
+        log_warn "It is now gitignored, but if it is already tracked, untrack it:"
+        log_warn "  git rm --cached k8s/overlays/${ENV}/tls-secret.yaml"
+        log_warn "  rm k8s/overlays/${ENV}/tls-secret.yaml"
+    fi
 }
 
-# Create CA ConfigMap for trust distribution
+# Create CA ConfigMap for trust distribution. Same relocation and the same
+# reasoning as create_k8s_secret above — the CA certificate is public, but the
+# file lived next to the private key in a committed directory.
 create_ca_configmap() {
     log_info "Creating CA ConfigMap manifest..."
 
-    local CONFIGMAP_FILE="${OVERLAY_DIR}/ca-configmap.yaml"
+    local CONFIGMAP_FILE="${SCRIPT_ENV_DIR}/ca-configmap.yaml"
     local CA_B64=$(base64 -w 0 "${CA_DIR}/ca.crt")
 
     cat > "${CONFIGMAP_FILE}" << EOF
@@ -214,6 +242,7 @@ data:
   ca.crt: ${CA_B64}
 EOF
 
+    chmod 600 "${CONFIGMAP_FILE}"
     log_info "CA ConfigMap manifest created: ${CONFIGMAP_FILE}"
 }
 
@@ -229,6 +258,7 @@ print_summary() {
     echo "  CA Private Key:     ${CA_DIR}/ca.key"
     echo "  Domain Certificate: ${DOMAIN_CERTS_DIR}/local-dev.crt"
     echo "  Domain Private Key: ${DOMAIN_CERTS_DIR}/local-dev.key"
+    echo "  TLS secret / CA manifests: ${SCRIPT_ENV_DIR}/  (gitignored, mode 600)"
     echo ""
     echo "Domains covered:"
     for domain in "${DOMAINS[@]}"; do

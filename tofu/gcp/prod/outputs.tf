@@ -23,6 +23,7 @@ output "redis_auth_string" {
   sensitive = true
 }
 output "external_dns_gsa_email" { value = module.cluster.external_dns_gsa_email }
+output "cert_manager_gsa_email" { value = module.cluster.cert_manager_gsa_email }
 output "loki_gsa_email" { value = module.cluster.loki_gsa_email }
 output "loki_bucket" { value = module.cluster.loki_bucket }
 output "velero_gsa_email" { value = module.cluster.velero_gsa_email }

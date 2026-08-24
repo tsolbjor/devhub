@@ -24,12 +24,6 @@ resource "google_project_service" "servicenetworking" {
   disable_on_destroy = false
 }
 
-resource "google_project_service" "redis" {
-  project            = var.project_id
-  service            = "redis.googleapis.com"
-  disable_on_destroy = false
-}
-
 resource "google_project_service" "iam" {
   project            = var.project_id
   service            = "iam.googleapis.com"
@@ -138,16 +132,41 @@ resource "google_container_cluster" "main" {
 
   deletion_protection = var.deletion_protection
 
-  dynamic "release_channel" {
-    for_each = var.kubernetes_version == null ? [1] : []
-    content {
-      channel = "STABLE"
-    }
+  # Minimum version when pinned; the STABLE channel keeps auto-upgrades on
+  # either way (the pin must be a version available in that channel).
+  min_master_version = var.kubernetes_version
+
+  release_channel {
+    channel = "STABLE"
   }
 
   resource_labels = var.labels
 
   depends_on = [google_project_service.container]
+}
+
+# Minimal dedicated node service account — logging/monitoring/image pulls only,
+# instead of the project-wide default compute SA.
+resource "google_service_account" "nodes" {
+  project      = var.project_id
+  account_id   = "${var.prefix}-gke-nodes"
+  display_name = "GKE node service account (minimal)"
+
+  depends_on = [google_project_service.iam]
+}
+
+resource "google_project_iam_member" "nodes" {
+  for_each = toset([
+    "roles/logging.logWriter",
+    "roles/monitoring.metricWriter",
+    "roles/monitoring.viewer",
+    "roles/stackdriver.resourceMetadata.writer",
+    "roles/artifactregistry.reader",
+  ])
+
+  project = var.project_id
+  role    = each.value
+  member  = "serviceAccount:${google_service_account.nodes.email}"
 }
 
 resource "google_container_node_pool" "main" {
@@ -156,16 +175,24 @@ resource "google_container_node_pool" "main" {
   location = var.region
   cluster  = google_container_cluster.main.name
 
-  # Per-zone node count; autoscaler owns the actual size from here on.
+  # Per-zone node count at creation; autoscaler owns the actual size from here on.
   initial_node_count = var.node_count
 
+  # Total across all zones (this is a regional cluster), so the root modules'
+  # numbers mean the same thing on every cloud instead of being multiplied by
+  # the zone count.
   autoscaling {
-    min_node_count = var.node_min_count
-    max_node_count = var.node_max_count
+    total_min_node_count = var.node_min_count
+    total_max_node_count = var.node_max_count
+    location_policy      = "BALANCED"
   }
 
   node_config {
     machine_type = var.node_machine_type
+
+    # Dedicated minimal service account — nodes must not run as the
+    # project-wide default compute SA.
+    service_account = google_service_account.nodes.email
 
     # GKE_METADATA mode is required for Workload Identity
     workload_metadata_config {
@@ -208,14 +235,17 @@ resource "google_container_node_pool" "ci" {
 
   initial_node_count = var.ci_node_min_count
 
+  # Totals across all zones, matching the platform pool.
   autoscaling {
-    min_node_count = var.ci_node_min_count
-    max_node_count = var.ci_node_max_count
+    total_min_node_count = var.ci_node_min_count
+    total_max_node_count = var.ci_node_max_count
+    location_policy      = "BALANCED"
   }
 
   node_config {
-    machine_type = var.ci_node_machine_type
-    spot         = var.ci_node_spot
+    machine_type    = var.ci_node_machine_type
+    spot            = var.ci_node_spot
+    service_account = google_service_account.nodes.email
 
     workload_metadata_config {
       mode = "GKE_METADATA"
@@ -311,10 +341,17 @@ resource "google_sql_database_instance" "main" {
       ipv4_enabled                                  = false # private IP only
       private_network                               = google_compute_network.main.id
       enable_private_path_for_google_cloud_services = true
+      ssl_mode                                      = "ENCRYPTED_ONLY"
     }
 
     backup_configuration {
-      enabled = var.pg_backup_enabled
+      enabled                        = var.pg_backup_enabled
+      point_in_time_recovery_enabled = var.pg_backup_enabled
+      start_time                     = "01:00" # UTC, matches the other clouds' backup windows
+
+      backup_retention_settings {
+        retained_backups = 7
+      }
     }
 
     database_flags {
@@ -349,10 +386,25 @@ resource "google_sql_database" "forgejo" {
 
 # ─── Cloud Memorystore (Redis) ────────────────────────────────────────
 #
-# Private IP within VPC. Auth enabled (password via AUTH command).
-# The auth_string is output and must be stored in a K8s secret for its consumers.
+# Private IP within VPC. Auth enabled (password via AUTH command), TLS in
+# transit. The auth_string is output and must be stored in a K8s secret for
+# its consumers.
+#
+# Gated behind enable_cache: no platform component consumes the cache today
+# (Forgejo runs its default memory/leveldb backends, apps bring their own
+# in-cluster Redis) — enable it for workloads that need managed capacity.
+
+resource "google_project_service" "redis" {
+  count = var.enable_cache ? 1 : 0
+
+  project            = var.project_id
+  service            = "redis.googleapis.com"
+  disable_on_destroy = false
+}
 
 resource "google_redis_instance" "main" {
+  count = var.enable_cache ? 1 : 0
+
   project        = var.project_id
   name           = "${var.prefix}-redis"
   region         = var.region
@@ -363,6 +415,9 @@ resource "google_redis_instance" "main" {
 
   # Redis AUTH password — keyless access is not supported by Memorystore
   auth_enabled = true
+
+  # TLS in transit; clients connect with rediss:// and the CA from the instance.
+  transit_encryption_mode = "SERVER_AUTHENTICATION"
 
   labels = var.labels
 
@@ -421,4 +476,29 @@ resource "google_service_account_iam_member" "external_dns_workload_identity" {
   service_account_id = google_service_account.external_dns.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[external-dns/external-dns]"
+}
+
+# ─── cert-manager DNS-01 Workload Identity ───────────────────────────
+# cert-manager's DNS-01 solver writes TXT records into the same Cloud DNS zone.
+# Without this identity no wildcard certificate can ever be issued (Let's
+# Encrypt requires DNS-01 for wildcards), which the apps listener needs.
+
+resource "google_service_account" "cert_manager" {
+  project      = var.project_id
+  account_id   = "${var.prefix}-cert-manager"
+  display_name = "cert-manager DNS-01 solver (Workload Identity)"
+
+  depends_on = [google_project_service.iam]
+}
+
+resource "google_project_iam_member" "cert_manager_dns_admin" {
+  project = var.project_id
+  role    = "roles/dns.admin"
+  member  = "serviceAccount:${google_service_account.cert_manager.email}"
+}
+
+resource "google_service_account_iam_member" "cert_manager_workload_identity" {
+  service_account_id = google_service_account.cert_manager.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[cert-manager/cert-manager]"
 }

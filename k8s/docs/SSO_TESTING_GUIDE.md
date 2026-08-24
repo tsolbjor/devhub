@@ -4,7 +4,7 @@
 
 **Platform Administrator Account**:
 - Username: `platform-admin`
-- Password: Check `k8s/scripts/local/oidc-secrets.env` for `PLATFORM_ADMIN_PASSWORD`
+- Password: Check `_setup/local/oidc-secrets.env` for `PLATFORM_ADMIN_PASSWORD`
 - Email: platform-admin@localhost
 - Group: `devops-admins` (full admin access to all services)
 

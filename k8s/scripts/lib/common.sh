@@ -24,11 +24,15 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-log_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
-log_phase() { echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; echo -e "${CYAN}  PHASE: $1${NC}"; echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"; }
+# All logging goes to stderr: stdout is for data. Functions whose output is
+# captured ($(...)) can therefore log freely without the caller swallowing a
+# diagnostic into a variable — which is exactly how an error message once
+# ended up stored as a credential.
+log_info() { echo -e "${GREEN}[INFO]${NC} $1" >&2; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1" >&2; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1" >&2; }
+log_step() { echo -e "${BLUE}[STEP]${NC} $1" >&2; }
+log_phase() { { echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; echo -e "${CYAN}  PHASE: $1${NC}"; echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"; } >&2; }
 
 PLATFORM_ENVS="local upcloud-dev upcloud-prod azure-dev azure-prod gcp-dev gcp-prod aws-dev aws-prod"
 WORKLOAD_ENVS="upcloud-workload azure-workload gcp-workload aws-workload"
@@ -266,6 +270,7 @@ default_infra_vars() {
         AZURE_STORAGE_ACCOUNT AZURE_SUBSCRIPTION_ID AZURE_RESOURCE_GROUP AZURE_NODE_RESOURCE_GROUP \
         GCS_PROJECT_ID \
         EXTERNAL_DNS_IRSA_ROLE_ARN EXTERNAL_DNS_IDENTITY_CLIENT_ID EXTERNAL_DNS_GSA_EMAIL \
+        CERT_MANAGER_ROLE_ARN CERT_MANAGER_GSA_EMAIL \
         LOKI_IRSA_ROLE_ARN LOKI_IDENTITY_CLIENT_ID LOKI_GSA_EMAIL LOKI_BUCKET LOKI_CONTAINER \
         VELERO_IRSA_ROLE_ARN VELERO_IDENTITY_CLIENT_ID VELERO_GSA_EMAIL VELERO_BUCKET VELERO_CONTAINER \
         CLUSTER_AUTOSCALER_IRSA_ROLE_ARN CLUSTER_NAME OIDC_ISSUER_URL \
@@ -317,7 +322,16 @@ init_render_dir() {
     RENDER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/devhub-render.XXXXXX")"
     chmod 700 "$RENDER_DIR"
     export RENDER_DIR
-    trap 'rm -rf "${RENDER_DIR}"' EXIT
+    trap '_devhub_on_exit' EXIT
+}
+
+# Single EXIT handler shared by every cleanup concern (only one EXIT trap can
+# exist per shell): scratch directory removal and ephemeral Forgejo token
+# revocation. Failures inside must not mask the script's own exit code.
+_devhub_on_exit() {
+    forgejo_cleanup_tokens || true
+    [[ -n "${RENDER_DIR:-}" ]] && rm -rf "${RENDER_DIR}"
+    return 0
 }
 
 render_dir() {
@@ -336,6 +350,7 @@ ${S3_ENDPOINT} ${S3_REGION} ${AWS_REGION}
 ${AZURE_STORAGE_ACCOUNT} ${AZURE_SUBSCRIPTION_ID} ${AZURE_RESOURCE_GROUP} ${AZURE_NODE_RESOURCE_GROUP}
 ${GCS_PROJECT_ID}
 ${EXTERNAL_DNS_IRSA_ROLE_ARN} ${EXTERNAL_DNS_IDENTITY_CLIENT_ID} ${EXTERNAL_DNS_GSA_EMAIL}
+${CERT_MANAGER_ROLE_ARN} ${CERT_MANAGER_GSA_EMAIL}
 ${LOKI_IRSA_ROLE_ARN} ${LOKI_IDENTITY_CLIENT_ID} ${LOKI_GSA_EMAIL} ${LOKI_BUCKET} ${LOKI_CONTAINER}
 ${VELERO_IRSA_ROLE_ARN} ${VELERO_IDENTITY_CLIENT_ID} ${VELERO_GSA_EMAIL} ${VELERO_BUCKET} ${VELERO_CONTAINER}
 ${CLUSTER_AUTOSCALER_IRSA_ROLE_ARN} ${CLUSTER_NAME}
@@ -406,6 +421,21 @@ require_cluster_match() {
 
     if [[ -z "$context" ]]; then
         log_error "No active kubectl context — cannot verify the target cluster"
+        exit 1
+    fi
+
+    # local has no kubeconfig file and no tofu-reported name; the best available
+    # check is that the active context at least looks like a local cluster —
+    # otherwise "--env local" happily runs against whatever cloud cluster the
+    # shell happens to be pointed at.
+    if [[ "${ENV:-}" == "local" && -z "$expected" ]]; then
+        if [[ "$context" =~ rancher-desktop|k3s|k3d|kind|docker-desktop|colima|minikube ]]; then
+            log_info "Target cluster verified: ${context} (local)"
+            return 0
+        fi
+        log_error "Refusing to run: --env local, but the active context does not look local"
+        log_error "  active context: ${context}"
+        log_error "  expected something like rancher-desktop, k3s, kind or docker-desktop"
         exit 1
     fi
 
@@ -542,6 +572,165 @@ setup_paths() {
 
     # Scratch space for rendered Helm values (removed on exit).
     init_render_dir
+}
+
+# =============================================================================
+# Forgejo helpers
+# =============================================================================
+# The platform talks to Forgejo the same way everywhere: find the pod, mint a
+# short-lived admin token, call the JSON API through kubectl exec, revoke the
+# token when the script exits. These helpers are that pattern, once — used by
+# deploy.sh, deploy-workload.sh and register-workload-cluster.sh.
+# (setup-gitops-repo.sh still carries its own copy and can adopt these later.)
+
+# Name of the Forgejo pod, or empty when it is not running. Honours the
+# caller's KUBECONFIG, so a script targeting another cluster can prefix:
+#   KUBECONFIG="$PLATFORM_KUBECONFIG" forgejo_pod
+forgejo_pod() {
+    kubectl get pod -n forgejo -l app.kubernetes.io/name=forgejo \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+}
+
+# The bootstrap admin account's username.
+forgejo_admin_user() {
+    kubectl get secret forgejo-admin-secret -n forgejo \
+        -o jsonpath='{.data.username}' 2>/dev/null | base64 -d || true
+}
+
+# Mint a Forgejo access token.
+#   forgejo_token_create [--keep] <pod> <token-name> <scopes> [username]
+# Echoes the raw token; returns non-zero when it cannot be minted.
+# Defaults to the admin account. Without --keep the token is *ephemeral*: it
+# is registered for revocation when the script exits (trap-based, so failures
+# still clean up). Pass --keep only for credentials that are stored and must
+# outlive the run (registry tokens, ArgoCD repo-creds, the portal bot token).
+_FORGEJO_EPHEMERAL_TOKENS=()
+forgejo_token_create() {
+    local keep=false
+    if [[ "${1:-}" == "--keep" ]]; then keep=true; shift; fi
+    local pod="$1" name="$2" scopes="$3" user="${4:-}"
+    [[ -n "$user" ]] || user="$(forgejo_admin_user)"
+    [[ -n "$pod" && -n "$user" ]] || return 1
+
+    local token
+    token="$(kubectl exec -n forgejo "$pod" -- forgejo admin user generate-access-token \
+        --username "$user" --token-name "$name" --scopes "$scopes" --raw 2>/dev/null \
+        | tr -d '\r' | tail -1)"
+    [[ -n "$token" ]] || return 1
+
+    if ! $keep; then
+        # Remember the kubeconfig too: the trap fires long after a caller's
+        # per-call KUBECONFIG prefix has reverted.
+        _FORGEJO_EPHEMERAL_TOKENS+=("${KUBECONFIG:-}"$'\t'"${pod}"$'\t'"${user}"$'\t'"${name}")
+        trap '_devhub_on_exit' EXIT
+    fi
+    echo "$token"
+}
+
+# Revoke one token by name. Token management authenticates with basic auth;
+# the credentials go in over stdin (curl -K -) so they never appear in the
+# pod's argv. Best-effort — cleanup must not fail the script.
+forgejo_token_delete() {
+    local pod="$1" user="$2" name="$3"
+    local admin pass
+    admin="$(forgejo_admin_user)"
+    pass="$(kubectl get secret forgejo-admin-secret -n forgejo \
+        -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+    [[ -n "$pod" && -n "$admin" && -n "$pass" ]] || return 0
+    printf 'user = "%s:%s"\n' "$admin" "$pass" | kubectl exec -i -n forgejo "$pod" -- \
+        curl -fsS -K - -X DELETE \
+        "http://localhost:3000/api/v1/users/${user}/tokens/${name}" >/dev/null 2>&1 || true
+}
+
+# Revoke every ephemeral token minted this run (called from the EXIT trap).
+forgejo_cleanup_tokens() {
+    local entry kc pod user name
+    for entry in ${_FORGEJO_EPHEMERAL_TOKENS[@]+"${_FORGEJO_EPHEMERAL_TOKENS[@]}"}; do
+        IFS=$'\t' read -r kc pod user name <<<"$entry"
+        if [[ -n "$kc" ]]; then
+            KUBECONFIG="$kc" forgejo_token_delete "$pod" "$user" "$name"
+        else
+            forgejo_token_delete "$pod" "$user" "$name"
+        fi
+    done
+    _FORGEJO_EPHEMERAL_TOKENS=()
+    return 0
+}
+
+# Call the Forgejo JSON API from inside the pod.
+#   forgejo_api <pod> <token> <method> <path> [json-body]
+# A body, when given, goes in over stdin. Output is the response body; a
+# non-2xx answer returns curl's non-zero exit code.
+forgejo_api() {
+    local pod="$1" token="$2" method="$3" path="$4" body="${5:-}"
+    if [[ -n "$body" ]]; then
+        printf '%s' "$body" | kubectl exec -i -n forgejo "$pod" -- curl -fsS -X "$method" \
+            "http://localhost:3000/api/v1${path}" \
+            -H "Authorization: token ${token}" -H "Content-Type: application/json" \
+            --data-binary @- 2>/dev/null
+    else
+        kubectl exec -n forgejo "$pod" -- curl -fsS -X "$method" \
+            "http://localhost:3000/api/v1${path}" \
+            -H "Authorization: token ${token}" 2>/dev/null
+    fi
+}
+
+# =============================================================================
+# DNS-01 ClusterIssuer (wildcard certificates)
+# =============================================================================
+# Let's Encrypt will not issue a wildcard over HTTP-01, so the apps listener's
+# certificate needs DNS-01. The solver differs per cloud; the credentials are
+# the same DNS identity external-dns uses (tofu also federates it to
+# cert-manager's service account). Shared between deploy.sh
+# (enable_workload_target) and deploy-workload.sh — previously duplicated.
+# Uses the exported infra vars parse_config provides.
+apply_dns01_issuer() {
+    local cloud="$1"
+    local solver=""
+    case "$cloud" in
+        aws)
+            solver="      - dns01:
+          route53:
+            region: ${AWS_REGION:-eu-west-1}" ;;
+        azure)
+            solver="      - dns01:
+          azureDNS:
+            resourceGroupName: ${DNS_ZONE_RESOURCE_GROUP:-${AZURE_RESOURCE_GROUP:-}}
+            subscriptionID: ${AZURE_SUBSCRIPTION_ID:-}
+            hostedZoneName: ${DOMAIN}
+            environment: AzurePublicCloud
+            managedIdentity:
+              clientID: ${EXTERNAL_DNS_IDENTITY_CLIENT_ID:-}" ;;
+        gcp)
+            solver="      - dns01:
+          cloudDNS:
+            project: ${GCS_PROJECT_ID:-}" ;;
+        upcloud)
+            log_warn "UpCloud has no cert-manager DNS-01 solver; the platform uses Cloudflare."
+            log_warn "Create the letsencrypt-dns01 ClusterIssuer manually with a cloudflare solver and an API token secret."
+            return 0
+            ;;
+        *)
+            log_warn "No DNS-01 solver for '${cloud}' — create the letsencrypt-dns01 ClusterIssuer manually"
+            return 0
+            ;;
+    esac
+
+    cat <<EOF | kubectl apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-dns01
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ${ACME_EMAIL}
+    privateKeySecretRef:
+      name: letsencrypt-dns01
+    solvers:
+${solver}
+EOF
+    log_info "letsencrypt-dns01 ClusterIssuer applied (wildcard certificates)"
 }
 
 # -----------------------------------------------------------------------------

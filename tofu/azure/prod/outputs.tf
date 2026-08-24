@@ -63,10 +63,7 @@ output "storage_account_name" {
   value = module.cluster.storage_account_name
 }
 
-output "storage_primary_access_key" {
-  value     = module.cluster.storage_primary_access_key
-  sensitive = true
-}
+# No storage_primary_access_key: shared-key auth is disabled on the account.
 
 # ─── Entra ID ────────────────────────────────────────────────────────
 
@@ -86,6 +83,7 @@ output "entra_keycloak_client_secret" {
 # ─── External-DNS / platform identities ──────────────────────────────
 
 output "external_dns_identity_client_id" { value = module.cluster.external_dns_identity_client_id }
+output "dns_zone_resource_group" { value = module.cluster.dns_zone_resource_group }
 output "loki_identity_client_id" { value = module.cluster.loki_identity_client_id }
 output "loki_container" { value = module.cluster.loki_container }
 output "velero_identity_client_id" { value = module.cluster.velero_identity_client_id }

@@ -74,20 +74,55 @@ fi
 
 OUTPUTS="$(tofu output -json)"
 
-# out <output_name> — value or empty string when the output does not exist.
-out() { echo "$OUTPUTS" | jq -r --arg k "$1" 'if has($k) then .[$k].value | tostring else "" end'; }
+# out <output_name> — value, or empty string when the output does not exist *or
+# is null*.
+#
+# The null case is not hypothetical: every optional resource's outputs are
+# `try(resource[0].attr, null)`, so with `enable_cache = false` (the default)
+# redis_host and friends exist with a null value. Without the null test,
+# `.value | tostring` produced the four-character string "null", which then
+# sailed past every `[[ -n ... ]]` guard and was written into tofu-outputs.env as
+# REDIS_HOST='null' — a hostname that resolves nowhere.
+out() {
+    echo "$OUTPUTS" | jq -r --arg k "$1" \
+        'if has($k) and (.[$k].value != null) then .[$k].value | tostring else "" end'
+}
 
 CLUSTER_NAME="$(out cluster_name)"
 [[ -n "$CLUSTER_NAME" ]] || { log_error "tofu output cluster_name is empty — has apply completed?"; exit 1; }
 
 # ─── Compose the generated files ────────────────────────────────────
 
-# Values are written as KEY=value pairs, quoted, so the files can be sourced.
+# Values are written as KEY='value', single-quoted with embedded quotes escaped,
+# because every consumer does `set -a; source <file>` (deploy.sh, setup-vault.sh,
+# setup-keycloak.sh). The comment here used to claim the values were quoted while
+# the code emitted them bare: a tofu-generated password containing a space, `$`,
+# backtick, `;` or a quote then broke the source outright or — worse — was
+# silently truncated or expanded, so db-users failed with an authentication error
+# that pointed at the database rather than at this file.
 declare -a PUBLIC_VARS=()
 declare -a SECRET_VARS=()
 
-add_public() { [[ -n "${2:-}" ]] && PUBLIC_VARS+=("$1=$2"); return 0; }
-add_secret() { [[ -n "${2:-}" ]] && SECRET_VARS+=("$1=$2"); return 0; }
+# Single quotes make the shell take everything literally; the only character
+# that needs handling is `'` itself, closed and re-opened around a backslashed
+# one: foo'bar → 'foo'\''bar'.
+shq() {
+    local v="${1//\'/\'\\\'\'}"
+    printf "'%s'" "$v"
+}
+
+add_public() { [[ -n "${2:-}" ]] && PUBLIC_VARS+=("$1=$(shq "$2")"); return 0; }
+add_secret() { [[ -n "${2:-}" ]] && SECRET_VARS+=("$1=$(shq "$2")"); return 0; }
+
+# The managed cache is optional. tofu gates it behind `enable_cache`, which
+# defaults to false because no platform component consumes it today, so absent
+# REDIS_HOST / VALKEY_HOST / auth outputs are the normal case — not a failure and
+# not something to emit as an empty-but-present variable. These two wrappers exist
+# only so the summary can say so out loud, instead of leaving someone to wonder
+# whether the sync dropped something.
+CACHE_FOUND=false
+add_cache_public() { [[ -n "${2:-}" ]] && CACHE_FOUND=true; add_public "$@"; }
+add_cache_secret() { [[ -n "${2:-}" ]] && CACHE_FOUND=true; add_secret "$@"; }
 
 add_public CLUSTER_NAME "$CLUSTER_NAME"
 add_public OIDC_ISSUER_URL "$(out oidc_issuer_url)"
@@ -98,14 +133,19 @@ case "$CLOUD" in
         add_public AWS_REGION "$AWS_REGION"
         add_public S3_REGION "$AWS_REGION"
         add_public EXTERNAL_DNS_IRSA_ROLE_ARN "$(out external_dns_irsa_role_arn)"
-        add_public EBS_CSI_ROLE_ARN "$(out ebs_csi_role_arn)"
+        # cert-manager's DNS-01 solver needs its own IRSA role: without it no
+        # wildcard certificate can be issued, which the apps listener needs.
+        # Exported by the dev, prod and workload roots alike.
+        add_public CERT_MANAGER_ROLE_ARN "$(out cert_manager_role_arn)"
+        # (No EBS_CSI_ROLE_ARN: no root module exports ebs_csi_role_arn and
+        # nothing consumed it — the EKS addon gets its role inside tofu.)
 
         if [[ "$CLUSTER_TYPE" == "platform" ]]; then
             add_public PG_HOST "$(out pg_host)"
             add_public PG_PORT "$(out pg_port)"
-            add_public REDIS_HOST "$(out redis_host)"
-            add_public REDIS_PORT "$(out redis_port)"
-            add_public REDIS_TLS_ENABLED "$(out redis_tls_enabled)"
+            add_cache_public REDIS_HOST "$(out redis_host)"
+            add_cache_public REDIS_PORT "$(out redis_port)"
+            add_cache_public REDIS_TLS_ENABLED "$(out redis_tls_enabled)"
             add_public LOKI_IRSA_ROLE_ARN "$(out loki_irsa_role_arn)"
             add_public LOKI_BUCKET "$(out loki_bucket)"
             add_public VELERO_IRSA_ROLE_ARN "$(out velero_irsa_role_arn)"
@@ -122,7 +162,7 @@ case "$CLOUD" in
             add_secret PG_ADMIN_PASSWORD "$(out pg_admin_password)"
             add_secret PG_KEYCLOAK_PASSWORD "$(out pg_keycloak_password)"
             add_secret PG_FORGEJO_PASSWORD "$(out pg_forgejo_password)"
-            add_secret REDIS_PASSWORD "$(out redis_auth_token)"
+            add_cache_secret REDIS_PASSWORD "$(out redis_auth_token)"
             add_secret COGNITO_CLIENT_SECRET "$(out cognito_client_secret)"
         fi
         ;;
@@ -130,6 +170,12 @@ case "$CLOUD" in
     azure)
         add_public AZURE_RESOURCE_GROUP "$(out resource_group_name)"
         add_public AZURE_LOCATION "$(out location)"
+        # cert-manager shares this identity: its DNS-01 solver writes TXT records
+        # in the same zone, and the tofu module gives the external-dns identity a
+        # second federated credential for the cert-manager service account. So
+        # there is no separate CERT_MANAGER_* output on Azure — the values files
+        # use EXTERNAL_DNS_IDENTITY_CLIENT_ID for both, and this line covers the
+        # workload cluster as well as the platform one.
         add_public EXTERNAL_DNS_IDENTITY_CLIENT_ID "$(out external_dns_identity_client_id)"
         add_public DNS_ZONE_RESOURCE_GROUP "$(out dns_zone_resource_group)"
 
@@ -138,9 +184,12 @@ case "$CLOUD" in
             add_public AZURE_NODE_RESOURCE_GROUP "$(out node_resource_group)"
             add_public PG_HOST "$(out pg_host)"
             add_public PG_PORT "$(out pg_port)"
-            add_public REDIS_HOST "$(out redis_host)"
-            add_public REDIS_PORT "$(out redis_port)"
-            add_public REDIS_TLS_ENABLED "true"
+            add_cache_public REDIS_HOST "$(out redis_host)"
+            add_cache_public REDIS_PORT "$(out redis_port)"
+            # Only meaningful when a cache exists; Managed Redis is TLS-only.
+            if [[ -n "$(out redis_host)" ]]; then
+                add_public REDIS_TLS_ENABLED "true"
+            fi
             add_public AZURE_STORAGE_ACCOUNT "$(out storage_account_name)"
             add_public LOKI_IDENTITY_CLIENT_ID "$(out loki_identity_client_id)"
             add_public LOKI_CONTAINER "$(out loki_container)"
@@ -158,7 +207,10 @@ case "$CLOUD" in
             add_secret PG_FORGEJO_PASSWORD "$(out pg_forgejo_password)"
             # No REDIS_PASSWORD: Managed Redis runs with access keys disabled —
             # clients authenticate as managed identities (Entra access policies).
-            add_secret AZURE_STORAGE_KEY "$(out storage_primary_access_key)"
+            # No AZURE_STORAGE_KEY either: the storage account now sets
+            # shared_access_key_enabled = false and tofu no longer exports the
+            # key. Loki and Velero reach Blob through their federated workload
+            # identities, so nothing consumed it.
             add_secret ENTRA_KEYCLOAK_CLIENT_SECRET "$(out entra_keycloak_client_secret)"
         fi
         ;;
@@ -167,12 +219,16 @@ case "$CLOUD" in
         add_public GCS_PROJECT_ID "$(out project_id)"
         add_public GCP_REGION "$(out region)"
         add_public EXTERNAL_DNS_GSA_EMAIL "$(out external_dns_gsa_email)"
+        # cert-manager's DNS-01 solver runs as its own service account with its
+        # own Workload Identity binding; without it no wildcard certificate can
+        # be issued. Exported by the dev, prod and workload roots alike.
+        add_public CERT_MANAGER_GSA_EMAIL "$(out cert_manager_gsa_email)"
 
         if [[ "$CLUSTER_TYPE" == "platform" ]]; then
             add_public PG_HOST "$(out pg_host)"
             add_public PG_PORT "$(out pg_port)"
-            add_public REDIS_HOST "$(out redis_host)"
-            add_public REDIS_PORT "$(out redis_port)"
+            add_cache_public REDIS_HOST "$(out redis_host)"
+            add_cache_public REDIS_PORT "$(out redis_port)"
             add_public LOKI_GSA_EMAIL "$(out loki_gsa_email)"
             add_public LOKI_BUCKET "$(out loki_bucket)"
             add_public VELERO_GSA_EMAIL "$(out velero_gsa_email)"
@@ -186,7 +242,7 @@ case "$CLOUD" in
             add_secret PG_ADMIN_PASSWORD "$(out pg_admin_password)"
             add_secret PG_KEYCLOAK_PASSWORD "$(out pg_keycloak_password)"
             add_secret PG_FORGEJO_PASSWORD "$(out pg_forgejo_password)"
-            add_secret REDIS_PASSWORD "$(out redis_auth_string)"
+            add_cache_secret REDIS_PASSWORD "$(out redis_auth_string)"
         fi
         ;;
 
@@ -196,8 +252,8 @@ case "$CLOUD" in
         if [[ "$CLUSTER_TYPE" == "platform" ]]; then
             add_public PG_HOST "$(out pg_host)"
             add_public PG_PORT "$(out pg_port)"
-            add_public VALKEY_HOST "$(out valkey_host)"
-            add_public VALKEY_PORT "$(out valkey_port)"
+            add_cache_public VALKEY_HOST "$(out valkey_host)"
+            add_cache_public VALKEY_PORT "$(out valkey_port)"
             add_public S3_ENDPOINT "$(out s3_endpoint)"
             add_public S3_REGION "$(out s3_region)"
             add_public LOKI_BUCKET "$(out loki_bucket)"
@@ -205,7 +261,7 @@ case "$CLOUD" in
 
             add_secret PG_KEYCLOAK_PASSWORD "$(out pg_keycloak_password)"
             add_secret PG_FORGEJO_PASSWORD "$(out pg_forgejo_password)"
-            add_secret REDIS_PASSWORD "$(out valkey_password)"
+            add_cache_secret REDIS_PASSWORD "$(out valkey_password)"
             # No workload identity on UpCloud — bucket-scoped access keys instead.
             # deploy.sh turns these into Kubernetes Secrets; they never enter
             # values files or git.
@@ -216,6 +272,12 @@ case "$CLOUD" in
         fi
         ;;
 esac
+
+if [[ "$CLUSTER_TYPE" == "platform" ]] && ! $CACHE_FOUND; then
+    log_info "No managed cache in the tofu outputs — REDIS_*/VALKEY_* omitted."
+    log_info "That is the default: tofu's enable_cache is false because no platform"
+    log_info "component uses a cache. Set enable_cache = true to provision one."
+fi
 
 # ─── Write generated files ──────────────────────────────────────────
 

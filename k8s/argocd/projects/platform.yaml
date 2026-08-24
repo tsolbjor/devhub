@@ -1,0 +1,115 @@
+# ArgoCD Project for the platform's own components.
+#
+# Everything ArgoCD manages on the *platform* cluster — the platform-components
+# ApplicationSet, the app-of-apps root Application and the portal Application —
+# used to run in the built-in `default` project: any source repository, any
+# destination cluster, every cluster-scoped resource kind. One malicious or
+# mistaken commit to the environment's GitOps repository could therefore deploy
+# anything anywhere, including onto the registered workload clusters, where the
+# `workloads` project's tenant limits would not apply.
+#
+# This project draws the boundary the platform actually needs: its own
+# repository, the upstream chart repositories it installs from, and the local
+# cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: devhub platform components (GitOps-managed on the platform cluster)
+
+  sourceRepos:
+    # The environment's own GitOps repository. Files under
+    # k8s/argocd/projects/ are applied verbatim by deploy.sh — there is no
+    # template_values pass for them, so a ${GITOPS_REPO_URL_INTERNAL}
+    # placeholder would reach the cluster unsubstituted and match nothing.
+    # These are prefix globs over the two shapes the repo URL takes instead
+    # (ArgoCD's glob matching lets '*' span '/'):
+    #   http://forgejo-http.forgejo.svc.cluster.local:3000/<org>/<repo>.git
+    #   https://git.<domain>/<org>/<repo>.git
+    - 'http://forgejo-http.forgejo.svc.cluster.local:3000/*'
+    - 'https://git.*'
+    # Upstream chart repositories, one per entry in platform-appset.yaml. A new
+    # platform component means a new line here as well.
+    - 'https://charts.jetstack.io'                              # cert-manager
+    - 'https://kubernetes-sigs.github.io/external-dns/'          # external-dns
+    - 'https://charts.external-secrets.io'                       # external-secrets
+    - 'https://prometheus-community.github.io/helm-charts'       # kube-prometheus-stack
+    - 'https://grafana.github.io/helm-charts'                    # loki, tempo, alloy
+    - 'https://kubernetes-sigs.github.io/headlamp/'              # headlamp
+    - 'https://jameswynn.github.io/helm-charts'                  # homepage
+    - 'https://kyverno.github.io/kyverno'                        # kyverno
+    - 'https://stakater.github.io/stakater-charts'               # reloader
+    - 'https://woodpecker-ci.org/'                               # woodpecker
+    - 'https://vmware-tanzu.github.io/helm-charts'               # velero
+
+  # The platform cluster only. Workload clusters are registered in the same
+  # ArgoCD, so without this a platform Application could target them.
+  destinations:
+    - namespace: '*'
+      server: https://kubernetes.default.svc
+
+  # Platform charts legitimately own cluster-scoped objects — CRDs, the RBAC
+  # their controllers run with, admission webhooks. The list is explicit rather
+  # than '*' so that a chart suddenly wanting, say, a MutatingWebhook it never
+  # had before surfaces as a sync error naming the kind instead of being applied
+  # silently. Adding a kind here is a one-line, reviewable change.
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: 'apiextensions.k8s.io'
+      kind: CustomResourceDefinition
+    - group: 'apiregistration.k8s.io'
+      kind: APIService
+    - group: 'rbac.authorization.k8s.io'
+      kind: ClusterRole
+    - group: 'rbac.authorization.k8s.io'
+      kind: ClusterRoleBinding
+    - group: 'admissionregistration.k8s.io'
+      kind: ValidatingWebhookConfiguration
+    - group: 'admissionregistration.k8s.io'
+      kind: MutatingWebhookConfiguration
+    - group: 'scheduling.k8s.io'
+      kind: PriorityClass
+    - group: 'storage.k8s.io'
+      kind: StorageClass
+    - group: 'storage.k8s.io'
+      kind: CSIDriver
+    - group: 'gateway.networking.k8s.io'
+      kind: GatewayClass
+    - group: 'cert-manager.io'
+      kind: ClusterIssuer
+    - group: 'external-secrets.io'
+      kind: ClusterSecretStore
+    - group: 'external-secrets.io'
+      kind: ClusterExternalSecret
+    - group: 'kyverno.io'
+      kind: ClusterPolicy
+    - group: 'kyverno.io'
+      kind: ClusterCleanupPolicy
+
+  # Namespaced resources: unrestricted. These Applications are the platform
+  # itself, and the meaningful boundary above is *where* they may deploy and
+  # *what they may deploy from*, not which namespaced kinds a Helm chart emits.
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+
+  roles:
+    - name: admin
+      description: Full control of the platform Applications
+      policies:
+        - p, proj:platform:admin, applications, *, platform/*, allow
+      groups:
+        - devops-admins
+
+    - name: viewer
+      description: Read-only view of the platform Applications
+      policies:
+        - p, proj:platform:viewer, applications, get, platform/*, allow
+        - p, proj:platform:viewer, logs, get, platform/*, allow
+      groups:
+        - developers

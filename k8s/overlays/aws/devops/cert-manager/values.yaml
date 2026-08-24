@@ -1,1 +1,13 @@
-# cert-manager AWS overlay — no overrides needed beyond base values
+# cert-manager AWS overlay values
+# Merged with base/devops/cert-manager/values.yaml
+#
+# IRSA for the DNS-01 solver: cert-manager writes TXT records in the platform's
+# Route 53 zone under its own IAM role (tofu output cert_manager_role_arn),
+# never the node role. DNS-01 is what makes the wildcard certificate — and with
+# it the gateway's apps listener — possible; HTTP-01 keeps working unchanged.
+#
+# EKS injects AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE from this annotation.
+
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: "${CERT_MANAGER_ROLE_ARN}"

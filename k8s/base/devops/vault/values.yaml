@@ -29,6 +29,17 @@ server:
           tls_disable = 1
           address = "[::]:8200"
           cluster_address = "[::]:8201"
+
+          # Without this, /v1/sys/metrics requires a token and the chart's
+          # ServiceMonitor (serverTelemetry below) scrapes it anonymously — so
+          # every scrape returned 403 and vault_core_unsealed never reached
+          # Prometheus, which made the VaultSealed alert unable to fire. The
+          # endpoint is reachable only from inside the cluster (the Vault
+          # NetworkPolicy admits the gateway, ESO and Prometheus) and exposes
+          # operational counters, not secrets.
+          telemetry {
+            unauthenticated_metrics_access = true
+          }
         }
 
         storage "raft" {
@@ -36,6 +47,14 @@ server:
         }
 
         service_registration "kubernetes" {}
+
+        # Vault only keeps Prometheus-formatted metrics when asked to.
+        # disable_hostname keeps the pod name out of every metric name — it is
+        # already a label, and baking it in makes the series unaggregatable.
+        telemetry {
+          prometheus_retention_time = "24h"
+          disable_hostname = true
+        }
 
   # Resources
   resources:

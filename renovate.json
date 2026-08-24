@@ -4,7 +4,7 @@
     "config:recommended",
     ":dependencyDashboard"
   ],
-  "description": "Keeps Helm chart versions, container images and OpenTofu providers current. Chart versions live in three places (deploy scripts, the platform ApplicationSet, and base values), so they are grouped to land in one PR.",
+  "description": "Keeps Helm chart versions, container images and OpenTofu providers current. A chart version is pinned in the deploy scripts and in the platform ApplicationSet; grouping by chart name lands every file that pins it in one PR.",
   "timezone": "Europe/Oslo",
   "schedule": [
     "before 6am on monday"
@@ -15,11 +15,11 @@
   ],
   "packageRules": [
     {
-      "description": "Platform Helm charts \u2014 one PR per chart, covering every file that pins it",
+      "description": "Platform Helm charts — one PR per chart, covering every file that pins it (deploy scripts + ApplicationSet)",
       "matchManagers": [
         "helm-values",
         "helmv3",
-        "regex"
+        "custom.regex"
       ],
       "groupName": "helm chart {{depName}}",
       "separateMinorPatch": true
@@ -34,7 +34,7 @@
     {
       "description": "Patch-level bumps of platform charts can merge automatically once CI is green",
       "matchManagers": [
-        "regex"
+        "custom.regex"
       ],
       "matchUpdateTypes": [
         "patch"
@@ -45,24 +45,60 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Chart versions pinned in the deploy scripts (--version <x>)",
+      "description": "Chart version constants in the deploy scripts, annotated in place: CHART_X=\"1.2.3\" # renovate: helm depName=<chart> registryUrl=<repo-url>. depName must equal the chart name in platform-appset.yaml so the groupName above merges both pins into one PR. registryUrl is restricted to http(s) on purpose: an oci:// reference has no index.yaml behind it, so the helm datasource cannot enumerate its versions — those two pins are handled by the docker-datasource managers below, and excluding them here is what stops this manager from also claiming them and reporting a lookup failure.",
       "managerFilePatterns": [
-        "/^k8s/scripts/.*\\.sh$/"
+        "/^k8s/scripts/[^/]+\\.sh$/"
       ],
       "matchStrings": [
-        "helm upgrade --install \\S+ (?<depName>[a-z0-9-]+/[a-z0-9-]+)[\\s\\S]{0,400}?--version v?(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+        "[A-Z_]+=\"(?<currentValue>v?[0-9][^\"]*)\"\\s*#\\s*renovate:\\s*helm\\s+depName=(?<depName>\\S+)\\s+registryUrl=(?<registryUrl>https?://\\S+)"
       ],
-      "datasourceTemplate": "helm",
-      "registryUrlTemplate": "https://charts.helm.sh/stable"
+      "datasourceTemplate": "helm"
     },
     {
       "customType": "regex",
-      "description": "Chart versions in the platform ApplicationSet",
+      "description": "Forgejo chart, installed from an OCI registry (oci://code.forgejo.org/forgejo-helm/forgejo). Chart versions are OCI tags, not index.yaml entries, so this uses the docker datasource. depName stays the short chart name so PR titles and the groupName above read the same as every other chart; packageName carries the full OCI path the lookup needs. Hardcoded rather than templated from the annotation because a regex cannot join the registryUrl and the chart name into one package reference — the pin's own comment in deploy.sh points here.",
+      "managerFilePatterns": [
+        "/^k8s/scripts/[^/]+\\.sh$/"
+      ],
+      "matchStrings": [
+        "CHART_FORGEJO=\"(?<currentValue>v?[0-9][^\"]*)\""
+      ],
+      "depNameTemplate": "forgejo",
+      "packageNameTemplate": "code.forgejo.org/forgejo-helm/forgejo",
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Envoy Gateway chart, installed from an OCI registry (oci://docker.io/envoyproxy/gateway-helm). Same reason as forgejo above: OCI tags, docker datasource. Both are bootstrap components deploy.sh installs imperatively, so neither appears in platform-appset.yaml and there is no second pin to group with.",
+      "managerFilePatterns": [
+        "/^k8s/scripts/[^/]+\\.sh$/"
+      ],
+      "matchStrings": [
+        "CHART_ENVOY_GATEWAY=\"(?<currentValue>v?[0-9][^\"]*)\""
+      ],
+      "depNameTemplate": "gateway-helm",
+      "packageNameTemplate": "docker.io/envoyproxy/gateway-helm",
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Version constants tracking a GitHub release, annotated in place: VAR=\"1.2.3\" # renovate: github-releases depName=<owner>/<repo> (currently KEYCLOAK_OPERATOR_VERSION → keycloak/keycloak-k8s-resources)",
+      "managerFilePatterns": [
+        "/^k8s/scripts/[^/]+\\.sh$/"
+      ],
+      "matchStrings": [
+        "[A-Z_]+=\"(?<currentValue>v?[0-9][^\"]*)\"\\s*#\\s*renovate:\\s*github-releases\\s+depName=(?<depName>\\S+)"
+      ],
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "customType": "regex",
+      "description": "Chart versions in the platform ApplicationSet (chart/repo/version triplets)",
       "managerFilePatterns": [
         "/^k8s/argocd/platform-appset\\.yaml$/"
       ],
       "matchStrings": [
-        "chart: (?<depName>\\S+)\\s+repo: (?<registryUrl>\\S+)\\s+version: v?(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+        "chart: (?<depName>\\S+)\\s+repo: (?<registryUrl>\\S+)\\s+version: (?<currentValue>v?[0-9]\\S*)"
       ],
       "datasourceTemplate": "helm"
     },
@@ -76,28 +112,6 @@
         "image: (?<depName>[a-z0-9./-]+):(?<currentValue>v?[0-9][^\\s\"']*)"
       ],
       "datasourceTemplate": "docker"
-    },
-    {
-      "customType": "regex",
-      "description": "OCI Helm charts referenced by URL in the deploy scripts",
-      "managerFilePatterns": [
-        "/^k8s/scripts/.*\\.sh$/"
-      ],
-      "matchStrings": [
-        "oci://(?<packageName>[^\\s]+?)\\s+[\\s\\S]{0,200}?--version \"?\\$?\\{?[A-Z_]*\"?\\s*#\\s*renovate:\\s*(?<currentValue>[0-9.]+)"
-      ],
-      "datasourceTemplate": "docker"
-    },
-    {
-      "customType": "regex",
-      "description": "Chart version constants at the top of deploy.sh",
-      "managerFilePatterns": [
-        "/^k8s/scripts/deploy(-workload)?\\.sh$/"
-      ],
-      "matchStrings": [
-        "CHART_[A-Z_]+=\"v?(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\"\\s*#\\s*(?<depName>[^\\s]+)\\s+(?<registryUrl>https?://[^\\s]+)"
-      ],
-      "datasourceTemplate": "helm"
     }
   ]
 }

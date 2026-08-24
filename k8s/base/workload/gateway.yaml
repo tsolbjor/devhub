@@ -29,16 +29,31 @@ spec:
       protocol: HTTP
       port: 80
       allowedRoutes:
+        # Plain HTTP carries exactly one route — the 301 to HTTPS below, in this
+        # namespace — plus cert-manager's HTTP-01 solver routes, which it also
+        # creates alongside the Certificate here. Nothing an app owns belongs on
+        # this listener.
         namespaces:
-          from: All
+          from: Same
     - name: apps
       protocol: HTTPS
       port: 443
       hostname: "*.${DOMAIN}"
       allowedRoutes:
-        # Any devhub-* namespace may attach a route for its own hostname.
+        # Tenant namespaces only. `from: All` let *any* namespace attach an
+        # HTTPRoute to the wildcard listener claiming *any* hostname under the
+        # domain — including another app's, which Gateway API resolves by
+        # oldest-route-wins, so an app could silently take over a sibling's
+        # hostname. The label is stamped on the namespace by ArgoCD
+        # (managedNamespaceMetadata in k8s/argocd/apps/forgejo-appset.yaml), not
+        # by the app's own manifests, so a repository cannot grant itself
+        # access; which hostnames a tenant may then claim is enforced by
+        # Kyverno (base/devops/kyverno/policies.yaml).
         namespaces:
-          from: All
+          from: Selector
+          selector:
+            matchLabels:
+              devhub.io/tenant: "true"
       tls:
         mode: Terminate
         certificateRefs:

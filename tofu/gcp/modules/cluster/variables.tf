@@ -23,18 +23,18 @@ variable "node_machine_type" {
 }
 
 variable "node_count" {
-  description = "Initial number of nodes per zone (regional cluster spawns nodes in each zone)"
+  description = "Initial number of nodes per zone at pool creation (the autoscaler owns sizing afterwards)"
   type        = number
 }
 
 variable "node_min_count" {
-  description = "Minimum nodes per zone (autoscaler lower bound)"
+  description = "Minimum nodes in total across all zones (autoscaler lower bound)"
   type        = number
   default     = 1
 }
 
 variable "node_max_count" {
-  description = "Maximum nodes per zone (autoscaler upper bound)"
+  description = "Maximum nodes in total across all zones (autoscaler upper bound)"
   type        = number
   default     = 4
 }
@@ -65,13 +65,13 @@ variable "ci_node_machine_type" {
 }
 
 variable "ci_node_min_count" {
-  description = "Minimum CI nodes per zone (0 = scale to zero when idle)"
+  description = "Minimum CI nodes in total across all zones (0 = scale to zero when idle)"
   type        = number
   default     = 0
 }
 
 variable "ci_node_max_count" {
-  description = "Maximum CI nodes per zone (0 disables the CI node pool)"
+  description = "Maximum CI nodes in total across all zones (0 disables the CI node pool)"
   type        = number
   default     = 2
 }
@@ -146,6 +146,12 @@ variable "pg_deletion_protection" {
 }
 
 # ─── Cloud Memorystore (Redis) ────────────────────────────────────────
+
+variable "enable_cache" {
+  description = "Provision the managed Memorystore Redis instance. No platform component consumes the cache today; enable for workloads that need it."
+  type        = bool
+  default     = false
+}
 
 variable "redis_tier" {
   description = "Memorystore Redis tier: BASIC or STANDARD_HA"

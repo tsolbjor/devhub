@@ -55,13 +55,17 @@ use_env_kubeconfig
 
 CONFIG_FILE="${OVERLAY_DIR}/config.yaml"
 
-# Mirrors the pins in deploy.sh.
-CHART_CERT_MANAGER="v1.21.1"
-CHART_EXTERNAL_DNS="1.21.1"
-CHART_EXTERNAL_SECRETS="2.9.0"
-CHART_ALLOY="1.11.1"
-CHART_ENVOY_GATEWAY="1.9.0"
-CHART_KYVERNO="3.8.2"
+# Mirrors the pins in deploy.sh, annotated the same way for Renovate (depName is
+# the chart name, so both files land in one PR); validate-overlays.sh reads these
+# lines rather than keeping its own copy.
+CHART_CERT_MANAGER="v1.21.1" # renovate: helm depName=cert-manager registryUrl=https://charts.jetstack.io
+CHART_EXTERNAL_DNS="1.21.1" # renovate: helm depName=external-dns registryUrl=https://kubernetes-sigs.github.io/external-dns/
+CHART_EXTERNAL_SECRETS="2.9.0" # renovate: helm depName=external-secrets registryUrl=https://charts.external-secrets.io
+CHART_ALLOY="1.11.1" # renovate: helm depName=alloy registryUrl=https://grafana.github.io/helm-charts
+CHART_KYVERNO="3.8.2" # renovate: helm depName=kyverno registryUrl=https://kyverno.github.io/kyverno
+# OCI chart: no index.yaml behind an oci:// reference for the helm datasource to
+# read — see the note on the same pin in deploy.sh.
+CHART_ENVOY_GATEWAY="1.9.0" # renovate: helm depName=gateway-helm registryUrl=oci://docker.io/envoyproxy
 
 # =============================================================================
 # Component Install Functions
@@ -89,10 +93,29 @@ install_scheduling_policies() {
 install_cert_manager() {
     log_step "Installing cert-manager..."
 
+    # The per-cloud overlay carries the DNS-01 solver's cloud identity (IRSA role
+    # on AWS, Workload Identity GSA on GCP, workload-identity labels on Azure).
+    # Nothing else on a workload cluster loads it — there is no ApplicationSet
+    # here layering values the way the platform cluster's does — so without this
+    # the solver falls back to the node credentials and the wildcard certificate
+    # the apps listener serves can never be issued.
+    local dir; dir="$(render_dir)"
+    local cm_values=()
+    local cm_overlay="${K8S_DIR}/overlays/${CLOUD}/devops/cert-manager/values.yaml"
+    if [[ -f "$cm_overlay" ]]; then
+        case "$CLOUD" in
+            aws) [[ -n "${CERT_MANAGER_ROLE_ARN:-}" ]] || log_warn "CERT_MANAGER_ROLE_ARN empty — run sync-tofu-outputs.sh, or wildcard issuance fails" ;;
+            gcp) [[ -n "${CERT_MANAGER_GSA_EMAIL:-}" ]] || log_warn "CERT_MANAGER_GSA_EMAIL empty — run sync-tofu-outputs.sh, or wildcard issuance fails" ;;
+        esac
+        template_values "$cm_overlay" "${dir}/cert-manager-cloud.yaml"
+        cm_values=(-f "${dir}/cert-manager-cloud.yaml")
+    fi
+
     helm upgrade --install cert-manager jetstack/cert-manager \
         --namespace cert-manager \
         --create-namespace \
         --version "$CHART_CERT_MANAGER" \
+        "${cm_values[@]+"${cm_values[@]}"}" \
         --set crds.enabled=true \
         --set global.priorityClassName=platform-standard \
         --set config.apiVersion=controller.config.cert-manager.io/v1alpha1 \
@@ -124,59 +147,12 @@ spec:
 EOF
 
     # DNS-01 for the wildcard certificate the apps listener serves. Let's Encrypt
-    # will not issue a wildcard over HTTP-01, so this is not optional.
-    create_dns01_issuer
+    # will not issue a wildcard over HTTP-01, so this is not optional. The
+    # per-cloud solver lives in lib/common.sh (apply_dns01_issuer) — deploy.sh
+    # applied a verbatim copy of it for single-cluster environments.
+    apply_dns01_issuer "$CLOUD"
 
     log_info "cert-manager installed"
-}
-
-# The DNS-01 solver differs per cloud; the credentials are the same workload
-# identity external-dns already uses.
-create_dns01_issuer() {
-    local solver=""
-    case "$CLOUD" in
-        aws)
-            solver="      - dns01:
-          route53:
-            region: ${AWS_REGION:-eu-west-1}"
-            ;;
-        azure)
-            solver="      - dns01:
-          azureDNS:
-            resourceGroupName: ${DNS_ZONE_RESOURCE_GROUP:-${AZURE_RESOURCE_GROUP:-}}
-            subscriptionID: ${AZURE_SUBSCRIPTION_ID:-}
-            hostedZoneName: ${DOMAIN}
-            environment: AzurePublicCloud
-            managedIdentity:
-              clientID: ${EXTERNAL_DNS_IDENTITY_CLIENT_ID:-}"
-            ;;
-        gcp)
-            solver="      - dns01:
-          cloudDNS:
-            project: ${GCS_PROJECT_ID:-}"
-            ;;
-        upcloud)
-            log_warn "UpCloud has no cert-manager DNS-01 solver; the platform uses Cloudflare."
-            log_warn "Create the ClusterIssuer manually with a cloudflare solver and an API token secret."
-            return 0
-            ;;
-    esac
-
-    cat <<EOF | kubectl apply -f -
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata:
-  name: letsencrypt-dns01
-spec:
-  acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
-    email: ${ACME_EMAIL}
-    privateKeySecretRef:
-      name: letsencrypt-dns01
-    solvers:
-${solver}
-EOF
-    log_info "DNS-01 ClusterIssuer created (wildcard certificates)"
 }
 
 install_gateway() {

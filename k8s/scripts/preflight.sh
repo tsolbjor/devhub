@@ -53,7 +53,12 @@ TIER="${ENV##*-}"   # dev | prod | workload (local has no tier)
 ENV_DIR="$(env_state_dir "$ENV")"
 CONFIG_FILE="${REPO_ROOT}/k8s/overlays/${ENV}/config.yaml"
 MARKER="${ENV_DIR}/preflight.ok"
+# 700, like setup_paths does: this directory goes on to hold kubeconfigs,
+# secrets.env, the Vault key file and quickstart's step logs. Getting the mode
+# right at creation is easier than noticing later that the first script to run
+# for an environment made it world-readable.
 mkdir -p "$ENV_DIR"
+chmod 700 "$ENV_DIR"
 
 # The wizard's answers file wins; the committed overlay is the sample/fallback.
 DOMAIN="$(yaml_get "${ENV_DIR}/config.yaml" domain 2>/dev/null || true)"

@@ -142,19 +142,74 @@ vault_exec() {
     fi
     [[ -n "$VAULT_POD" ]] || return 1
 
+    local token
+    token="$(platform_admin_token)" || return 1
+
     kp exec -n vault "$VAULT_POD" -- env \
         VAULT_ADDR=http://127.0.0.1:8200 \
-        VAULT_TOKEN="${VAULT_TOKEN:-$(platform_root_token)}" \
+        VAULT_TOKEN="$token" \
         vault "$@"
 }
 
-platform_root_token() {
-    local keys_file="${SCRIPT_DIR}/${PLATFORM_ENV}/vault-init-keys.json"
-    if [[ -f "$keys_file" ]]; then
-        jq -r '.root_token' "$keys_file"
-    else
-        echo ""
+# As vault_exec, but forwards stdin — used for the policy write and for KV
+# values that must stay off argv.
+vault_exec_stdin() {
+    if command -v vault &>/dev/null && [[ -n "${VAULT_ADDR:-}" && -n "${VAULT_TOKEN:-}" ]]; then
+        vault "$@"
+        return
     fi
+
+    if [[ -z "$VAULT_POD" ]]; then
+        VAULT_POD="$(kp get pod -n vault -l app.kubernetes.io/name=vault \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
+    fi
+    [[ -n "$VAULT_POD" ]] || return 1
+
+    local token
+    token="$(platform_admin_token)" || return 1
+
+    kp exec -i -n vault "$VAULT_POD" -- env \
+        VAULT_ADDR=http://127.0.0.1:8200 \
+        VAULT_TOKEN="$token" \
+        vault "$@"
+}
+
+# The platform's Vault token, from the platform environment's state directory.
+#
+# Two bugs lived here. The path was "${SCRIPT_DIR}/${PLATFORM_ENV}/" — the
+# pre-_setup layout that env_state_dir migrated away from — so the file was never
+# found; and it read only `.root_token`, which setup-vault.sh revokes by design at
+# the end of its run. Both produced an empty token, Vault answered 403, and the
+# failure surfaced as "Could not reach Vault", which sent people to look at the
+# network while workload ExternalSecrets and registry pulls quietly never worked.
+# Same expression deploy.sh's enable_workload_target uses.
+platform_admin_token() {
+    if [[ -n "${VAULT_TOKEN:-}" ]]; then
+        printf '%s' "$VAULT_TOKEN"
+        return 0
+    fi
+
+    local keys_file
+    keys_file="$(env_state_dir "$PLATFORM_ENV")/vault-init-keys.json"
+
+    if [[ ! -f "$keys_file" ]]; then
+        log_error "Platform Vault key material not found: ${keys_file}"
+        log_error "Run ./setup-vault.sh --env ${PLATFORM_ENV} first, or pass a token:"
+        log_error "  VAULT_TOKEN=<token> $0 --env ${ENV} --platform-env ${PLATFORM_ENV}"
+        return 1
+    fi
+
+    local token
+    token="$(jq -r '.admin_token // .root_token // empty' "$keys_file" 2>/dev/null || true)"
+    if [[ -z "$token" ]]; then
+        log_error "No admin or root token in ${keys_file}"
+        log_error "The initial root token is revoked at the end of setup; the"
+        log_error "platform-admin token in the same file replaces it. Create one with:"
+        log_error "  ./setup-vault.sh --env ${PLATFORM_ENV} admin-token"
+        return 1
+    fi
+
+    printf '%s' "$token"
 }
 
 if [[ -z "$WORKLOAD_OIDC_ISSUER" ]]; then
@@ -166,7 +221,10 @@ else
 
     # Narrow policy: app secrets and the registry pull token, read-only. The old
     # platform-wide `secret/data/*` read is not granted here.
-    if vault_exec policy write "$VAULT_POLICY_NAME" - <<EOF
+    #
+    # vault_exec_stdin, not vault_exec: the policy body arrives on stdin, and
+    # without `kubectl exec -i` it never reached the pod at all.
+    if vault_exec_stdin policy write "$VAULT_POLICY_NAME" - <<EOF
 # App secrets for workloads on ${ENV}
 path "secret/data/apps/*" {
   capabilities = ["read"]
@@ -208,8 +266,19 @@ EOF
             log_info "Removed the obsolete static vault-workload-token secret"
         fi
     else
-        log_warn "Could not reach Vault on the platform cluster."
-        log_warn "Set VAULT_ADDR + VAULT_TOKEN, or check that Vault is unsealed, then re-run."
+        # Hard error, not a warning. Without this policy the workload cluster's
+        # ExternalSecrets never resolve and no image can be pulled from the
+        # platform registry — the cluster looks registered and delivers nothing.
+        # The old warning said "could not reach Vault", which was almost never
+        # the actual cause.
+        log_error "Failed to write the Vault policy ${VAULT_POLICY_NAME} on ${PLATFORM_ENV}."
+        log_error "Without it, workload ExternalSecrets and registry pulls will not work."
+        log_error "Check, in order:"
+        log_error "  - a valid platform token: $(env_state_dir "$PLATFORM_ENV")/vault-init-keys.json"
+        log_error "    (or pass VAULT_TOKEN=<token>)"
+        log_error "  - Vault is running and unsealed: ./setup-vault.sh --env ${PLATFORM_ENV} status"
+        log_error "  - the platform kubeconfig points at ${PLATFORM_ENV}: ${PLATFORM_KUBECONFIG}"
+        exit 1
     fi
 fi
 
@@ -222,12 +291,22 @@ if kp get secret loki-ingest-credentials -n monitoring &>/dev/null; then
     LOKI_PASS="$(kp get secret loki-ingest-credentials -n monitoring -o jsonpath='{.data.password}' | base64 -d)"
 
     kw create namespace monitoring 2>/dev/null || true
-    # Keys are uppercase because Alloy reads them as environment variables.
-    kw create secret generic loki-ingest-credentials \
-        --namespace monitoring \
-        --from-literal=USERNAME="$LOKI_USER" \
-        --from-literal=PASSWORD="$LOKI_PASS" \
-        --dry-run=client -o yaml | kw apply -f - >/dev/null
+
+    # Applied as a manifest on stdin rather than `create secret --from-literal`:
+    # the literal form puts the password in kubectl's argv, where `ps` and any
+    # command auditing on this machine can read it. Keys are uppercase because
+    # Alloy reads them as environment variables.
+    kw apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: loki-ingest-credentials
+  namespace: monitoring
+type: Opaque
+data:
+  USERNAME: $(printf '%s' "$LOKI_USER" | base64 -w0)
+  PASSWORD: $(printf '%s' "$LOKI_PASS" | base64 -w0)
+EOF
 
     log_info "Loki ingest credentials copied (user: ${LOKI_USER})"
     log_info "Restart Alloy to pick them up: kubectl rollout restart ds/alloy -n monitoring"
@@ -269,10 +348,13 @@ else
     if [[ -n "$REGISTRY_TOKEN" && "$REGISTRY_TOKEN" != *ERROR* && "$REGISTRY_TOKEN" != *error* ]]; then
         log_info "Registry token created for ${REGISTRY_USER}"
 
-        if vault_exec kv put secret/forgejo/registry-pull-token \
-                username="${REGISTRY_USER}" \
-                token="${REGISTRY_TOKEN}" \
-                registry="git.${DOMAIN}"; then
+        # JSON on stdin (`kv put <path> -`): as `token=<value>` arguments the
+        # credential would land in the Kubernetes API audit log, which records
+        # the exec subresource's whole command.
+        if printf '%s' "$(jq -n \
+                --arg u "$REGISTRY_USER" --arg t "$REGISTRY_TOKEN" --arg r "git.${DOMAIN}" \
+                '{username:$u,token:$t,registry:$r}')" \
+                | vault_exec_stdin kv put secret/forgejo/registry-pull-token -; then
             log_info "Stored at secret/forgejo/registry-pull-token"
         else
             log_warn "Vault unreachable — store it manually:"

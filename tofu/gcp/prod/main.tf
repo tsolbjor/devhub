@@ -32,7 +32,8 @@ module "cluster" {
   pg_backup_enabled      = true
   pg_deletion_protection = true
 
-  # Memorystore Redis — STANDARD_HA for production
+  # Memorystore Redis — STANDARD_HA for production. Off by default (enable_cache):
+  # nothing on the platform consumes it; flip it on for workloads that need it.
   redis_tier           = "STANDARD_HA"
   redis_memory_size_gb = 4
 

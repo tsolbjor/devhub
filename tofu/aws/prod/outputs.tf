@@ -31,6 +31,7 @@ output "redis_auth_token" {
 }
 output "redis_tls_enabled" { value = module.cluster.redis_tls_enabled }
 output "external_dns_irsa_role_arn" { value = module.cluster.external_dns_irsa_role_arn }
+output "cert_manager_role_arn" { value = module.cluster.cert_manager_role_arn }
 output "loki_irsa_role_arn" { value = module.cluster.loki_irsa_role_arn }
 output "loki_bucket" { value = module.cluster.loki_bucket }
 output "velero_irsa_role_arn" { value = module.cluster.velero_irsa_role_arn }
