@@ -106,9 +106,19 @@ gitea:
     # ci.<domain> resolve to the gateway's PRIVATE load-balancer address, and
     # Forgejo's SSRF guard refuses webhook deliveries to private addresses by
     # default — every push event silently died in the webhook queue. Allowing
-    # exactly the CI hostname keeps the guard for everything else.
+    # exactly the CI hostnames keeps the guard for everything else.
+    #
+    # Both hosts, because the webhook URL is not the same everywhere: Woodpecker
+    # registers hooks at WOODPECKER_EXPERT_WEBHOOK_HOST, which is ci.<domain>
+    # off local and the in-cluster Service on local (where Forgejo cannot resolve
+    # ci.localhost — it answers 127.0.0.1 and the pod dials itself). With only
+    # ci.<domain> listed, the scaffolded repository showed up in Woodpecker with
+    # an active webhook and a .woodpecker.yml, and no pipeline ever ran: Forgejo
+    # refused the delivery before it left the queue, logging nothing the operator
+    # would look at. The Service name is identical in every environment, so
+    # listing both is safe rather than conditional.
     webhook:
-      ALLOWED_HOST_LIST: "ci.${DOMAIN}"
+      ALLOWED_HOST_LIST: "ci.${DOMAIN},woodpecker-server.woodpecker.svc.cluster.local"
 
     server:
       DOMAIN: git.${DOMAIN}
