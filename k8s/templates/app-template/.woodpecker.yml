@@ -33,11 +33,38 @@
 when:
   - event: [push, pull_request]
 
+# Clone from the in-cluster address instead of the repository's public clone
+# URL. Woodpecker takes that URL from Forgejo, which reports its public
+# ROOT_URL — and the clone runs in woodpecker-ci, where that host is 127.0.0.1
+# on local and blocked by the ci-egress RFC1918 rule anywhere else. Left alone,
+# every pipeline died on its first step with
+#   fatal: unable to access 'https://git.<domain>/...': Failed to connect
+# and no step after clone ever ran.
+#
+# attempts/backoff are not belt-and-braces either. Every step is a fresh pod, and
+# the NetworkPolicy that lets woodpecker-ci reach forgejo is matched on the
+# source pod's IP — which the policy controller adds a second or two after the
+# pod starts. The clone is the first thing that pod does, so its first
+# connection is reliably refused ("Failed to connect ... after 17 ms") while the
+# second succeeds. One retry is enough; five is free.
+clone:
+  git:
+    image: docker.io/woodpeckerci/plugin-git:2.9.2
+    settings:
+      remote: ${FORGEJO_URL}/devhub/APP_NAME.git
+      attempts: 5
+      backoff: 3s
+
 steps:
   # Render k8s/values.yaml through the platform's devhub-app chart: a broken
   # values file fails here, before anything reaches ArgoCD. The chart comes from
-  # Forgejo's archive endpoint (no git needed); --no-check-certificate because
-  # local environments run a private CA the CI image does not trust.
+  # Forgejo's archive endpoint (no git needed).
+  #
+  # $FORGEJO_URL, not git.DOMAIN: pipeline steps run in woodpecker-ci, where the
+  # public hostname is unreachable — 127.0.0.1 on local, and behind the
+  # RFC1918 block the ci-egress policy applies everywhere. The platform injects
+  # the address that works (WOODPECKER_ENVIRONMENT in the Woodpecker values), so
+  # nothing environment-specific is written into this repository.
   #
   # Push events only: Forgejo requires sign-in for every view, so the download
   # authenticates with the registry_token secret — which is deliberately absent
@@ -54,7 +81,7 @@ steps:
     commands:
       # Quoted for YAML: the colon-space in the header would otherwise parse
       # as a mapping and break the whole pipeline file.
-      - 'wget -qO- --no-check-certificate --header "Authorization: token $FORGEJO_TOKEN" https://git.DOMAIN/devhub-templates/devhub-app-chart/archive/main.tar.gz | tar xz'
+      - 'wget -qO- --header "Authorization: token $FORGEJO_TOKEN" $FORGEJO_URL/devhub-templates/devhub-app-chart/archive/main.tar.gz | tar xz'
       - helm template APP_NAME devhub-app-chart -f k8s/values.yaml >/dev/null
       - echo "values.yaml renders cleanly"
 
@@ -145,6 +172,8 @@ steps:
       - git add k8s/values.yaml
       - git diff --cached --quiet && echo "no image change" && exit 0
       - git commit -m "[skip ci] deploy $CI_COMMIT_SHA"
-      # origin has no credentials in a step container; push with the token
-      # (Forgejo accepts an access token as the username).
-      - git push "https://$GIT_TOKEN@git.DOMAIN/devhub/APP_NAME.git" HEAD:${CI_REPO_DEFAULT_BRANCH}
+      # origin has no credentials in a step container. The token goes in an
+      # Authorization header rather than in the URL: a credential embedded in a
+      # remote URL is echoed back by git in error messages and ends up in the
+      # pipeline log. $FORGEJO_URL is the in-cluster address (see the lint step).
+      - 'git -c http.extraHeader="Authorization: token $GIT_TOKEN" push "$FORGEJO_URL/devhub/APP_NAME.git" HEAD:${CI_REPO_DEFAULT_BRANCH}'

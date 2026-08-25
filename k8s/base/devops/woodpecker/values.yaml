@@ -48,6 +48,21 @@ server:
     # Forgejo pod, which cannot resolve ci.${DOMAIN} on local either.
     WOODPECKER_EXPERT_WEBHOOK_HOST: ${WOODPECKER_URL_INTERNAL}
     WOODPECKER_GITEA_SKIP_VERIFY: "false"
+    # The address pipeline steps use to reach Forgejo, injected into every step
+    # of every pipeline as $FORGEJO_URL.
+    #
+    # Pipelines cannot use git.${DOMAIN}. The clone step, the chart download and
+    # the deploy push all run as pods in woodpecker-ci, where that name is
+    # 127.0.0.1 on local — and where the ci-egress NetworkPolicy blocks every
+    # RFC1918 destination on purpose, so the gateway is out of reach even when
+    # the name does resolve (a cloud environment fronted by an internal load
+    # balancer has the same problem). What the policy *does* allow is the forgejo
+    # namespace directly, which is the path this address takes.
+    #
+    # It is supplied by the platform rather than substituted into each
+    # repository, so a scaffolded repository carries no environment-specific URL
+    # and stays portable between environments.
+    WOODPECKER_ENVIRONMENT: "FORGEJO_URL:${FORGEJO_URL_INTERNAL}"
 
   # Client id/secret for the Forgejo OAuth application, plus the shared agent
   # secret. Created by deploy.sh; the OAuth half is registered against Forgejo's

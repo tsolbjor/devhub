@@ -962,12 +962,15 @@ install_woodpecker() {
         # The server needs the same value plus the Forgejo OAuth application.
         kubectl create secret generic woodpecker-server-secret -n woodpecker \
             --from-literal=WOODPECKER_AGENT_SECRET="$agent_secret" \
+            --from-literal=WOODPECKER_GRPC_SECRET="$(openssl rand -hex 32)" \
             --from-literal=WOODPECKER_GITEA_CLIENT=placeholder \
             --from-literal=WOODPECKER_GITEA_SECRET=placeholder
         log_warn "Woodpecker's Forgejo OAuth application is a placeholder."
         log_warn "Create it in Forgejo (Settings → Applications) and update:"
         log_warn "  kubectl create secret generic woodpecker-server-secret -n woodpecker ..."
     fi
+
+    ensure_woodpecker_grpc_secret
 
     local values_args=$(get_values_args "woodpecker")
 
@@ -978,6 +981,36 @@ install_woodpecker() {
         --atomic --timeout 10m
 
     log_info "Woodpecker installed — https://ci.${DOMAIN}"
+}
+
+# The JWT secret the server signs agent tokens with.
+#
+# Woodpecker generates a random one at every start when this is unset, and says
+# so in its own log. The consequence is not cosmetic: an agent's token is a JWT
+# signed with that secret, so every server restart — a helm upgrade, a node
+# reboot, an eviction — invalidates every agent. The agents then log
+#   Unauthenticated: token signature is invalid
+# and back off for over an hour and a half before trying again. CI stops dead:
+# repositories still show as active, pushes still create pipelines, and nothing
+# ever executes them. Persisting the secret is what makes a restart survivable.
+#
+# Read-and-reuse rather than regenerate, so calling this on an existing
+# installation does not itself invalidate the agents it is meant to protect.
+ensure_woodpecker_grpc_secret() {
+    local existing
+    existing="$(kubectl get secret woodpecker-server-secret -n woodpecker \
+        -o jsonpath='{.data.WOODPECKER_GRPC_SECRET}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+    [[ -n "$existing" ]] && return 0
+
+    log_info "Adding a persistent WOODPECKER_GRPC_SECRET (agents survive a server restart)"
+    kubectl patch secret woodpecker-server-secret -n woodpecker --type=merge \
+        -p "{\"stringData\":{\"WOODPECKER_GRPC_SECRET\":\"$(openssl rand -hex 32)\"}}" >/dev/null
+
+    # Agent tokens were signed with the throwaway secret; they are invalid the
+    # moment the server picks this one up, and the agents' own retry backoff is
+    # far too long to wait out. Restart both sides so they re-register now.
+    kubectl rollout restart statefulset/woodpecker-server -n woodpecker >/dev/null 2>&1 || true
+    kubectl rollout restart statefulset/woodpecker-agent -n woodpecker >/dev/null 2>&1 || true
 }
 
 # Woodpecker signs users in through Forgejo, so it needs an OAuth2 application
@@ -1027,8 +1060,18 @@ configure_woodpecker_oauth() {
     agent_secret="$(kubectl get secret woodpecker-default-agent-secret -n woodpecker \
         -o jsonpath='{.data.WOODPECKER_AGENT_SECRET}' | base64 -d)"
 
+    # This rewrites the whole secret, so the gRPC signing key has to be carried
+    # across or it is lost and every agent token is invalidated (see
+    # ensure_woodpecker_grpc_secret). Generated here when absent, for an
+    # installation that predates it.
+    local grpc_secret
+    grpc_secret="$(kubectl get secret woodpecker-server-secret -n woodpecker \
+        -o jsonpath='{.data.WOODPECKER_GRPC_SECRET}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+    [[ -n "$grpc_secret" ]] || grpc_secret="$(openssl rand -hex 32)"
+
     kubectl create secret generic woodpecker-server-secret -n woodpecker \
         --from-literal=WOODPECKER_AGENT_SECRET="$agent_secret" \
+        --from-literal=WOODPECKER_GRPC_SECRET="$grpc_secret" \
         --from-literal=WOODPECKER_GITEA_CLIENT="$client_id" \
         --from-literal=WOODPECKER_GITEA_SECRET="$client_secret" \
         --dry-run=client -o yaml | kubectl apply -f - >/dev/null
