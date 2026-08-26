@@ -56,7 +56,7 @@ containerSecurityContext:
     drop:
       - ALL
 
-# Ingress is Gateway API (HTTPRoute) — see overlays/<env>/devops/httproutes.yaml
+# Ingress is Gateway API (HTTPRoute) — see base/devops/httproutes.yaml
 ingress:
   enabled: false
 

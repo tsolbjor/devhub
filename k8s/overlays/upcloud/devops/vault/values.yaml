@@ -1,7 +1,0 @@
-# Vault upcloud overlay values
-# Merged with base/devops/vault/values.yaml
-#
-# Routing is a Gateway API HTTPRoute (devops/httproutes.yaml) and cloud KMS
-# auto-unseal lives in vault-autounseal-values.yaml, which deploy.sh layers on
-# when tofu has provisioned the key. Nothing else differs per cloud.
-{}

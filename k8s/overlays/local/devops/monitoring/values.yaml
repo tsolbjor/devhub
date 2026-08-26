@@ -1,93 +1,27 @@
-# Monitoring local overlay values
-# Merged with base/devops/monitoring/prometheus-stack-values.yaml
-# Uses ${DOMAIN} from config.yaml
-
-# Routing is via Gateway API HTTPRoutes (devops/httproutes.yaml)
+# Monitoring local overlay — only what differs from
+# base/devops/monitoring/prometheus-stack-values.yaml.
+#
+# The Grafana SSO block, the OIDC client-secret env and the three
+# managed-control-plane scrape targets used to live here in full; base carries
+# them now (identically, in every environment), so this file is down to what is
+# only true on a laptop.
 
 grafana:
-
-  grafana.ini:
-    server:
-      root_url: https://grafana.${DOMAIN}
-    auth.generic_oauth:
-      enabled: true
-      name: Keycloak
-      allow_sign_up: true
-      client_id: grafana
-      scopes: openid email profile groups
-      # auth_url is browser-facing (external HTTPS)
-      auth_url: https://keycloak.${DOMAIN}/realms/devops/protocol/openid-connect/auth
-      # token_url and api_url are server-side (internal HTTP, bypasses .localhost DNS issue)
-      token_url: http://keycloak-service.keycloak.svc.cluster.local:8080/realms/devops/protocol/openid-connect/token
-      api_url: http://keycloak-service.keycloak.svc.cluster.local:8080/realms/devops/protocol/openid-connect/userinfo
-      role_attribute_path: contains(groups[*], 'devops-admins') && 'Admin' || contains(groups[*], 'developers') && 'Editor' || 'Viewer'
-
+  # k3s/Rancher Desktop: the chart's chown init container cannot write the
+  # hostPath-backed volume and the pod never starts.
   initChownData:
     enabled: false
 
-  envValueFrom:
-    GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET:
-      secretKeyRef:
-        name: grafana-oidc-secret
-        key: client-secret
-
-# ─── k3s has no separate control-plane components to scrape ──────────
-# Rancher Desktop runs k3s, which folds the controller manager, the scheduler
-# and kube-proxy into the k3s server/agent processes and uses SQLite instead of
-# etcd. Their metrics endpoints bind to 127.0.0.1 (or, for etcd, do not exist),
-# so kube-prometheus-stack's default ServiceMonitors can never succeed and
-# KubeControllerManagerDown / KubeSchedulerDown / KubeProxyDown / the etcd* rules
-# fire critical from the first sync onwards. On local that is the whole alert
-# channel, so it hides everything worth seeing.
-kubeControllerManager:
-  enabled: false
-
-kubeScheduler:
-  enabled: false
-
-kubeEtcd:
-  enabled: false
-
+# ─── k3s folds kube-proxy into the agent ─────────────────────────────
+# The controller manager, scheduler and etcd targets are disabled in base for
+# every environment. kube-proxy is the local-only one: k3s runs it inside the
+# server/agent process with its metrics endpoint on 127.0.0.1, so
+# KubeProxyDown fires critical from the first sync. On a cloud cluster it is a
+# real DaemonSet with a real endpoint, so it stays enabled there.
 kubeProxy:
   enabled: false
 
-# ─── No notification channel on local ────────────────────────────────
-# The platform-slack receiver reads its URL from api_url_file, and the
-# alertmanager-slack secret is created with an empty webhook-url here — nobody
-# wires a Slack workspace to a laptop. An empty file is not "delivers nothing":
-# every notification fails with `unsupported protocol scheme ""`, Alertmanager
-# retries until it gives up, and Prometheus then fires
-# AlertmanagerFailedToSendAlerts and AlertmanagerClusterFailedToSendAlerts. A
-# fresh local install sat with two critical alerts firing, caused entirely by
-# having nowhere to send alerts — and `validate --e2e` failed on
-# "critical alerts are firing" with nothing actually wrong.
-#
-# Routing to the null receiver keeps every alert visible in the Alertmanager and
-# Grafana UIs, which is all a laptop can honestly offer. Helm replaces lists
-# wholesale, so `routes` below fully overrides the base list.
-#
-# To deliver alerts from a real environment, leave its overlay routing to
-# platform-slack and set the webhook:
-#   vault kv put secret/platform/alertmanager webhook-url=https://hooks.slack.com/...
-alertmanager:
-  config:
-    route:
-      receiver: platform-null
-      routes:
-        - matchers:
-            - alertname = "Watchdog"
-          receiver: platform-null
-          repeat_interval: 1h
-        - matchers:
-            - severity = "critical"
-          receiver: platform-null
-          group_wait: 10s
-          repeat_interval: 1h
-        - matchers:
-            - severity = "warning"
-          receiver: platform-null
-
-# ─── WSL2's clock makes two rules meaningless ────────────────────────
+# ─── WSL2's clock makes one rule meaningless ─────────────────────────
 # process_start_time_seconds is derived from the node's boot time
 # (wall_clock - uptime). WSL2's wall clock jumps forward in bursts — measurably
 # ~7s of clock per 3s of real time — so that subtraction drifts and the metric
@@ -98,11 +32,14 @@ alertmanager:
 # (changes(process_start_time_seconds[10m]) > 4), so on WSL2 it fires
 # permanently against an Alertmanager that has run untouched for hours — and
 # `validate --e2e` then fails "no critical alert is firing" on a perfectly
-# healthy environment. Same reason as the k3s components above: a check that
-# cannot be true here hides the ones that can.
+# healthy environment. Same reason as kubeProxy above: a check that cannot be
+# true here hides the ones that can.
 #
 # NodeClockNotSynchronising is the honest report of this and stays enabled — it
 # is a warning, and it is describing something real about the host.
+#
+# Alert *routing* is no longer overridden here: base defaults to the
+# platform-null receiver for exactly the reason this file used to explain.
 defaultRules:
   disabled:
     AlertmanagerClusterCrashlooping: true

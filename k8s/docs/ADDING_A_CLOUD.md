@@ -164,14 +164,22 @@ k8s/overlays/<cloud>-workload/        config.yaml only
 ```
 
 Copy `k8s/overlays/upcloud/devops/` (API-key clouds) or `aws/devops/` (federated
-clouds) and adjust. Files: `argocd`, `cert-manager`, `external-dns`, `monitoring`,
-`vault`, `gateway.yaml`, `httproutes.yaml`, `kustomization.yaml`, plus `velero/`,
-`monitoring/loki-values.yaml` and `vault/vault-autounseal-values.yaml` where the
-capability exists.
+clouds) and adjust. A cloud overlay holds only what is genuinely per-cloud:
+`cert-manager/values.yaml` (the DNS-01 solver), `external-dns/values.yaml` (the
+provider), `velero/values.yaml`, `monitoring/loki-values.yaml` and
+`vault/vault-autounseal-values.yaml` where the capability exists.
 
-Routing is Gateway API: `gateway.yaml` holds one listener per platform hostname and
-`httproutes.yaml` one route per service. Generate them by copying an existing cloud
-— the only per-cloud difference is the TLS secret naming.
+Everything else is in `k8s/base/devops/` and needs no per-cloud file: the Gateway
+and its HTTPRoutes, ArgoCD, the monitoring stack, Vault. Those used to be copied
+per cloud and were byte-identical, which is how the `apps` wildcard listener came
+to exist in one cloud only. An overlay file still wins where one exists — `local`
+uses that for its own Gateway and self-signed CA — so reach for one only when the
+value truly differs.
+
+Routing is Gateway API: `k8s/base/devops/gateway.yaml` holds one listener per
+platform hostname and `httproutes.yaml` one route per service — shared, so a new
+cloud gets both for free. Only override them in the overlay if this cloud's TLS
+secret or listener set genuinely differs.
 
 Create the symlinks, not copies:
 

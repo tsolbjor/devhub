@@ -36,7 +36,7 @@ service:
       http:
         port: 3000
 
-# Routing is a Gateway API HTTPRoute (overlays/<env>/devops/httproutes.yaml)
+# Routing is a Gateway API HTTPRoute (base/devops/httproutes.yaml)
 ingress:
   main:
     enabled: false

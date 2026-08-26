@@ -448,7 +448,7 @@ devhub/
 - YAML files must not have duplicate keys (silent override) — the validator enforces this
 - Cloud overlay envs symlink `devops/` from their shared cloud overlay; only `config.yaml` is per-env
 - New platform component: add base values, per-cloud overlay values, an entry in `platform-appset.yaml`, a chart pin at the top of `deploy.sh`, and (if bootstrap-critical) an install function
-- Routing is Gateway API: add a listener to `overlays/<env>/devops/gateway.yaml` and an `HTTPRoute` to `httproutes.yaml`; never an Ingress. A new local hostname also needs a line in `k8s/scripts/windows/setup-hosts.ps1`, or it resolves in WSL and 404s in the Windows browser
+- Routing is Gateway API: add a listener to `k8s/base/devops/gateway.yaml` and an `HTTPRoute` to `httproutes.yaml`; never an Ingress. Both files are shared by every cloud — the four per-cloud copies were byte-identical, and the one thing that had diverged (the `apps` wildcard listener) was a bug. An overlay file still wins where one exists; only `local` has them. A new local hostname also needs a line in `k8s/scripts/windows/setup-hosts.ps1`, or it resolves in WSL and 404s in the Windows browser
 - ArgoCD clones `${GITOPS_REPO_URL_INTERNAL}`, not `${GITOPS_REPO_URL}`: on local
   the repo is only reachable in-cluster by Forgejo's Service name, because glibc
   answers `*.localhost` in `getaddrinfo` before `/etc/hosts` and a hostAlias

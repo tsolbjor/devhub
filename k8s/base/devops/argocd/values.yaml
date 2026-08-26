@@ -2,13 +2,12 @@
 # Chart: argo/argo-cd
 # Docs: https://argo-cd.readthedocs.io/
 #
-# Domain configuration is provided by overlays:
-#   - overlays/local/devops/argocd/values.yaml
-#   - overlays/upcloud/devops/argocd/values.yaml
-
-# Global - domain overridden by overlays
+# ${DOMAIN} is substituted by template_values, so this file is complete on its
+# own. The four cloud overlays used to repeat it verbatim to do nothing but swap
+# example.com for the real domain; only local still overrides, for TLS at the
+# gateway and its self-signed CA.
 global:
-  domain: argocd.example.com
+  domain: argocd.${DOMAIN}
 
 # Server
 server:
@@ -23,7 +22,7 @@ server:
       cpu: 500m
       memory: 512Mi
 
-  # Routing is a Gateway API HTTPRoute (overlays/<env>/devops/httproutes.yaml).
+  # Routing is a Gateway API HTTPRoute (base/devops/httproutes.yaml).
   ingress:
     enabled: false
 
@@ -107,13 +106,12 @@ dex:
 
 configs:
   # ─── Server configuration and SSO ──────────────────────────────────
-  # Domain is substituted per environment by the overlays.
   cm:
     create: true
-    url: https://argocd.example.com
+    url: https://argocd.${DOMAIN}
     oidc.config: |
       name: Keycloak
-      issuer: https://keycloak.example.com/realms/devops
+      issuer: https://keycloak.${DOMAIN}/realms/devops
       clientID: argocd
       clientSecret: $oidc.keycloak.clientSecret
       requestedScopes: ["openid", "profile", "email", "groups"]

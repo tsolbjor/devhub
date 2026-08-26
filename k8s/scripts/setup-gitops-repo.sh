@@ -246,7 +246,13 @@ stage_repo() {
         local tier="${ENV##*-}"
         mkdir -p "${dest}/tofu/${CLOUD}"
         cp -r "${REPO_ROOT}/tofu/${CLOUD}/modules" "${dest}/tofu/${CLOUD}/modules"
-        cp -r "${REPO_ROOT}/tofu/${CLOUD}/${tier}" "${dest}/tofu/${CLOUD}/${tier}"
+        # -L, not -r: the root module's backend.tf, outputs.tf, providers.tf and
+        # variables-api-access.tf are symlinks into tofu/<cloud>/shared/, which is
+        # dev and prod sharing one copy of the files that were identical in both.
+        # Only this tier's directory is published, so a plain copy would land
+        # four dangling links and `tofu init` would fail on a root module with no
+        # backend. Same reason the overlay's devops/ symlink is dereferenced.
+        cp -rL "${REPO_ROOT}/tofu/${CLOUD}/${tier}" "${dest}/tofu/${CLOUD}/${tier}"
         [[ -d "${REPO_ROOT}/tofu/scripts" ]] && cp -r "${REPO_ROOT}/tofu/scripts" "${dest}/tofu/scripts"
 
         # The provider cache and any local state came along with the directory

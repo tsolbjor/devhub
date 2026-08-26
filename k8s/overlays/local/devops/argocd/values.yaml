@@ -1,9 +1,9 @@
-# ArgoCD local overlay values
-# Merged with base/devops/argocd/values.yaml
-# Uses ${DOMAIN} from config.yaml
-
-global:
-  domain: argocd.${DOMAIN}
+# ArgoCD local overlay — only what differs from base/devops/argocd/values.yaml.
+#
+# The domain, SSO client and RBAC policy used to be repeated here verbatim; base
+# carries them now (it templates ${DOMAIN} like every other values file), so what
+# is left is the two things that are true only on a laptop, plus the empty secret
+# key the local flow fills in.
 
 configs:
   params:
@@ -11,25 +11,9 @@ configs:
     server.insecure: true
 
   cm:
-    create: true
-    url: https://argocd.${DOMAIN}
-    # Skip TLS verification for local self-signed CA
+    # The local CA is self-signed, so ArgoCD's OIDC client cannot verify it.
     oidc.tls.insecure.skip.verify: "true"
-    oidc.config: |
-      name: Keycloak
-      issuer: https://keycloak.${DOMAIN}/realms/devops
-      clientID: argocd
-      clientSecret: $oidc.keycloak.clientSecret
-      requestedScopes: ["openid", "profile", "email", "groups"]
-
-  rbac:
-    policy.csv: |
-      g, devops-admins, role:admin
-      g, developers, role:readonly
-      g, viewers, role:readonly
 
   secret:
     extra:
       oidc.keycloak.clientSecret: ""
-
-# Routing is a Gateway API HTTPRoute (devops/httproutes.yaml)

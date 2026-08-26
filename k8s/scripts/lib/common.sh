@@ -406,6 +406,23 @@ template_values() {
 
 # Get Helm values args for a component (base + templated overlay).
 # Usage: get_values_args <component>
+# Where a devops manifest lives. The Gateway and its HTTPRoutes were four
+# byte-identical copies, one per cloud, and the drift that invites had already
+# happened: the `apps` wildcard listener existed only in the azure overlay, so
+# `deploy.sh workload-target` produced routes with no listener to attach to on
+# every other cloud. They live in base/ now; an overlay file, if there is one,
+# still wins (local's Gateway uses the local CA and its own listener set).
+#
+# Usage: devops_manifest gateway.yaml
+devops_manifest() {
+    local rel="$1"
+    if [[ -f "${OVERLAY_DIR}/devops/${rel}" ]]; then
+        echo "${OVERLAY_DIR}/devops/${rel}"
+    else
+        echo "${BASE_DIR}/devops/${rel}"
+    fi
+}
+
 get_values_args() {
     local component="$1"
     local base_values="${BASE_DIR}/devops/${component}/values.yaml"
@@ -530,6 +547,233 @@ add_helm_repos() {
     helm repo update "${names[@]}"
     # Forgejo and Envoy Gateway are OCI charts — no repo to add, pulled by URL.
     log_info "Helm repositories updated"
+}
+
+# =============================================================================
+# Cloud object storage preflight
+# =============================================================================
+
+# Loki and Velero are handed a bucket or container name that tofu created. When
+# an apply fails halfway the *outputs* still name it — so the values file is
+# perfectly formed and the first thing to notice is the pod, at runtime: Loki
+# crash-looped for the full ten minutes of its helm timeout on an
+# AuthorizationPermissionMismatch, and Velero would have said nothing until a
+# failed-backup alert days later. One API call up front turns both into a
+# sentence naming the cause.
+#
+# Only a definite "not there" fails. A missing CLI is not an answer, so it skips;
+# set DEVHUB_SKIP_STORAGE_CHECK=1 to skip on purpose.
+#
+# Usage: require_object_store <component> <bucket-or-container>
+require_object_store() {
+    local component="$1" target="$2"
+    [[ -n "$target" ]] || return 0
+    [[ "${DEVHUB_SKIP_STORAGE_CHECK:-}" == "1" ]] && return 0
+
+    # Both the identity clouds' RBAC and UpCloud's bucket policy are eventually
+    # consistent, and this runs seconds after the apply that created them, so a
+    # single 403 is not an answer either. Three tries, 5s apart: a bucket that is
+    # genuinely absent costs ten extra seconds, and a propagation lag stops
+    # failing a deploy for no reason.
+    local attempt out=""
+    for attempt in 1 2 3; do
+        out="$(_object_store_probe "$component" "$target")" && return 0
+        [[ $attempt -lt 3 ]] && sleep 5
+    done
+
+    log_error "${component}: object storage '${target}' is not reachable in ${CLOUD}."
+    log_error "${out}"
+    if [[ "$CLOUD" == "upcloud" ]]; then
+        log_error "On UpCloud this is the bucket *or* its access key: both come from"
+        log_error "the same tofu outputs, so re-run sync-tofu-outputs.sh if the key"
+        log_error "was rotated (deploy.sh then rewrites the in-cluster Secret too)."
+    fi
+    log_error "The tofu outputs name it, so the most likely cause is an apply that"
+    log_error "did not finish — the bucket/container and its role assignment are"
+    log_error "created late, and everything before them survives a failure."
+    log_error "Check with: ./devhub plan --env ${ENV:-<env>}   (anything left to *create* means it did not finish)"
+    return 1
+}
+
+# One probe. Exit 0 means reachable *or* not answerable here (no CLI, nothing
+# configured, a cloud without object storage) — the caller retries, and fails,
+# only on a definite no. CLI output goes to stdout for the error message.
+_object_store_probe() {
+    local component="$1" target="$2" key_var secret_var
+
+    case "$CLOUD" in
+        azure)
+            command -v az &>/dev/null || return 0
+            [[ -n "${AZURE_STORAGE_ACCOUNT:-}" ]] || return 0
+            az storage container show --name "$target" \
+                --account-name "$AZURE_STORAGE_ACCOUNT" --auth-mode login 2>&1 >/dev/null && return 0
+            ;;
+        aws)
+            command -v aws &>/dev/null || return 0
+            aws s3api head-bucket --bucket "$target" 2>&1 >/dev/null && return 0
+            ;;
+        gcp)
+            command -v gcloud &>/dev/null || return 0
+            gcloud storage buckets describe "gs://${target}" 2>&1 >/dev/null && return 0
+            ;;
+        upcloud)
+            # No workload identity here: Loki and Velero authenticate with
+            # bucket-scoped access keys against a per-deployment S3 endpoint, and
+            # those keys are in the environment already. That makes this check
+            # stronger than the identity clouds' — it proves the bucket exists
+            # *and* that the credential the pod will use can read it, so a
+            # rotated or mistyped key fails here instead of at runtime.
+            #
+            # The per-bucket policy tofu attaches grants s3:ListBucket, which is
+            # exactly what head-bucket needs.
+            command -v aws &>/dev/null || return 0
+            [[ -n "${S3_ENDPOINT:-}" ]] || return 0
+            key_var="$(echo "$component" | tr '[:lower:]' '[:upper:]')_S3_ACCESS_KEY_ID"
+            secret_var="$(echo "$component" | tr '[:lower:]' '[:upper:]')_S3_SECRET_ACCESS_KEY"
+            [[ -n "${!key_var:-}" && -n "${!secret_var:-}" ]] || return 0
+            # Path-style addressing because the endpoint is not S3 itself (the
+            # Loki and Velero values files set s3forcepathstyle for the same
+            # reason), a region because the CLI insists on one, and the metadata
+            # endpoint disabled so a missing one cannot stall the check.
+            AWS_ACCESS_KEY_ID="${!key_var}" \
+            AWS_SECRET_ACCESS_KEY="${!secret_var}" \
+            AWS_SESSION_TOKEN="" \
+            AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}" \
+            AWS_S3_ADDRESSING_STYLE=path \
+            AWS_EC2_METADATA_DISABLED=true \
+            aws s3api head-bucket --bucket "$target" \
+                --endpoint-url "$S3_ENDPOINT" 2>&1 >/dev/null && return 0
+            ;;
+        *)
+            # local has no object storage.
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# =============================================================================
+# Helm install with diagnostics
+# =============================================================================
+
+# `helm --atomic` deletes the pods it just created, which is exactly the
+# evidence needed to explain the failure: a Loki that could not reach its blob
+# container said so plainly in its log, and all the operator ever saw was
+# "context deadline exceeded" — the pod was gone before anyone could read it.
+#
+# This keeps atomic's *useful* half. On failure it prints the not-ready pods'
+# logs, and only then rolls back — and only if the release already had a
+# working revision, i.e. this was an upgrade of something live. A first install
+# is left in place: there is nothing to roll back to, and the broken pods are
+# worth more standing (`kubectl describe`, `kubectl logs`) than deleted.
+#
+# It also clears a wedged release: a run interrupted mid-helm leaves the release
+# in pending-install/pending-upgrade, and every later attempt then fails with
+# "another operation (install/upgrade/rollback) is in progress" until someone
+# intervenes by hand. Quickstart promises to resume, so it resumes.
+#
+# Usage: helm_install_logged <release> <chart> <namespace> [helm args...]
+helm_install_logged() {
+    local release="$1" chart="$2" namespace="$3"
+    shift 3
+
+    # `|| true` is load-bearing: helm status exits 1 for a release that does not
+    # exist yet, and under `set -e` a failing command substitution in an
+    # assignment kills the caller — deploy.sh died silently after the first
+    # not-yet-installed component, with a successful install as the last thing
+    # printed. One helm call, both fields, failure allowed.
+    local info status revision
+    info="$(helm status "$release" -n "$namespace" -o json 2>/dev/null || true)"
+    status="$(printf '%s' "$info" | jq -r '.info.status // ""' 2>/dev/null || true)"
+    revision="$(printf '%s' "$info" | jq -r '.version // ""' 2>/dev/null || true)"
+
+    case "$status" in
+        pending-install)
+            log_warn "Release '${release}' is stuck in pending-install (an earlier run was interrupted) — removing it"
+            helm uninstall "$release" -n "$namespace" --wait --timeout 5m &>/dev/null || true
+            status=""; revision=""
+            ;;
+        pending-upgrade|pending-rollback)
+            log_warn "Release '${release}' is stuck in ${status} (an earlier run was interrupted) — rolling it back"
+            helm rollback "$release" -n "$namespace" --wait --timeout 5m &>/dev/null || true
+            info="$(helm status "$release" -n "$namespace" -o json 2>/dev/null || true)"
+            status="$(printf '%s' "$info" | jq -r '.info.status // ""' 2>/dev/null || true)"
+            revision="$(printf '%s' "$info" | jq -r '.version // ""' 2>/dev/null || true)"
+            ;;
+    esac
+
+    # `if helm ...; then return 0; fi` followed by `$?` reads 0 — an if whose
+    # condition fails and has no else exits 0 — which reported every failure as
+    # a success. Capture the status from helm itself.
+    local rc=0
+    helm upgrade --install "$release" "$chart" --namespace "$namespace" "$@" || rc=$?
+    [[ $rc -eq 0 ]] && return 0
+
+    log_error "Helm release '${release}' did not become ready in namespace ${namespace}."
+
+    # Nothing to inspect when helm never got as far as creating the release (a
+    # missing chart, a values file that does not parse): helm has already said
+    # what was wrong, and pod-hunting would only bury it.
+    if ! helm status "$release" -n "$namespace" &>/dev/null; then
+        log_error "The release was never created — the error above is the whole story."
+        return $rc
+    fi
+
+    helm_dump_release_diagnostics "$release" "$namespace"
+
+    # Roll back only what was working before. `deployed` is the only status that
+    # says the previous revision actually ran.
+    if [[ "$status" == "deployed" && -n "$revision" ]]; then
+        log_warn "Rolling ${release} back to revision ${revision} (its last working one)"
+        helm rollback "$release" "$revision" -n "$namespace" --wait --timeout 5m || \
+            log_error "Rollback of ${release} failed too — the release is left as it is"
+    else
+        log_warn "Leaving the failed release in place: there is no earlier working revision,"
+        log_warn "and the pods are more useful standing. Inspect them with:"
+        log_warn "  kubectl get pods -n ${namespace}"
+    fi
+
+    return $rc
+}
+
+# Logs of every pod of a release that is not Ready. Not "phase != Running": a
+# CrashLoopBackOff pod is phase Running with a container that keeps dying, which
+# is the common case. Charts label pods inconsistently, so an empty
+# instance-label match falls back to every not-ready pod in the namespace.
+helm_dump_release_diagnostics() {
+    local release="$1" namespace="$2"
+    local -a pods=()
+    local pod
+
+    kubectl get pods -n "$namespace" -l "app.kubernetes.io/instance=${release}" >&2 2>/dev/null || true
+
+    local not_ready='.items[] | select([.status.conditions[]? | select(.type == "Ready") | .status] != ["True"]) | .metadata.name'
+    while read -r pod; do [[ -n "$pod" ]] && pods+=("$pod"); done < <(
+        kubectl get pods -n "$namespace" -l "app.kubernetes.io/instance=${release}" -o json 2>/dev/null \
+        | jq -r "$not_ready" 2>/dev/null)
+    if [[ ${#pods[@]} -eq 0 ]]; then
+        while read -r pod; do [[ -n "$pod" ]] && pods+=("$pod"); done < <(
+            kubectl get pods -n "$namespace" -o json 2>/dev/null | jq -r "$not_ready" 2>/dev/null)
+    fi
+
+    for pod in "${pods[@]}"; do
+        log_error "── ${pod}: last log lines"
+        # A crash-looping container's *current* log is often a fresh, empty
+        # start, so fall back to the previous one — the run that actually failed.
+        kubectl logs -n "$namespace" "$pod" --all-containers --tail=30 2>/dev/null \
+            || kubectl logs -n "$namespace" "$pod" --all-containers --previous --tail=30 2>/dev/null \
+            || true
+        kubectl get pod -n "$namespace" "$pod" \
+            -o jsonpath='{range .status.containerStatuses[*]}{.name}{": "}{.state}{"\n"}{end}' 2>/dev/null || true
+    done >&2
+
+    if [[ ${#pods[@]} -eq 0 ]]; then
+        log_error "No not-ready pods found — the failure is likely in the objects themselves."
+        # Pod events only: a namespace-wide dump is mostly node and volume
+        # chatter that says nothing about this release.
+        kubectl get events -n "$namespace" --field-selector involvedObject.kind=Pod \
+            --sort-by=.lastTimestamp 2>/dev/null | tail -15 >&2 || true
+    fi
 }
 
 # =============================================================================

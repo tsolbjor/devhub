@@ -34,6 +34,7 @@ ENV=""
 STATUS_ONLY=false
 AUTO=false
 RUN_REMAINING=false
+LAST_STEP_LOG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -178,6 +179,13 @@ qs_cfg() {
 # Each check is cheap and read-only. kubectl calls are bounded so an unreachable
 # cluster costs a second, not a hang.
 
+# helm against the same kubeconfig, same bounded cost as kc.
+qs_helm() {
+    [[ -f "$KUBECONFIG_FILE" ]] || return 1
+    command -v helm &>/dev/null || return 1
+    KUBECONFIG="$KUBECONFIG_FILE" timeout 20 helm "$@" 2>/dev/null
+}
+
 kc() {
     if [[ -f "$KUBECONFIG_FILE" ]]; then
         # `timeout` outranks --request-timeout: an exec auth plugin that wants
@@ -240,7 +248,35 @@ det_applied() {
     [[ -n "$TOFU_DIR" ]] || return 0
     local want='(.cluster_name.value // "" | length > 0)'
     [[ "$TIER" != "workload" ]] && want+=' and (.pg_host.value // "" | length > 0)'
-    (cd "$TOFU_DIR" && tofu output -json 2>/dev/null | jq -e "$want" >/dev/null 2>&1)
+    (cd "$TOFU_DIR" && tofu output -json 2>/dev/null | jq -e "$want" >/dev/null 2>&1) || return 1
+
+    # Outputs are not proof either. A resource that fails in the middle of an
+    # apply leaves everything that did not depend on it — cluster and database
+    # included, so the outputs above are all populated — while its own
+    # dependents were never created. That is how a storage account failing its
+    # data-plane check took Loki's blob container and role assignment with it,
+    # quickstart called this step done on the next run, and the breakage only
+    # surfaced hours later as a Helm timeout.
+    #
+    # A resource waiting to be *created* — and only that, actions exactly
+    # ["create"] — means the apply did not finish. Updates and replacements are
+    # drift (tags, rotations, a role assignment whose scope re-resolves on every
+    # plan), and counting them made quickstart declare a finished apply
+    # unfinished and stop. -refresh=false keeps this cheap: a resource missing
+    # from state shows up without polling the cloud.
+    local plan creates
+    plan="$(mktemp)"
+    if ! (cd "$TOFU_DIR" && tofu plan -refresh=false -input=false -lock=false -out="$plan" &>/dev/null); then
+        # Cannot tell — let the step run and print the real error.
+        rm -f "$plan"
+        return 1
+    fi
+    creates="$(cd "$TOFU_DIR" && tofu show -json "$plan" 2>/dev/null \
+        | jq '[.resource_changes[]? | select(.change.actions == ["create"])] | length' 2>/dev/null)"
+    rm -f "$plan"
+    [[ "${creates:-1}" == "0" ]] && return 0
+    QS_DETAIL="tofu still has ${creates:-?} resource(s) to create — the last apply did not finish"
+    return 1
 }
 # The file existing is not enough: a sync that ran against a partially applied
 # state wrote it without PG_HOST, and everything downstream then dialed a local
@@ -261,16 +297,35 @@ det_reachable()  { kc get --raw /readyz >/dev/null; }
 # created.
 det_dbusers()    { [[ "$CLOUD" == "local" || "$CLOUD" == "upcloud" ]] \
                    || kc get configmap devhub-db-users-created -n data-services >/dev/null; }
-det_certs()      { [[ "$ENV" != "local" ]] || [[ -f "${REPO_ROOT}/k8s/certs/domains/local-dev.crt" ]]; }
-# "Deployed" has to mean the components later steps depend on are present, not just
-# that something got installed. Checking only argocd-server let a half-finished
-# deploy look complete, and the Keycloak step then failed on a missing pod.
+# A local certificate on disk is only done while it is still valid: these are
+# short-lived, and an expired one fails every browser and every e2e run with a
+# TLS error rather than anything pointing at the certificate.
+det_certs() {
+    [[ "$ENV" != "local" ]] && return 0
+    local crt="${REPO_ROOT}/k8s/certs/domains/local-dev.crt"
+    [[ -f "$crt" ]] || return 1
+    command -v openssl &>/dev/null || return 0
+    openssl x509 -in "$crt" -noout -checkend 0 >/dev/null 2>&1
+}
+# "Deployed" means the bootstrap components later steps depend on are actually
+# running. Two questions cover it, and the object-existence checks that used to
+# be here (a StatefulSet in keycloak, one in vault, a Deployment in forgejo, a
+# grafana Deployment in monitoring) answered neither: helm reports a release as
+# `deployed` only once its objects went ready, so a release-level check subsumes
+# all four — and none of them noticed a Deployment sitting at zero replicas.
+#
+# The list is deliberately not filtered to a set of expected releases: a release
+# left `failed` (which the non-atomic installs do deliberately, so the pods
+# survive to be read) or wedged in `pending-*` means the deploy did not finish,
+# whichever component it was.
 det_deployed() {
-    kc get deploy argocd-server -n argocd >/dev/null || return 1
-    kc get statefulset -n keycloak -o name 2>/dev/null | grep -q . || return 1
-    kc get statefulset -n vault -o name 2>/dev/null | grep -q . || return 1
-    kc get deploy -n forgejo -o name 2>/dev/null | grep -q . || return 1
-    kc get deploy -n monitoring -o name 2>/dev/null | grep -q grafana
+    # What the next steps talk to, and the one release deploy.sh installs last.
+    [[ -n "$(kc get deploy argocd-server -n argocd -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" ]] || return 1
+
+    local broken
+    broken="$(qs_helm list -A -o json 2>/dev/null \
+              | jq -r '.[]? | select(.status != "deployed") | "\(.namespace)/\(.name) (\(.status))"' 2>/dev/null)"
+    [[ -z "$broken" ]] || { QS_DETAIL="helm releases not deployed: $(echo "$broken" | tr '\n' ' ')"; return 1; }
 }
 
 # The Gateway is what makes anything reachable; check the controller and that the
@@ -338,7 +393,15 @@ det_vaultoidc() {
         VAULT_TOKEN="$token" vault auth list -format=json 2>/dev/null \
         | jq -e '."oidc/"' >/dev/null 2>&1
 }
-det_secrets()    { kc get externalsecret forgejo-db-secret -n forgejo >/dev/null; }
+# The ExternalSecret existing says the manifest was applied, not that External
+# Secrets could read Vault — an unsealed-but-unauthorised ESO leaves the object
+# in place with no Secret behind it, and Forgejo then starts without a database
+# password. Require the sync to have actually happened.
+det_secrets() {
+    kc get externalsecret forgejo-db-secret -n forgejo >/dev/null || return 1
+    [[ "$(kc get externalsecret forgejo-db-secret -n forgejo \
+          -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" == "True" ]]
+}
 det_appofapps()  { kc get application devhub-apps -n argocd >/dev/null; }
 # CI secrets: the stored Woodpecker token is the marker (ci-secrets stores it
 # for the portal's scaffold-time repo activation), and "placeholder" is the
@@ -368,6 +431,8 @@ STEP_KEYS=()
 STEP_LABEL=()
 STEP_DETECT=()
 STEP_ACTION=()
+STEP_DETAIL=()
+QS_DETAIL=""
 
 step() {
     STEP_KEYS+=("$1"); STEP_LABEL+=("$2"); STEP_DETECT+=("$3"); STEP_ACTION+=("$4")
@@ -430,18 +495,25 @@ fi
 STEP_STATE=()
 NEXT_INDEX=-1
 
+# A detector may set QS_DETAIL to say *what* it found missing; the checklist
+# prints it under the step. "Platform deployed" going from ✓ to → is a mystery
+# on its own — "helm releases not deployed: monitoring/loki (failed)" is not.
 refresh_state() {
     STEP_STATE=()
+    STEP_DETAIL=()
     NEXT_INDEX=-1
     local i
     for i in "${!STEP_KEYS[@]}"; do
+        QS_DETAIL=""
         if "${STEP_DETECT[$i]}"; then
             STEP_STATE+=("done")
         else
             STEP_STATE+=("todo")
             [[ $NEXT_INDEX -lt 0 ]] && NEXT_INDEX=$i
         fi
+        STEP_DETAIL+=("$QS_DETAIL")
     done
+    QS_DETAIL=""
 }
 
 # Which account to sign in with is not guessable, and the two that exist are easy
@@ -503,6 +575,7 @@ print_checklist() {
             mark="·"; colour="$DIM"
         fi
         printf '  %b%s %s%b\n' "$colour" "$mark" "${STEP_LABEL[$i]}" "$NC"
+        [[ -n "${STEP_DETAIL[$i]:-}" ]] && printf '      %b%s%b\n' "$DIM" "${STEP_DETAIL[$i]}" "$NC"
     done
     echo ""
 
@@ -572,6 +645,9 @@ run_step() {
     # ENV_DIR may be created here as $logdir's parent, so tighten both.
     chmod 700 "$ENV_DIR" "$logdir"
     logfile="${logdir}/$(date +%Y%m%d-%H%M%S)-${key}.log"
+    # Where the caller reports a failure from — a step that dies mid-run has to
+    # point at its own log, not at the directory.
+    LAST_STEP_LOG="$logfile"
     # Created with the right mode before tee ever opens it.
     (umask 077; : > "$logfile")
 
@@ -623,7 +699,17 @@ run_all_pending() {
 
         local before="${STEP_KEYS[$NEXT_INDEX]}"
         local before_index=$NEXT_INDEX
-        run_step "$NEXT_INDEX" || return 1
+        # Say what broke. Unattended runs (--auto, --run-remaining-steps) end
+        # here with whatever the step printed already scrolled past, so a bare
+        # `return 1` looked like the script exiting for no reason.
+        if ! run_step "$before_index"; then
+            echo ""
+            log_error "Step failed: ${STEP_LABEL[$before_index]}"
+            log_error "  command: ./devhub ${STEP_ACTION[$before_index]}"
+            [[ -n "${LAST_STEP_LOG:-}" ]] && log_error "  full log: ${LAST_STEP_LOG}"
+            log_error "Fix the cause, then re-run quickstart — it resumes here."
+            return 1
+        fi
 
         # Not every step finishes when its command returns. Handing the platform
         # to ArgoCD is the clear case: the push succeeds, then the Applications

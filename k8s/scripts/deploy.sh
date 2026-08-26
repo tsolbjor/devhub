@@ -173,12 +173,11 @@ install_cert_manager() {
         cm_values+=(-f "${dir}/cert-manager-cloud.yaml")
     fi
 
-    helm upgrade --install cert-manager jetstack/cert-manager \
-        --namespace cert-manager \
+    helm_install_logged cert-manager jetstack/cert-manager cert-manager \
         --create-namespace \
         --version "$CHART_CERT_MANAGER" \
         "${cm_values[@]}" \
-        --atomic --timeout 5m
+        --wait --timeout 5m
 
     kubectl wait --for=condition=ready pod -l app=webhook -n cert-manager --timeout=60s
 
@@ -549,12 +548,11 @@ install_vault() {
         fi
     fi
 
-    helm upgrade --install vault hashicorp/vault \
-        --namespace vault \
+    helm_install_logged vault hashicorp/vault vault \
         --version "$CHART_VAULT" \
         $values_args \
         $extra_args \
-        --atomic --timeout 5m
+        --wait --timeout 5m
 
     # Scheduled raft snapshots (consistent backups Vault can actually restore).
     kubectl apply -f "${BASE_DIR}/devops/vault/raft-snapshot-cronjob.yaml"
@@ -612,8 +610,8 @@ install_external_dns() {
 
     # UpCloud has no external-dns provider; the overlay uses Cloudflare with a
     # hand-made token secret (preflight prints the command). Installing without
-    # it would not merely degrade — the pod never starts and --atomic below
-    # rolls the release back, failing the whole deploy. Skip and say why.
+    # it would not merely degrade — the pod never starts, so the install below
+    # never goes ready and the whole deploy fails. Skip and say why.
     if [[ "$CLOUD" == "upcloud" ]]; then
         kubectl create namespace external-dns 2>/dev/null || true
         if ! kubectl get secret external-dns-cloudflare -n external-dns &>/dev/null; then
@@ -649,12 +647,11 @@ install_external_dns() {
 
     local values_args=$(get_values_args "external-dns")
 
-    helm upgrade --install external-dns external-dns/external-dns \
-        --namespace external-dns \
+    helm_install_logged external-dns external-dns/external-dns external-dns \
         --create-namespace \
         --version "$CHART_EXTERNAL_DNS" \
         $values_args \
-        --atomic --timeout 5m
+        --wait --timeout 5m
 
     log_info "external-dns installed"
 }
@@ -662,12 +659,11 @@ install_external_dns() {
 install_external_secrets() {
     log_step "Installing External Secrets..."
 
-    helm upgrade --install external-secrets external-secrets/external-secrets \
-        --namespace external-secrets \
+    helm_install_logged external-secrets external-secrets/external-secrets external-secrets \
         --create-namespace \
         --version "$CHART_EXTERNAL_SECRETS" \
         -f "${BASE_DIR}/devops/external-secrets/values.yaml" \
-        --atomic --timeout 10m
+        --wait --timeout 10m
 
     log_info "External Secrets installed"
 }
@@ -746,32 +742,55 @@ install_monitoring() {
         prom_args="$prom_args -f ${dir}/monitoring-overlay-values.yaml"
     fi
 
-    # An empty webhook is not merely undelivered mail: the platform-slack
-    # receiver reads its URL from api_url_file, and an empty file fails every
-    # notify with `unsupported protocol scheme ""`, which fires
-    # AlertmanagerFailedToSendAlerts and AlertmanagerClusterFailedToSendAlerts —
-    # critical alerts whose only cause is having nowhere to send alerts.
+    # Two independent settings have to agree: the webhook secret, and which
+    # receiver the values files route to. Neither can be inferred from the other
+    # at deploy time — ArgoCD renders these values straight from git after the
+    # handover, so a receiver chosen by this script is reverted on the next sync.
+    # Both directions of disagreement are worth saying out loud:
     #
-    # The fix belongs in the overlay, not here: monitoring is reconciled by
-    # ArgoCD after the GitOps handover, so anything applied only from this script
-    # is reverted on the next sync. local ships the override already.
-    local webhook
+    #   webhook set, routing null    → alerts fire and nobody is ever told
+    #   no webhook, routing slack    → the receiver reads an empty api_url_file,
+    #                                  fails every notify with `unsupported
+    #                                  protocol scheme ""`, and fires
+    #                                  AlertmanagerFailedToSendAlerts — a
+    #                                  permanent critical alert whose only cause
+    #                                  is having nowhere to send alerts
+    #
+    # The base values default to platform-null, so the second case now takes an
+    # overlay that opted into Slack without a webhook to reach.
+    local webhook effective_receiver
     webhook="$(kubectl get secret alertmanager-slack -n monitoring \
         -o jsonpath='{.data.webhook-url}' 2>/dev/null | base64 -d 2>/dev/null || true)"
-    if [[ -z "$webhook" ]] && ! grep -q 'receiver: platform-null' "$overlay_values" 2>/dev/null; then
-        log_warn "No Alertmanager webhook, and this overlay still routes to platform-slack."
+    # The overlay wins where it says anything; otherwise the base decides.
+    if grep -q 'receiver: platform-slack' "$overlay_values" 2>/dev/null; then
+        effective_receiver="platform-slack"
+    elif grep -q 'receiver: platform-null' "$overlay_values" 2>/dev/null; then
+        effective_receiver="platform-null"
+    elif grep -q 'receiver: platform-slack' "$base_values" 2>/dev/null; then
+        effective_receiver="platform-slack"
+    else
+        effective_receiver="platform-null"
+    fi
+
+    if [[ -z "$webhook" && "$effective_receiver" == "platform-slack" ]]; then
+        log_warn "No Alertmanager webhook, and this overlay routes to platform-slack."
         log_warn "Alertmanager will fail every notification and alert about the failure."
         log_warn "Either set a webhook:"
         log_warn "  vault kv put secret/platform/alertmanager webhook-url=https://hooks.slack.com/..."
         log_warn "or route to the null receiver in ${overlay_values#"${K8S_DIR}/"}"
         log_warn "(see k8s/overlays/local/devops/monitoring/values.yaml for the shape)."
+    elif [[ -n "$webhook" && "$effective_receiver" == "platform-null" ]]; then
+        log_warn "An Alertmanager webhook is set, but alerts route to platform-null —"
+        log_warn "they stay visible in the Alertmanager and Grafana UIs and are"
+        log_warn "delivered nowhere. To deliver them, route to platform-slack in"
+        log_warn "  ${overlay_values#"${K8S_DIR}/"}"
+        log_warn "(committed, because ArgoCD renders it from git after the handover)."
     fi
 
-    helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
-        --namespace monitoring \
+    helm_install_logged prometheus prometheus-community/kube-prometheus-stack monitoring \
         --version "$CHART_PROMETHEUS_STACK" \
         $prom_args \
-        --atomic --timeout 10m
+        --wait --timeout 10m
 
     # Platform-specific alert rules (sealed Vault, stuck syncs, failed backups)
     kubectl apply -f "${BASE_DIR}/devops/monitoring/platform-alerts.yaml"
@@ -797,6 +816,7 @@ install_monitoring() {
                     --from-literal=AWS_SECRET_ACCESS_KEY="${LOKI_S3_SECRET_ACCESS_KEY}" \
                     --dry-run=client -o yaml | kubectl apply -f -
             fi
+            require_object_store "Loki" "${LOKI_BUCKET:-${LOKI_CONTAINER:-}}" || return 1
             template_values "$loki_overlay" "${dir}/loki-overlay-values.yaml"
             loki_args="$loki_args -f ${dir}/loki-overlay-values.yaml"
             log_info "Loki cloud object storage enabled (${LOKI_BUCKET:-${LOKI_CONTAINER:-}})"
@@ -805,23 +825,21 @@ install_monitoring() {
         fi
     fi
 
-    helm upgrade --install loki grafana/loki \
-        --namespace monitoring \
+    # shellcheck disable=SC2086
+    helm_install_logged loki grafana/loki monitoring \
         --version "$CHART_LOKI" \
         $loki_args \
-        --atomic --timeout 10m
+        --wait --timeout 10m
 
-    helm upgrade --install tempo grafana/tempo \
-        --namespace monitoring \
+    helm_install_logged tempo grafana/tempo monitoring \
         --version "$CHART_TEMPO" \
         -f "${BASE_DIR}/devops/monitoring/tempo-values.yaml" \
-        --atomic --timeout 5m
+        --wait --timeout 5m
 
-    helm upgrade --install alloy grafana/alloy \
-        --namespace monitoring \
+    helm_install_logged alloy grafana/alloy monitoring \
         --version "$CHART_ALLOY" \
         -f "${BASE_DIR}/devops/monitoring/alloy-values.yaml" \
-        --atomic --timeout 5m
+        --wait --timeout 5m
 
     setup_loki_auth
 
@@ -854,6 +872,8 @@ install_velero() {
         return 0
     fi
 
+    require_object_store "Velero" "${VELERO_BUCKET:-${VELERO_CONTAINER:-}}" || return 1
+
     log_step "Installing Velero (cluster backups)..."
 
     kubectl create namespace velero 2>/dev/null || true
@@ -870,11 +890,10 @@ aws_secret_access_key=${VELERO_S3_SECRET_ACCESS_KEY}" \
 
     local values_args=$(get_values_args "velero")
 
-    helm upgrade --install velero vmware-tanzu/velero \
-        --namespace velero \
+    helm_install_logged velero vmware-tanzu/velero velero \
         --version "$CHART_VELERO" \
         $values_args \
-        --atomic --timeout 10m
+        --wait --timeout 10m
 
     log_info "Velero installed — daily full backups at 02:00, platform state hourly"
 }
@@ -890,8 +909,7 @@ install_cluster_autoscaler() {
 
     log_step "Installing cluster-autoscaler..."
 
-    helm upgrade --install cluster-autoscaler autoscaler/cluster-autoscaler \
-        --namespace kube-system \
+    helm_install_logged cluster-autoscaler autoscaler/cluster-autoscaler kube-system \
         --version "$CHART_CLUSTER_AUTOSCALER" \
         --set autoDiscovery.clusterName="${CLUSTER_NAME}" \
         --set awsRegion="${AWS_REGION}" \
@@ -900,7 +918,7 @@ install_cluster_autoscaler() {
         --set extraArgs.balance-similar-node-groups=true \
         --set extraArgs.skip-nodes-with-local-storage=false \
         --set priorityClassName=platform-standard \
-        --atomic --timeout 5m
+        --wait --timeout 5m
 
     log_info "cluster-autoscaler installed"
 }
@@ -936,11 +954,10 @@ install_forgejo() {
 
     local values_args=$(get_values_args "forgejo")
 
-    helm upgrade --install forgejo oci://code.forgejo.org/forgejo-helm/forgejo \
-        --namespace forgejo \
+    helm_install_logged forgejo oci://code.forgejo.org/forgejo-helm/forgejo forgejo \
         --version "$CHART_FORGEJO" \
         $values_args \
-        --atomic --timeout 10m
+        --wait --timeout 10m
 
     log_info "Forgejo installed — https://git.${DOMAIN}"
 }
@@ -974,11 +991,10 @@ install_woodpecker() {
 
     local values_args=$(get_values_args "woodpecker")
 
-    helm upgrade --install woodpecker woodpecker/woodpecker \
-        --namespace woodpecker \
+    helm_install_logged woodpecker woodpecker/woodpecker woodpecker \
         --version "$CHART_WOODPECKER" \
         $values_args \
-        --atomic --timeout 10m
+        --wait --timeout 10m
 
     log_info "Woodpecker installed — https://ci.${DOMAIN}"
 }
@@ -1123,11 +1139,10 @@ install_argocd() {
         log_info "ArgoCD trusts the local CA for git.${DOMAIN}"
     fi
 
-    helm upgrade --install argocd argo/argo-cd \
-        --namespace argocd \
+    helm_install_logged argocd argo/argo-cd argocd \
         --version "$CHART_ARGOCD" \
         $values_args $extra_args \
-        --atomic --timeout 5m
+        --wait --timeout 5m
 
     log_info "ArgoCD installed"
 }
@@ -1169,11 +1184,10 @@ EOF
 
     local values_args=$(get_values_args "headlamp")
 
-    helm upgrade --install headlamp headlamp/headlamp \
-        --namespace headlamp \
+    helm_install_logged headlamp headlamp/headlamp headlamp \
         --version "$CHART_HEADLAMP" \
         $values_args \
-        --atomic --timeout 5m
+        --wait --timeout 5m
 
     # Applied after the chart so the HTTPRoute's backend resolves.
     local dir
@@ -1213,11 +1227,10 @@ install_homepage() {
 
     local values_args=$(get_values_args "homepage")
 
-    helm upgrade --install homepage jameswynn/homepage \
-        --namespace homepage \
+    helm_install_logged homepage jameswynn/homepage homepage \
         --version "$CHART_HOMEPAGE" \
         $values_args \
-        --atomic --timeout 5m
+        --wait --timeout 5m
 
     # The SecurityPolicy targets the HTTPRoute, so it is applied here rather than
     # with the routes: without the Service behind it the route does not resolve
@@ -1782,7 +1795,7 @@ ensure_argocd_repo_creds() {
 #   - the registry pull token in Vault (secret/forgejo/registry-pull-token),
 #     which every app namespace's ExternalSecret turns into a pull secret
 #   - the letsencrypt-dns01 ClusterIssuer, so the gateway's wildcard apps
-#     listener (overlays/<cloud>/devops/gateway.yaml) gets its certificate
+#     listener (base/devops/gateway.yaml) gets its certificate
 # Everything is idempotent; undo the registration with:
 #   kubectl delete secret cluster-<env>-workload -n argocd
 enable_workload_target() {
@@ -1961,17 +1974,34 @@ install_gateway() {
 
     local values_args=$(get_values_args "gateway")
 
-    helm upgrade --install envoy-gateway oci://docker.io/envoyproxy/gateway-helm \
-        --namespace envoy-gateway-system \
+    helm_install_logged envoy-gateway oci://docker.io/envoyproxy/gateway-helm envoy-gateway-system \
         --create-namespace \
         --version "$CHART_ENVOY_GATEWAY" \
         $values_args \
-        --atomic --timeout 10m
+        --wait --timeout 10m
 
     kubectl wait --for=condition=Available deploy/envoy-gateway \
         -n envoy-gateway-system --timeout=300s || true
 
     log_info "Envoy Gateway installed"
+}
+
+# Print a multi-document manifest with every cert-manager document removed.
+# POSIX awk, one document at a time — no yq, matching yaml_get's approach.
+strip_cert_manager_docs() {
+    awk '
+        function flush() {
+            if (buf != "" && buf !~ /apiVersion: cert-manager\.io/) {
+                if (printed) print "---"
+                printf "%s", buf
+                printed = 1
+            }
+            buf = ""
+        }
+        /^---[[:space:]]*$/ { flush(); next }
+        { buf = buf $0 "\n" }
+        END { flush() }
+    ' "$1"
 }
 
 # The Gateway (listeners + TLS) and the HTTPRoutes that attach to it.
@@ -1990,10 +2020,25 @@ apply_gateway_routes() {
     fi
 
     local dir; dir="$(render_dir)"
-    template_values "${OVERLAY_DIR}/devops/gateway.yaml" "${dir}/gateway.yaml"
-    kubectl apply -f "${dir}/gateway.yaml"
+    template_values "$(devops_manifest gateway.yaml)" "${dir}/gateway.yaml"
+    # gateway.yaml also declares the apps listener's wildcard Certificate, but
+    # cert-manager comes later in the graph — on the first pass its CRDs do not
+    # exist and `kubectl apply` fails the whole file ("no matches for kind
+    # Certificate"), taking the install down with it. Apply everything else now;
+    # deploy_devops calls this again after cert-manager, which is where the
+    # Certificate lands. A standalone `deploy <env> gateway` says the same.
+    if kubectl get crd certificates.cert-manager.io &>/dev/null; then
+        kubectl apply -f "${dir}/gateway.yaml"
+    else
+        strip_cert_manager_docs "${dir}/gateway.yaml" >"${dir}/gateway-nocerts.yaml"
+        kubectl apply -f "${dir}/gateway-nocerts.yaml"
+        if ! diff -q "${dir}/gateway.yaml" "${dir}/gateway-nocerts.yaml" >/dev/null; then
+            log_warn "cert-manager is not installed yet — deferred the Certificates in gateway.yaml"
+            log_warn "They are applied by the second routes pass, or by: ./devhub deploy --env ${ENV} gateway"
+        fi
+    fi
 
-    template_values "${OVERLAY_DIR}/devops/httproutes.yaml" "${dir}/httproutes.yaml"
+    template_values "$(devops_manifest httproutes.yaml)" "${dir}/httproutes.yaml"
     kubectl apply -f "${dir}/httproutes.yaml"
 
     log_info "Gateway and routes applied"
@@ -2049,12 +2094,11 @@ install_kyverno() {
 
     local values_args=$(get_values_args "kyverno")
 
-    helm upgrade --install kyverno kyverno/kyverno \
-        --namespace kyverno \
+    helm_install_logged kyverno kyverno/kyverno kyverno \
         --create-namespace \
         --version "$CHART_KYVERNO" \
         $values_args \
-        --atomic --timeout 10m
+        --wait --timeout 10m
 
     kubectl wait --for=condition=Available deploy \
         -l app.kubernetes.io/component=admission-controller \
@@ -2074,12 +2118,11 @@ install_reloader() {
 
     local values_args=$(get_values_args "reloader")
 
-    helm upgrade --install reloader stakater/reloader \
-        --namespace reloader \
+    helm_install_logged reloader stakater/reloader reloader \
         --create-namespace \
         --version "$CHART_RELOADER" \
         $values_args \
-        --atomic --timeout 5m
+        --wait --timeout 5m
 
     log_info "Reloader installed"
 }

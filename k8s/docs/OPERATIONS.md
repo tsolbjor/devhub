@@ -774,7 +774,10 @@ attached to that route; Gateway API itself has no auth primitive.
 
 ## 11. Alerting
 
-Alertmanager routes to Slack via a webhook stored in Vault:
+Delivering alerts takes **two** changes, and `deploy.sh` warns whenever they
+disagree in either direction.
+
+1. The webhook, stored in Vault:
 
 ```bash
 vault kv put secret/platform/alertmanager webhook-url=https://hooks.slack.com/services/...
@@ -782,8 +785,20 @@ kubectl annotate externalsecret alertmanager-slack -n monitoring \
   force-sync="$(date +%s)" --overwrite
 ```
 
-With an empty webhook the config still loads and alerts remain visible in the
-Alertmanager UI — but nothing is delivered, so set it.
+2. The routing, in the cloud overlay
+   (`k8s/overlays/<cloud>/devops/monitoring/values.yaml`): change the route's
+   `receiver` — and the critical and warning routes under it — from
+   `platform-null` to `platform-slack`. It has to be committed: ArgoCD renders
+   these values from git after the handover, so nothing a script substitutes at
+   deploy time survives.
+
+Routing defaults to `platform-null`: every alert is visible in the Alertmanager
+and Grafana UIs and delivered nowhere. That is deliberate. Defaulting to
+`platform-slack` meant that every environment, on its first deploy and before
+anyone had a webhook, ran a receiver reading an empty `api_url_file` — failing
+every notification with `unsupported protocol scheme ""` and firing
+`AlertmanagerFailedToSendAlerts`, a permanent critical alert whose only cause was
+having nowhere to send alerts.
 
 Platform rules (`k8s/base/devops/monitoring/platform-alerts.yaml`) cover a sealed
 or leaderless Vault, certificates that stopped renewing or expired

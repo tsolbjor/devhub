@@ -71,7 +71,7 @@ server:
     size: 10Gi
     storageClass: null  # Use default
 
-  # Routing is a Gateway API HTTPRoute (overlays/<env>/devops/httproutes.yaml).
+  # Routing is a Gateway API HTTPRoute (base/devops/httproutes.yaml).
   ingress:
     enabled: false
 

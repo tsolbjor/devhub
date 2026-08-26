@@ -318,7 +318,34 @@ locals {
   storage_account_name = substr(replace(lower(var.prefix), "-", ""), 0, 19)
 }
 
+# The account below turns shared keys off, so every data-plane call — including
+# the provider's own post-create poll of the blob service (hence
+# storage_use_azuread in the root providers.tf) — authenticates as the identity
+# running tofu. Owner and Contributor grant no *data* actions, so without this
+# assignment that poll gets 403 and the account resource fails mid-apply,
+# skipping its containers and the Loki/Velero role assignments; Loki then dies
+# on AuthorizationPermissionMismatch and the whole deploy rolls back.
+#
+# Resource-group scope, because the account does not exist yet when the poll
+# needs the permission.
+resource "azurerm_role_assignment" "tofu_storage_data" {
+  scope                = azurerm_resource_group.main.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+# Azure RBAC is eventually consistent: the assignment above is visible to ARM
+# immediately but takes up to a couple of minutes to reach the storage data
+# plane, and the provider's poll does not retry a 403. Waiting here costs one
+# minute on the first apply and nothing on later ones.
+resource "time_sleep" "tofu_storage_data_propagation" {
+  depends_on      = [azurerm_role_assignment.tofu_storage_data]
+  create_duration = "90s"
+}
+
 resource "azurerm_storage_account" "main" {
+  depends_on = [time_sleep.tofu_storage_data_propagation]
+
   name                     = "${local.storage_account_name}store"
   resource_group_name      = azurerm_resource_group.main.name
   location                 = azurerm_resource_group.main.location

@@ -111,8 +111,7 @@ install_cert_manager() {
         cm_values=(-f "${dir}/cert-manager-cloud.yaml")
     fi
 
-    helm upgrade --install cert-manager jetstack/cert-manager \
-        --namespace cert-manager \
+    helm_install_logged cert-manager jetstack/cert-manager cert-manager \
         --create-namespace \
         --version "$CHART_CERT_MANAGER" \
         "${cm_values[@]+"${cm_values[@]}"}" \
@@ -121,7 +120,7 @@ install_cert_manager() {
         --set config.apiVersion=controller.config.cert-manager.io/v1alpha1 \
         --set config.kind=ControllerConfiguration \
         --set config.enableGatewayAPI=true \
-        --atomic --timeout 5m
+        --wait --timeout 5m
 
     log_step "Creating Let's Encrypt ClusterIssuers..."
 
@@ -158,12 +157,11 @@ EOF
 install_gateway() {
     log_step "Installing Envoy Gateway..."
 
-    helm upgrade --install envoy-gateway oci://docker.io/envoyproxy/gateway-helm \
-        --namespace envoy-gateway-system \
+    helm_install_logged envoy-gateway oci://docker.io/envoyproxy/gateway-helm envoy-gateway-system \
         --create-namespace \
         --version "$CHART_ENVOY_GATEWAY" \
         -f "${BASE_DIR}/devops/gateway/values.yaml" \
-        --atomic --timeout 10m
+        --wait --timeout 10m
 
     kubectl wait --for=condition=Available deploy/envoy-gateway \
         -n envoy-gateway-system --timeout=300s || true
@@ -190,12 +188,11 @@ apply_gateway() {
 install_kyverno() {
     log_step "Installing Kyverno..."
 
-    helm upgrade --install kyverno kyverno/kyverno \
-        --namespace kyverno \
+    helm_install_logged kyverno kyverno/kyverno kyverno \
         --create-namespace \
         --version "$CHART_KYVERNO" \
         -f "${BASE_DIR}/devops/kyverno/values.yaml" \
-        --atomic --timeout 10m
+        --wait --timeout 10m
 
     kubectl wait --for=condition=Available deploy \
         -l app.kubernetes.io/component=admission-controller \
@@ -243,13 +240,12 @@ install_external_dns() {
 
     kubectl create namespace external-dns 2>/dev/null || true
 
-    helm upgrade --install external-dns external-dns/external-dns \
-        --namespace external-dns \
+    helm_install_logged external-dns external-dns/external-dns external-dns \
         --version "$CHART_EXTERNAL_DNS" \
         -f "${dir}/external-dns-base.yaml" \
         -f "${dir}/external-dns-cloud.yaml" \
         --set txtOwnerId="${ENV}" \
-        --atomic --timeout 5m
+        --wait --timeout 5m
 
     log_info "external-dns installed (owner id: ${ENV})"
 }
@@ -257,13 +253,12 @@ install_external_dns() {
 install_external_secrets() {
     log_step "Installing External Secrets Operator..."
 
-    helm upgrade --install external-secrets external-secrets/external-secrets \
-        --namespace external-secrets \
+    helm_install_logged external-secrets external-secrets/external-secrets external-secrets \
         --create-namespace \
         --version "$CHART_EXTERNAL_SECRETS" \
         --set installCRDs=true \
         --set global.priorityClassName=platform-standard \
-        --atomic --timeout 5m
+        --wait --timeout 5m
 
     log_info "External Secrets Operator installed"
 
@@ -312,11 +307,10 @@ install_alloy() {
     envsubst '${PLATFORM_LOKI_URL} ${ENV}' \
         < "${BASE_DIR}/workload/alloy-values.yaml" > "${dir}/alloy-values.yaml"
 
-    helm upgrade --install alloy grafana/alloy \
-        --namespace monitoring \
+    helm_install_logged alloy grafana/alloy monitoring \
         --version "$CHART_ALLOY" \
         -f "${dir}/alloy-values.yaml" \
-        --atomic --timeout 5m
+        --wait --timeout 5m
 
     log_info "Alloy installed (tenant: ${ENV} → ${PLATFORM_LOKI_URL})"
 }
