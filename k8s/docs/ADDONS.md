@@ -89,4 +89,27 @@ supported in-place upgrade.
 
 | Add-on | What it does | Manual setup |
 |---|---|---|
-| `addon-renovate` | Renovate bot: dependency-update PRs for every `devhub`-org repo, daily | one Forgejo token into Vault (`secret/apps/addon-renovate`) |
+| `addon-renovate` | Renovate bot: dependency-update PRs for every `devhub`-org repo, daily — **including the platform repository itself** (see below) | one Forgejo token into Vault (`secret/apps/addon-renovate`) |
+
+### The renovate add-on also maintains the platform
+
+`./devhub gitops-repo` publishes the platform into this Forgejo as
+`devhub/<repo>`, and it ships a `renovate.json` whose custom managers read the
+chart pins where they live — the deploy scripts and `platform-appset.yaml`. That
+file does nothing on its own: something has to *run* Renovate.
+
+`addon-renovate` autodiscovers `devhub/*`, which is where the platform
+repository lives, so enabling it is what makes "chart pins keep moving after the
+handover" true rather than aspirational. Nothing extra to configure; a
+platform-chart PR simply appears alongside the application ones.
+
+Two caveats worth knowing before relying on it:
+
+- The autodiscover filter is literally `devhub/*`. A platform repository
+  published into a different organisation needs that org added to
+  `autodiscoverFilter` in the add-on's `k8s/renovate-config.yaml`.
+- A merged bump to `platform-appset.yaml` takes effect on its own, because
+  `platform-config` reconciles it. A merged bump in `k8s/scripts/deploy.sh`
+  touches a bootstrap component ArgoCD does not manage, so it still needs
+  `./deploy.sh --env <env> <component>`. The generated `.woodpecker.yml` says so
+  on the merge, and `deploy.sh all status` shows pinned against installed.

@@ -593,6 +593,29 @@ against this environment's values before the merge. Bumps in the deploy scripts
 still need `./deploy.sh --env <env> <component>` to be run — Renovate cannot
 restart Vault for you.
 
+### What runs Renovate
+
+`renovate.json` is configuration, not a bot. In a handed-over environment the
+thing that runs it is already on the platform: enable the **renovate add-on**
+(portal → Add-ons, or `k8s/docs/ADDONS.md`). It autodiscovers `devhub/*` in the
+environment's own Forgejo, which is where `gitops-repo` published the platform
+repository — so the add-on that maintains application repositories maintains the
+platform too, with nothing extra to configure. Without it, or an external
+Renovate pointed at the repository, the pins do not move at all.
+
+### Seeing the half that Renovate cannot apply
+
+The asymmetry above is invisible in a diff: the repository says 1.9.0, the
+cluster runs 1.8.2, and no Application is out of sync because ArgoCD never
+managed that release. Two things now say it out loud:
+
+- `./devhub drift --env <env>` (also the tail of `./devhub status --env <env>`)
+  lists every pin against the installed chart version, and which half owns it.
+- the generated `.woodpecker.yml` has a `pending-restart` step: when a commit
+  changes a bootstrap pin, it prints the exact `deploy.sh` commands that merge
+  will owe. Informational by default — add `--strict` to the step to fail the
+  pipeline instead.
+
 ### What Renovate cannot cover
 
 This is the honest list, and every item on it is a change a human has to make:

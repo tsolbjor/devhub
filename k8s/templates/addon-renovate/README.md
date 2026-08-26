@@ -5,6 +5,16 @@ every repository in the `devhub` organisation and opens pull requests for
 outdated dependencies — the self-hosted equivalent of Dependabot, talking to
 Forgejo through its Gitea-compatible API.
 
+**This includes the platform repository.** `./devhub gitops-repo` publishes the
+platform as `devhub/<repo>` in this same Forgejo, with a `renovate.json` whose
+custom managers know where the Helm chart pins live (the deploy scripts and
+`k8s/argocd/platform-appset.yaml`). That file needs something to run Renovate,
+and `autodiscover: devhub/*` below is that something — so this add-on is what
+keeps the platform's own charts moving after the handover, not just the
+applications'. See `k8s/docs/ADDONS.md` for the two caveats (a repository in a
+different organisation needs the filter widened, and a bootstrap-component bump
+still needs `deploy.sh <component>` run).
+
 ## How it deploys
 
 This directory is published to `devhub-templates/addon-renovate` by

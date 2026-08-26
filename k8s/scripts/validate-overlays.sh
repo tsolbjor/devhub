@@ -239,14 +239,50 @@ stub_infra_vars() {
     export PG_PORT="${PG_PORT:-5432}" REDIS_PORT="${REDIS_PORT:-6379}"
 }
 
+# Every chart is pinned twice — in the deploy scripts and in
+# platform-appset.yaml — because one half installs it and the other reconciles
+# it. Renovate keeps them together with `groupName: helm chart {{depName}}`, but
+# only for pins its regexes still match: reformat a pin, add an appset entry
+# without the annotated constant, or introduce a chart whose datasource the
+# custom manager excludes, and one location silently freezes while the other
+# moves. The symptom is ArgoCD and deploy.sh installing different versions of
+# the same chart, which nothing else here would notice.
+check_chart_pin_consistency() {
+    local appset="${K8S_DIR}/argocd/platform-appset.yaml"
+    [[ -f "$appset" ]] || return 0
+
+    log_step "Cross-checking chart pins (deploy scripts vs platform-appset.yaml)..."
+
+    local chart version pinned
+    # chart/repo/version arrive as a triplet in that order — the same shape the
+    # renovate custom manager matches.
+    while read -r chart version; do
+        [[ -n "$chart" && -n "$version" ]] || continue
+        pinned="${CHART_PINS_BY_NAME[$chart]:-}"
+        if [[ -z "$pinned" ]]; then
+            fail "platform-appset.yaml pins ${chart} ${version}, but no annotated CHART_* constant in the deploy scripts declares depName=${chart} — Renovate will bump one and not the other"
+        elif [[ "$pinned" != "$version" ]]; then
+            fail "chart ${chart} is pinned twice and they disagree: platform-appset.yaml ${version}, deploy scripts ${pinned}"
+        fi
+    done < <(awk '
+        /^[[:space:]]*- component:/ { chart=""; version="" }
+        /^[[:space:]]*chart:/       { chart=$2 }
+        /^[[:space:]]*version:/     { version=$2; if (chart != "") { print chart, version; chart=""; version="" } }
+    ' "$appset")
+}
+
 # Chart versions are pinned in the deploy scripts; this validator used to keep a
 # third copy of them, which a Renovate bump silently left behind (the bump lands
 # in the scripts and in platform-appset.yaml — both annotated — and nowhere near
 # here). Parse the `CHART_*="<version>"` lines instead: one source of truth, and
 # a rename or a removed pin becomes a failure rather than a stale assertion.
 declare -A CHART_PINS=()
+# depName → version, from the renovate annotation on each pin. depName is the
+# chart's real name, which is what platform-appset.yaml carries, so this is the
+# key the two pin locations can be compared on.
+declare -A CHART_PINS_BY_NAME=()
 load_chart_pins() {
-    local script line var version found=0
+    local script line var version dep found=0
     for script in "${SCRIPT_DIR}/deploy.sh" "${SCRIPT_DIR}/deploy-workload.sh"; do
         # deploy-workload.sh is absent from a platform-only published repo; its
         # pins all also appear in deploy.sh, so that is not an error.
@@ -254,6 +290,9 @@ load_chart_pins() {
             [[ "$script" == *deploy.sh ]] && fail "chart pins: ${script} not found"
             continue
         fi
+        # The whole line, not just the constant: the renovate annotation after it
+        # carries depName, which is the chart's real name and the only key the
+        # appset pins can be compared on.
         while IFS= read -r line; do
             var="${line%%=*}"
             version="${line#*=\"}"
@@ -261,7 +300,10 @@ load_chart_pins() {
             [[ -n "$version" ]] || continue
             CHART_PINS[$var]="$version"
             found=$((found + 1))
-        done < <(grep -oE '^CHART_[A-Z_]+="[^"]+"' "$script")
+            dep=""
+            [[ "$line" =~ depName=([^[:space:]]+) ]] && dep="${BASH_REMATCH[1]}"
+            [[ -n "$dep" ]] && CHART_PINS_BY_NAME[$dep]="$version"
+        done < <(grep -E '^CHART_[A-Z_]+="[^"]+"' "$script")
     done
     (( found > 0 )) || fail "chart pins: no CHART_*= lines found in the deploy scripts"
 }
@@ -416,11 +458,11 @@ echo "=============================================="
 check_yaml_syntax
 check_placeholders
 check_appset_values
+# Pins first: the cross-check reads them, and it runs unconditionally — two pins
+# disagreeing is a defect whether or not this invocation renders charts.
+load_chart_pins
+check_chart_pin_consistency
 check_devhub_app_chart
-
-if $RUN_HELM; then
-    load_chart_pins
-fi
 
 for env in "${ENVS[@]}"; do
     log_step "Checking environment: ${env}"

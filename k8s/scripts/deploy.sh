@@ -2238,6 +2238,12 @@ status_devops() {
 
     echo "=== GitOps ==="
     kubectl get applicationset,application -n argocd 2>/dev/null || echo "  ArgoCD not installed"
+    echo ""
+
+    # Pinned versus installed. The bootstrap half of the platform is only ever
+    # applied by this script, so a merged chart bump sits in git doing nothing
+    # until someone runs it — which nothing else here would ever say out loud.
+    "${SCRIPT_DIR}/check-chart-drift.sh" || true
 }
 
 print_summary() {

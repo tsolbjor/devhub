@@ -26,15 +26,3 @@ gitops:
   repoUrl: https://git.example.com/devhub/devhub.git
   targetRevision: HEAD
 
-# Service subdomains (relative to domain)
-services:
-  keycloak: keycloak
-  vault: vault
-  git: git          # Forgejo: repositories, packages and the container registry
-  ci: ci            # Woodpecker
-  argocd: argocd
-  grafana: grafana
-  prometheus: prometheus
-  alertmanager: alertmanager
-  loki: loki
-  headlamp: headlamp

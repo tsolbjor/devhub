@@ -111,6 +111,7 @@ source <(./devhub completion)     # bash completion
                                              #   --no-mirror         skip the mirror
 ./devhub register --env <workload> [--platform-env <env>]
 ./devhub status --env <env>
+./devhub drift --env <env>                   # chart pins vs installed, and who applies a bump
 eval "$(./devhub kubeconfig --env <env>)"
 ```
 
@@ -218,7 +219,7 @@ Three files, one owner each:
 
 | File | Owner | Contents |
 |------|-------|----------|
-| `k8s/overlays/<env>/config.yaml` | humans, committed | sample/fallback: TLS mode, `dataServices.type`, service subdomains — and the defaults for everything below |
+| `k8s/overlays/<env>/config.yaml` | humans, committed | sample/fallback: TLS mode, `dataServices.type` — and the defaults for everything below. Service hostnames are **not** here: they are declared once, in `base/devops/gateway.yaml` and `httproutes.yaml` (a `services:` map lived here for a while, read by nothing, and had drifted) |
 | `_setup/<env>/config.yaml` | `setup-env.sh`, gitignored | the interview's answers: domain, `acmeEmail`, `gitops.repoUrl`, workload `platformVaultUrl`/`platformLokiUrl` |
 | `_setup/<env>/*.env` | `sync-tofu-outputs.sh`, gitignored | everything tofu knows |
 
@@ -442,6 +443,7 @@ devhub/
 - Scripts never edit committed files — no exceptions; generated output (including `setup-env.sh`'s answers file `config.yaml`) goes to `_setup/<env>/` at the repo root (gitignored, mode 600/700). `./devhub reset --env <env>` deletes the regenerable ones to start over; `vault-init-keys.json` and `manual-secrets.env` survive unless `--force` (see `_setup/README.md`)
 - Every script calls `use_env_kubeconfig` + `require_cluster_match` before touching a cluster
 - Rendered Helm values go to a per-run `mktemp -d` directory, not fixed `/tmp` paths
+- Chart pins are cross-checked: `validate-overlays.sh` fails if a chart pinned in `platform-appset.yaml` has no annotated `CHART_*` constant with a matching `depName`, or if the two versions disagree — Renovate groups them into one PR, but only for pins its regexes still match
 - Helm chart pins live in two places: the deploy scripts (`CHART_X="1.2.3" # renovate: helm depName=<chart> registryUrl=<url>`) and `platform-appset.yaml`. `validate-overlays.sh` derives its coordinates from the deploy scripts rather than keeping a third copy, and Renovate's `groupName: helm chart {{depName}}` lands both pins of a chart in one PR — so `depName` must equal the appset's `chart:` value. The two OCI charts (forgejo, gateway-helm) have no `index.yaml`, so they use the docker datasource instead
 - `.terraform.lock.hcl` **is** committed; `backend.hcl` and `*.tfvars` are not — in *this* repo. A generated environment repo commits them (see Lifecycle)
 - Adding a `${VAR}` to a values file means adding it to `TEMPLATE_VARS` too, or `validate-overlays.sh` fails

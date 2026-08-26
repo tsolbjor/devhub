@@ -10,9 +10,13 @@ if (!DOMAIN) {
   throw new Error('DEVHUB_DOMAIN is not set — run this through k8s/scripts/validate-e2e.sh');
 }
 
-// Subdomains match k8s/overlays/<env>/config.yaml services: and the HTTPRoutes
-// in devops/httproutes.yaml. Keep the two in step — a service that moves needs
+// Subdomains match the HTTPRoutes in k8s/base/devops/httproutes.yaml, which is
+// the only place they are actually declared — a service that moves needs
 // changing in both places or this suite reports it as down.
+//
+// config.yaml used to carry a `services:` map as well. Nothing read it, and it
+// had drifted exactly as an unread copy does: no home or portal, and an
+// alertmanager entry with no listener and no route anywhere. It is gone.
 const host = (sub) => `https://${sub}.${DOMAIN}`;
 
 const services = {

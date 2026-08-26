@@ -291,6 +291,14 @@ cmd_secrets()  { check_env "$ENV_ARG"; exec "${SCRIPTS}/deploy.sh" --env "$ENV_A
 cmd_gitops()   { check_env "$ENV_ARG"; exec "${SCRIPTS}/deploy.sh" --env "$ENV_ARG" gitops deploy; }
 cmd_dbusers()  { check_env "$ENV_ARG"; exec "${SCRIPTS}/deploy.sh" --env "$ENV_ARG" db-users deploy; }
 
+# Chart pins versus what is installed. Its other mode (--changed-since <ref>)
+# is for CI in a published environment repository and needs no cluster, so it is
+# reachable by running the script directly rather than through here.
+cmd_drift() {
+    check_env "$ENV_ARG"
+    exec "${SCRIPTS}/check-chart-drift.sh" --env "$ENV_ARG" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+}
+
 cmd_status() {
     check_env "$ENV_ARG"
     if is_workload "$ENV_ARG"; then
@@ -493,8 +501,8 @@ _devhub() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     commands="quickstart setup infra sync deploy bootstrap register vault keycloak
-              ca cluster secrets gitops gitops-repo db-users status validate kubeconfig
-              envs reset doctor completion help preflight"
+              ca cluster secrets gitops gitops-repo db-users status drift validate
+              kubeconfig envs reset doctor completion help preflight"
     envs="local upcloud-dev upcloud-prod azure-dev azure-prod gcp-dev gcp-prod
           aws-dev aws-prod upcloud-workload azure-workload gcp-workload aws-workload"
 
@@ -568,7 +576,10 @@ Identity, secrets, GitOps
   db-users --env <env>            create managed-PostgreSQL users (once per database)
 
 Inspection
-  status --env <env>              pods, Vault seal state, backups, GitOps state
+  status --env <env>              pods, Vault seal state, backups, GitOps state,
+                                  chart pins versus what is installed
+  drift --env <env>               just the chart pins: pinned, installed, and who
+                                  applies a bump (ArgoCD, or a deploy.sh run)
   envs                            what state every environment is in
   reset --env <env> [--force]     delete _setup/<env>/ (generated state) and start
                                   over; keeps Vault keys/manual secrets unless --force
@@ -640,6 +651,7 @@ case "$COMMAND" in
     gitops-repo)    cmd_gitops_repo ;;
     db-users)       cmd_dbusers ;;
     status)         cmd_status ;;
+    drift)          cmd_drift ;;
     validate)       cmd_validate ;;
     kubeconfig)     cmd_kubeconfig ;;
     envs)           cmd_envs ;;

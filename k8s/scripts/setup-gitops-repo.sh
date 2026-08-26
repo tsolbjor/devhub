@@ -634,7 +634,7 @@ write_env_ci() {
 # single-environment repo has nowhere to rehearse, which makes the pull request
 # the only gate there is.
 #
-# Activate the repository in Woodpecker once (https://ci.\${DOMAIN} → add
+# Activate the repository in Woodpecker once (https://ci.${DOMAIN} → add
 # repository) or nothing here ever runs. Consider requiring the check on the
 # default branch too, so a Renovate PR cannot merge red.
 #
@@ -684,9 +684,33 @@ steps:
       - helm repo add jameswynn https://jameswynn.github.io/helm-charts
       - helm repo update
       - bash k8s/scripts/validate-overlays.sh --helm ${ENV}
+
+  # A merged bump to platform-appset.yaml applies itself: platform-config
+  # reconciles the ApplicationSet. A bump to a chart deploy.sh installs — Envoy
+  # Gateway, Keycloak, Vault, Forgejo, ArgoCD — does not, because ArgoCD does not
+  # manage what installed it. That distinction is invisible in the diff, so this
+  # step reads it off platform-appset.yaml and prints the commands the merge will
+  # owe. Informational by design: add --strict to fail the pipeline instead.
+  - name: pending-restart
+    image: alpine:3.21
+    failure: ignore
+    commands:
+      - apk add --no-cache bash git
+      # The comparison point: the target branch for a pull request, the previous
+      # commit for a push. A shallow clone may hold neither, and the script says
+      # so rather than reporting nothing changed.
+      - git fetch --unshallow 2>/dev/null || true
+      - |
+        base="\${CI_COMMIT_TARGET_BRANCH:-}"
+        if [ -n "\$base" ] && git rev-parse --verify --quiet "origin/\$base" >/dev/null; then
+          ref="origin/\$base"
+        else
+          ref="\${CI_PREV_COMMIT_SHA:-HEAD~1}"
+        fi
+        bash k8s/scripts/check-chart-drift.sh --changed-since "\$ref"
 EOF
 
-    log_info "Generated .woodpecker.yml (validate-overlays on push and pull_request)"
+    log_info "Generated .woodpecker.yml (validation + pending-restart check on push and pull_request)"
 }
 
 # The environment repo's .gitignore is not this repository's. Two entries are
@@ -761,6 +785,13 @@ EOF
 }
 
 write_env_readme() {
+    # <org>/<repo> as Renovate sees it — the add-on's autodiscoverFilter is
+    # devhub/*, so whether it covers this repository depends on the org.
+    local repo_path
+    repo_path="${GITOPS_REPO_URL#*://}"
+    repo_path="${repo_path#*/}"
+    repo_path="${repo_path%.git}"
+
     cat > "${1}/README.md" <<EOF
 # ${ENV}
 
@@ -813,14 +844,27 @@ cd k8s/e2e && npm ci                     # once
 ## Chart updates
 
 \`renovate.json\` ships with this repository so chart pins keep moving after the
-link to devhub was cut. Point Renovate at this repository, or bump the pins by
+link to devhub was cut. It does nothing until something runs Renovate, and the
+platform already ships one: enable the **renovate add-on** from the portal
+(https://portal.${DOMAIN} → Add-ons). It autodiscovers \`devhub/*\` in this
+Forgejo, and this repository is \`${repo_path}\` — so the add-on that opens
+dependency pull requests for application repositories opens them for the
+platform itself, with no extra configuration. If this repository is not in the
+\`devhub\` organisation, add its org to \`autodiscoverFilter\` in the add-on's
+\`k8s/renovate-config.yaml\`.
+
+Failing that, point an external Renovate at this repository, or bump the pins by
 hand in \`k8s/scripts/deploy.sh\` and \`k8s/argocd/platform-appset.yaml\`.
 
 A bump in \`platform-appset.yaml\` takes effect because of the generated
 \`k8s/argocd/apps/platform-config.yaml\` Application: it reconciles the
 ApplicationSet and the AppProjects from this repository, so merging is the whole
-procedure. Bumps in \`k8s/scripts/deploy.sh\` cover the bootstrap components and
-still need \`./deploy.sh --env ${ENV} <component>\` to be run.
+procedure. Bumps in \`k8s/scripts/deploy.sh\` cover the bootstrap components
+(Envoy Gateway, Keycloak, Vault, Forgejo, ArgoCD) and still need
+\`./deploy.sh --env ${ENV} <component>\` to be run — ArgoCD does not manage what
+installed it. CI says so on the merge: when a commit changes one of those pins,
+the \`pending-restart\` step lists the exact commands. \`./deploy.sh --env ${ENV}
+all status\` shows pinned against installed for every release at any time.
 
 Bringing later devhub improvements in is a merge, not an upgrade — the recipe is
 in \`k8s/docs/OPERATIONS.md\` ("Keeping the platform up to date").
